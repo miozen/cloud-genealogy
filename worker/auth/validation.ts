@@ -15,6 +15,13 @@ export const registrationInput = z.object({
 
 export const loginInput = z.object({ username, password });
 
+export const bootstrapInput = registrationInput.pick({ username: true, password: true, genealogyName: true });
+
+export const personAnchorInput = z.object({
+  displayName: genealogyName,
+  visibility: z.enum(["PUBLIC", "MEMBER", "ADMIN"]).default("MEMBER"),
+});
+
 export const approvalInput = z.object({
   personId: z.string().uuid(),
   role: z.enum(["member", "editor", "admin"]).default("member"),

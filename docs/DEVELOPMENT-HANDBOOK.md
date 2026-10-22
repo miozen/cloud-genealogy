@@ -157,13 +157,10 @@ git push origin v0.1.0
 - GitHub Actions 仅使用最小权限、可轮换的 Cloudflare Token；Token 只存 GitHub Secrets。
 - 所有远程迁移、Secrets 写入、资源创建与部署都必须先通过 review，且生产操作须有明确授权。
 
-## 6. 免费优先的认证门槛
+## 6. 认证与首个管理员初始化
 
-已确认优先采用 Workers 原生 PBKDF2，但这不是“已验证可部署”的结论。实现前必须满足：
-
-1. 密码派生只能使用 Workers 原生 Web Crypto PBKDF2，不引入纯 JavaScript 哈希或未审计的降级实现。
-2. 在独立 preview Worker 上测量成功与失败登录的 CPU、延迟和限流行为；测试不能使用真实族人密码。
-3. 若安全参数在 Workers Free 的 10 ms CPU 上限下不能稳定运行，停止该路径，不自动升级为付费套餐。
-4. 届时提交备选认证方案（例如由管理员预置的安全访问层）及其隐私、可用性影响，等待项目负责人确认。
-
-在该门槛通过前，认证 API 保持默认拒绝，不能创建真实管理员账号或发布登录功能。
+- 已确认采用论坛式用户名密码注册审核。密码固定为 Workers 原生 PBKDF2-HMAC-SHA-256、100,000 次迭代、每账号随机 Salt 和版本化哈希记录；这是个人站点接受的运行时折中，不宣称符合 OWASP 当前推荐强度。
+- preview 已实际验证该参数可完成注册；不得改为明文、更低工作因子、Passkey、第三方认证或 Cloudflare Access。
+- 首个管理员只能经 `POST /api/setup/bootstrap` 初始化：请求须携带 `x-bootstrap-secret`，环境须存在 `BOOTSTRAP_SECRET`，且数据库中没有活跃 `admin`。该操作同时创建管理员、其人物锚点、`member`/`admin` 角色和审计记录。
+- Bootstrap Secret 仅用于受控初始化，成功后立即通过 `wrangler secret delete BOOTSTRAP_SECRET --env preview` 删除；不得提交、记录或复用。生产初始化仍须获得单独明确授权。
+- 后续账号一律走注册待审流程；管理员必须人工选择人物锚点，不能按姓名自动关联。

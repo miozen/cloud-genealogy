@@ -8,7 +8,9 @@ import { createLoginRateLimitKey } from "./auth/rate-limit";
 import { CSRF_COOKIE_NAME, SESSION_COOKIE_NAME } from "./auth/session";
 import {
   approvalInput,
+  bootstrapInput,
   loginInput,
+  personAnchorInput,
   registrationInput,
   rejectionInput,
   resetPasswordInput,
@@ -38,6 +40,12 @@ interface PendingAccountRow {
   created_at: string;
 }
 
+interface PersonAnchorRow {
+  id: string;
+  display_name: string;
+  visibility: "PUBLIC" | "MEMBER" | "ADMIN";
+}
+
 function now(): string {
   return new Date().toISOString();
 }
@@ -54,6 +62,13 @@ function cookieOptions(context: { env: AppEnv["Bindings"] }) {
 
 function clientRateIdentifier(context: { req: { header(name: string): string | undefined } }, username: string): string {
   return `${username}|${context.req.header("cf-connecting-ip") ?? "local"}`;
+}
+
+function secretsMatch(actual: string | undefined, expected: string | undefined): boolean {
+  if (!actual || !expected || actual.length !== expected.length) return false;
+  let difference = 0;
+  for (let index = 0; index < actual.length; index += 1) difference |= actual.charCodeAt(index) ^ expected.charCodeAt(index);
+  return difference === 0;
 }
 
 async function writeAudit(
@@ -96,6 +111,63 @@ export function createApp() {
         roles: auth.roles,
       },
     });
+  });
+
+  app.post("/api/setup/bootstrap", async (context) => {
+    if (!secretsMatch(context.req.header("x-bootstrap-secret"), context.env.BOOTSTRAP_SECRET)) {
+      return context.json({ code: "not_found" }, 404);
+    }
+    const parsed = bootstrapInput.safeParse(await context.req.json().catch(() => null));
+    if (!parsed.success) return context.json({ code: "validation_failed", message: validationMessage(parsed) }, 400);
+
+    const existingAdmin = await context.env.DB
+      .prepare(
+        `SELECT 1 FROM account
+         INNER JOIN account_role ON account_role.account_id = account.id
+         INNER JOIN role ON role.id = account_role.role_id
+         WHERE account.status = 'active' AND role.name = 'admin' LIMIT 1`,
+      )
+      .first();
+    if (existingAdmin) return context.json({ code: "bootstrap_unavailable" }, 409);
+
+    const input = parsed.data;
+    const accountId = crypto.randomUUID();
+    const personId = crypto.randomUUID();
+    const timestamp = now();
+    const passwordHash = await hashPassword(input.password);
+    try {
+      await context.env.DB.batch([
+        context.env.DB
+          .prepare(
+            `INSERT INTO account (id, username, display_name, password_scheme, password_hash, status, reviewed_at, version, created_at, updated_at)
+             VALUES (?, ?, ?, ?, ?, 'active', ?, 1, ?, ?)`,
+          )
+          .bind(accountId, input.username, input.genealogyName, "pbkdf2-sha256", passwordHash, timestamp, timestamp, timestamp),
+        context.env.DB
+          .prepare("INSERT INTO person (id, display_name, visibility, created_at, updated_at) VALUES (?, ?, 'MEMBER', ?, ?)")
+          .bind(personId, input.genealogyName, timestamp, timestamp),
+        context.env.DB
+          .prepare("INSERT INTO account_role (account_id, role_id, granted_at, granted_by_account_id) VALUES (?, 'role-member', ?, ?)")
+          .bind(accountId, timestamp, accountId),
+        context.env.DB
+          .prepare("INSERT INTO account_role (account_id, role_id, granted_at, granted_by_account_id) VALUES (?, 'role-admin', ?, ?)")
+          .bind(accountId, timestamp, accountId),
+        context.env.DB
+          .prepare("INSERT INTO account_person_link (account_id, person_id, linked_at, linked_by_account_id) VALUES (?, ?, ?, ?)")
+          .bind(accountId, personId, timestamp, accountId),
+        context.env.DB
+          .prepare(
+            "INSERT INTO audit_log (id, actor_account_id, action, object_type, object_id, metadata_json, created_at) VALUES (?, ?, ?, ?, ?, ?, ?)",
+          )
+          .bind(crypto.randomUUID(), accountId, "system.bootstrap_admin", "account", accountId, JSON.stringify({ personId }), timestamp),
+      ]);
+    } catch (error) {
+      if (error instanceof Error && /unique/i.test(error.message)) {
+        return context.json({ code: "username_unavailable", message: "该用户名不可用。" }, 409);
+      }
+      throw error;
+    }
+    return context.json({ status: "bootstrapped" }, 201);
   });
 
   app.post("/api/auth/register", async (context) => {
@@ -196,6 +268,39 @@ export function createApp() {
       )
       .all<PendingAccountRow>();
     return context.json({ accounts: rows.results });
+  });
+
+  app.get("/api/admin/persons", requireAuthentication, async (context) => {
+    const auth = context.get("auth")!;
+    if (!hasPermission(auth.roles, "system.manage")) return context.json({ code: "forbidden" }, 403);
+    const query = context.req.query("query")?.trim() ?? "";
+    const rows = await context.env.DB
+      .prepare(
+        `SELECT id, display_name, visibility FROM person
+         WHERE display_name LIKE ? ESCAPE '\\'
+         ORDER BY display_name ASC LIMIT 30`,
+      )
+      .bind(`%${query.replaceAll("\\", "\\\\").replaceAll("%", "\\%").replaceAll("_", "\\_")}%`)
+      .all<PersonAnchorRow>();
+    return context.json({ persons: rows.results });
+  });
+
+  app.post("/api/admin/persons", requireAuthentication, async (context) => {
+    const auth = context.get("auth")!;
+    if (!hasPermission(auth.roles, "system.manage")) return context.json({ code: "forbidden" }, 403);
+    const parsed = personAnchorInput.safeParse(await context.req.json().catch(() => null));
+    if (!parsed.success) return context.json({ code: "validation_failed", message: validationMessage(parsed) }, 400);
+    const id = crypto.randomUUID();
+    const timestamp = now();
+    await context.env.DB.batch([
+      context.env.DB
+        .prepare("INSERT INTO person (id, display_name, visibility, created_at, updated_at) VALUES (?, ?, ?, ?, ?)")
+        .bind(id, parsed.data.displayName, parsed.data.visibility, timestamp, timestamp),
+      context.env.DB
+        .prepare("INSERT INTO audit_log (id, actor_account_id, action, object_type, object_id, metadata_json, created_at) VALUES (?, ?, ?, ?, ?, ?, ?)")
+        .bind(crypto.randomUUID(), auth.accountId, "person.anchor_created", "person", id, JSON.stringify({ visibility: parsed.data.visibility }), timestamp),
+    ]);
+    return context.json({ person: { id, displayName: parsed.data.displayName, visibility: parsed.data.visibility } }, 201);
   });
 
   app.post("/api/admin/accounts/:accountId/approve", requireAuthentication, async (context) => {

@@ -1,11 +1,14 @@
 import { Hono } from "hono";
+import { csrfProtection, requireAuthentication, sessionMiddleware } from "./middleware/authentication";
 import { securityHeaders } from "./middleware/security";
-import type { Env } from "./types";
+import type { AppEnv } from "./types";
 
 export function createApp() {
-  const app = new Hono<{ Bindings: Env }>();
+  const app = new Hono<AppEnv>();
 
   app.use("/api/*", securityHeaders);
+  app.use("/api/*", sessionMiddleware);
+  app.use("/api/*", csrfProtection);
 
   app.get("/api/health", (context) =>
     context.json({
@@ -14,15 +17,16 @@ export function createApp() {
     }),
   );
 
-  app.get("/api/me", (context) =>
-    context.json(
-      {
-        code: "authentication_required",
-        message: "请先登录。",
+  app.get("/api/me", requireAuthentication, (context) => {
+    const auth = context.get("auth")!;
+    return context.json({
+      account: {
+        id: auth.accountId,
+        displayName: auth.displayName,
+        roles: auth.roles,
       },
-      401,
-    ),
-  );
+    });
+  });
 
   app.notFound((context) => context.json({ code: "not_found" }, 404));
 

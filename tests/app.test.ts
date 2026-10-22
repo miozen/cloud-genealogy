@@ -15,4 +15,10 @@ describe("worker app", () => {
 
     expect(response.status).toBe(401);
   });
+
+  it("rejects an unsafe API request without an authenticated CSRF context", async () => {
+    const response = await createApp().request("https://example.test/api/noop", { method: "POST" });
+
+    expect(response.status).toBe(401);
+  });
 });

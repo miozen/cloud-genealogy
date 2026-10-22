@@ -11,17 +11,19 @@
 - 增加权限判定及 Worker 路由单元测试。
 - 实现 Workers 原生 PBKDF2-HMAC-SHA-256 密码记录核心：600,000 次迭代、16 字节随机盐、版本化编码、常量时间比对及格式校验。尚未接入登录端点，也未创建任何账号。
 - 实现不透明 session/CSRF token 生成及仅存哈希的校验工具；实现基于 HMAC 派生的登录限流键和 5 次/15 分钟的纯规则，并新增本地 D1 限流状态表。
+- 实现有效 session 读取中间件、默认拒绝未认证访问，以及对全部非安全 API 方法生效的 CSRF 中间件。会话读取仅接受未撤销、未过期且账号仍启用的记录。
 
 ## 实际验证结果
 
 | 命令 / 检查 | 结果 |
 |---|---|
 | `npm run lint` | 通过：ESLint 无 warning。 |
-| `npm run check` | 通过：TypeScript 类型检查和 10 个 Vitest 测试。 |
+| `npm run check` | 通过：TypeScript 类型检查和 13 个 Vitest 测试。 |
 | `npm run build` | 通过：Vite 生产构建。 |
 | 本地 `wrangler dev --local` | 通过：`GET /api/health` 返回 200；未认证 `GET /api/me` 返回 401。 |
 | `wrangler d1 migrations apply DB --local` | 通过：`0001_identity.sql` 的 11 条命令执行成功，关键表可查询。 |
 | 本地 D1 限流迁移 | 通过：`0002_auth_rate_limit.sql` 的 3 条命令执行成功，`auth_login_rate_limit` 表可查询。 |
+| 本地 Worker 会话集成 | 通过：临时账号/会话下 `GET /api/me` 返回 200；无会话返回 401；测试记录完成清理并经查询确认。 |
 | 本地 PBKDF2 基准 | 600,000 次迭代耗时 214.4 ms；仅为本机墙钟时间，不可当作 Workers CPU 配额结论。 |
 
 ## 未完成与风险

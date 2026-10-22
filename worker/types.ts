@@ -5,6 +5,23 @@ export interface Env {
   MEDIA: R2Bucket;
 }
 
+export interface AuthContext {
+  accountId: string;
+  email: string;
+  displayName: string;
+  csrfSecretHash: string;
+  roles: RoleName[];
+}
+
+export interface AppVariables {
+  auth: AuthContext | null;
+}
+
+export interface AppEnv {
+  Bindings: Env;
+  Variables: AppVariables;
+}
+
 export type RoleName = "administrator" | "reviewer" | "branch_editor" | "member" | "guest";
 
 export type PermissionName =

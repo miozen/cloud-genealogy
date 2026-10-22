@@ -13,6 +13,7 @@
 - 实现不透明 session/CSRF token 生成及仅存哈希的校验工具；实现基于 HMAC 派生的登录限流键和 5 次/15 分钟的纯规则，并新增本地 D1 限流状态表。
 - 实现有效 session 读取中间件、默认拒绝未认证访问，以及对全部非安全 API 方法生效的 CSRF 中间件。会话读取仅接受未撤销、未过期且账号仍启用的记录。
 - 已创建隔离的 preview D1、私有 R2 和 `cloud-genealogy-preview` Worker；仅部署 `dev` 用于运行时验证，未创建或访问 production 资源。
+- 已确认认证替代方向为 Cloudflare Access 管理后台保护；尝试为 preview Worker 创建仅允许管理员邮箱、会话 8 小时的 Access 应用时，Cloudflare API 返回 `auth.forbidden`。当前 Wrangler OAuth 会话缺少 Zero Trust Access Applications 写权限，尚未创建任何 Access 策略。
 
 ## 实际验证结果
 
@@ -32,11 +33,12 @@
 
 - 未实现正式密码登录、会话创建/撤销和持久化登录限流。Workers Web Crypto 的 PBKDF2 迭代上限为 100,000，故已确认的 600,000 次参数无法在目标运行时执行；不得自行降级安全参数或自动升级付费套餐。认证路线必须改由项目负责人确认后再实施。
 - 已创建 preview 资源并完成最小部署验证；production 的 D1、R2、Secrets 与 Worker 均未创建或部署。
+- Cloudflare Access 方案需要先由拥有 Zero Trust Access Applications 写权限的管理员初始化/授权；在此之前，preview Worker 不可作为受 Access 保护的管理后台验证环境。
 - 角色/权限初始数据、管理员创建流程和真实访问范围将在认证路径确认后实现。
 - 当前工作区的 `.git` 是只读环境挂载的空占位目录，无法直接初始化为 Git 仓库。已通过 SSH 443 完成首个提交 `d36e67c` 的推送并建立远程 `main`、`dev`；该操作使用临时 Git 元数据目录完成。后续接力电脑应正常克隆远程仓库，不受此特殊工作区限制。
 
 ## 下一步
 
-1. 提交不依赖 Workers PBKDF2 600,000 次的认证替代方案、隐私与运维影响，等待项目负责人确认；在确认前不得实现真实密码登录或创建真实管理员账号。
-2. 确认后完成相应的登录、会话、CSRF、限流及集成测试；仅在 `dev` 验证稳定后才合入 `main`。
+1. 由拥有 Zero Trust Access Applications 写权限的管理员为 `cloud-genealogy-preview` 创建 Access 应用：保护 preview Worker，Allow 仅 `miozen@proton.me`，会话 8 小时；创建后再验证未登录拒绝与管理员登录放行。
+2. 生产域名和管理路由确定后，仅保护 `/admin/*` 及对应管理 API；不得将公开门户整体置于 Access 后。
 3. 在 GitHub 对 `main`、`dev` 启用分支保护、PR、必需 CI 检查和禁止 force push；后续开发从 `dev` 创建短分支。

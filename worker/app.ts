@@ -209,31 +209,50 @@ export function createApp() {
     if (!person) return context.json({ code: "person_not_found", message: "请选择已存在的族谱人物。" }, 404);
 
     const timestamp = now();
-    const approval = await context.env.DB
-      .prepare(
-        `UPDATE account SET status = 'active', reviewed_at = ?, reviewed_by_account_id = ?, version = version + 1, updated_at = ?
-         WHERE id = ? AND status = 'pending' AND version = ?`,
-      )
-      .bind(timestamp, auth.accountId, timestamp, accountId, input.version)
-      .run();
-    if (approval.meta.changes !== 1) return context.json({ code: "review_conflict", message: "账号状态已变化，请刷新后重试。" }, 409);
-
     const roleIds = ["role-member", ...(input.role === "member" ? [] : [`role-${input.role}`])];
-    await context.env.DB.batch([
-      ...roleIds.map((roleId) =>
-        context.env.DB.prepare(
-          "INSERT INTO account_role (account_id, role_id, granted_at, granted_by_account_id) VALUES (?, ?, ?, ?) ON CONFLICT(account_id, role_id) DO NOTHING",
-        ).bind(accountId, roleId, timestamp, auth.accountId),
-      ),
-      context.env.DB
-        .prepare("INSERT INTO account_person_link (account_id, person_id, linked_at, linked_by_account_id) VALUES (?, ?, ?, ?)")
-        .bind(accountId, input.personId, timestamp, auth.accountId),
+    const approvedAccount = "id = ? AND status = 'active' AND reviewed_at = ? AND reviewed_by_account_id = ? AND version = ?";
+    const results = await context.env.DB.batch([
       context.env.DB
         .prepare(
-          "INSERT INTO audit_log (id, actor_account_id, action, object_type, object_id, metadata_json, created_at) VALUES (?, ?, ?, ?, ?, ?, ?)",
+          `UPDATE account SET status = 'active', reviewed_at = ?, reviewed_by_account_id = ?, version = version + 1, updated_at = ?
+           WHERE id = ? AND status = 'pending' AND version = ?`,
         )
-        .bind(crypto.randomUUID(), auth.accountId, "account.approved", "account", accountId, JSON.stringify({ personId: input.personId, role: input.role }), timestamp),
+        .bind(timestamp, auth.accountId, timestamp, accountId, input.version),
+      ...roleIds.map((roleId) =>
+        context.env.DB.prepare(
+          `INSERT INTO account_role (account_id, role_id, granted_at, granted_by_account_id)
+           SELECT ?, ?, ?, ? WHERE EXISTS (SELECT 1 FROM account WHERE ${approvedAccount})
+           ON CONFLICT(account_id, role_id) DO NOTHING`,
+        ).bind(accountId, roleId, timestamp, auth.accountId, accountId, timestamp, auth.accountId, input.version + 1),
+      ),
+      context.env.DB
+        .prepare(
+          `INSERT INTO account_person_link (account_id, person_id, linked_at, linked_by_account_id)
+           SELECT ?, ?, ?, ? WHERE EXISTS (SELECT 1 FROM account WHERE ${approvedAccount})`,
+        )
+        .bind(accountId, input.personId, timestamp, auth.accountId, accountId, timestamp, auth.accountId, input.version + 1),
+      context.env.DB
+        .prepare(
+          `INSERT INTO audit_log (id, actor_account_id, action, object_type, object_id, metadata_json, created_at)
+           SELECT ?, ?, ?, ?, ?, ?, ? WHERE EXISTS (SELECT 1 FROM account WHERE ${approvedAccount})`,
+        )
+        .bind(
+          crypto.randomUUID(),
+          auth.accountId,
+          "account.approved",
+          "account",
+          accountId,
+          JSON.stringify({ personId: input.personId, role: input.role }),
+          timestamp,
+          accountId,
+          timestamp,
+          auth.accountId,
+          input.version + 1,
+        ),
     ]);
+    if (results[0]?.meta.changes !== 1) {
+      return context.json({ code: "review_conflict", message: "账号状态已变化，请刷新后重试。" }, 409);
+    }
     return context.json({ status: "active" });
   });
 

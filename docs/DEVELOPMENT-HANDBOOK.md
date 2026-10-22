@@ -17,7 +17,7 @@
 - D1、R2、媒体和测试数据默认使用 Wrangler local bindings。除非明确授权，不得操作 preview/production 的数据库、R2、Secrets 或部署。
 - 只有本地验证通过且确实需要验证 Cloudflare 平台行为时，才申请 preview 环境授权；production 操作始终需要单独明确授权。
 - 交付报告必须区分“已执行且通过”“已执行但失败”“未执行及原因”；未执行项绝不写为通过。
-- 当前已有本地命令：`npm run check`（类型检查和单元测试）、`npm run build`（生产构建）、`npm run dev:worker`（本地 Worker）、`wrangler d1 ... --local`（本地迁移/查询）。当前尚无代码规范检查脚本；在单独引入并验证前，报告中必须将 lint 标为“未配置、未执行”。
+- 当前已有本地命令：`npm run lint`（ESLint 代码规范检查）、`npm run check`（类型检查和单元测试）、`npm run build`（生产构建）、`npm run dev:worker`（本地 Worker）、`wrangler d1 ... --local`（本地迁移/查询）。交付前至少运行与改动相关的 lint、check 和 build，并如实记录结果。
 
 ## 1. 工作站前置条件
 

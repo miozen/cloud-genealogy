@@ -15,7 +15,7 @@
 - 新增论坛式注册、登录、退出、待审核账号列表、管理员批准/拒绝与管理员重置密码 API。注册账号默认为 `pending`；批准时必须选择已存在的稳定人物 ID，默认授予族人角色，编辑员/管理员为额外授权。重置密码会撤销目标账号的现有会话。
 - 新增最小 `person` 身份锚点、`account_person_link` 和审计表；未实现人物事实、关系或谱系业务。注册填写的房支和祖辈名称仅是审核线索，不能自动建立人物身份或亲属关系。
 - 已创建隔离的 preview D1、私有 R2 和 `cloud-genealogy-preview` Worker；仅部署 `dev` 用于运行时验证，未创建或访问 production 资源。
-- preview 资源仅用于 `dev` 验证；`0003_forum_auth.sql` 已应用到 preview D1，Worker 已部署版本 `29221689-de90-4fc7-b4ae-3700c6c9765d`。未创建或访问 production 资源。
+- preview 资源仅用于 `dev` 验证；`0003_forum_auth.sql` 已应用到 preview D1，Worker 已部署版本 `5277339b-1dfe-40a3-aca6-78d18f1c29ba`，部署后健康检查返回 200。未创建或访问 production 资源。
 
 ## 实际验证结果
 

@@ -1,5 +1,6 @@
 export interface Env {
   APP_ENV: "development" | "preview" | "production";
+  AUTH_RATE_LIMIT_SECRET: string;
   DB: D1Database;
   MEDIA: R2Bucket;
 }

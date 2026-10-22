@@ -16,7 +16,7 @@ describe("password records", () => {
     await expect(verifyPassword("", "not-a-password-record")).resolves.toBe(false);
   });
 
-  it("measures the production PBKDF2 work factor locally", async () => {
+  it("measures the approved Workers-compatible PBKDF2 work factor locally", async () => {
     const startedAt = performance.now();
     const record = await hashPassword("benchmark-only-password");
     const elapsedMs = performance.now() - startedAt;

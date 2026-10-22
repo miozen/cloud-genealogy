@@ -32,7 +32,8 @@ family-genealogy/
 - 数据库查询必须有索引、分页/范围限制，避免 N+1 查询与全表扫描。
 
 ## 5. 登录与安全
-- 管理员采用安全密码哈希、速率限制、短期服务端会话或可撤销签名会话、Secure/HttpOnly/SameSite Cookie；CSRF 防护与登录审计。
+- 采用用户名密码注册审核：账号先处于 `pending`，仅管理员人工关联具体人物、审核并授予角色后可登录受限内容。账号与谱中人物分离，不得按姓名自动确认。
+- 密码使用 Workers 兼容的 PBKDF2-HMAC-SHA-256，100,000 次迭代、每账号随机 Salt、仅保存版本化哈希记录。这是运行时上限下接受的个人站点折中，不等同于 OWASP 当前推荐强度。保留速率限制、短期可撤销会话、Secure/HttpOnly/SameSite Cookie、CSRF 防护与登录审计。
 - R2 私有桶；访问需 Worker 授权或短时签名 URL；上传校验 MIME、大小、扩展名，采用随机对象键。
 - 上传前压缩图片并生成缩略图；限制视频大小/数量，不承诺永久免费无限存储。
 - Secrets 只放 Cloudflare Secrets/GitHub Secrets，禁止入库或日志输出。

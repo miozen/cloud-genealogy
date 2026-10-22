@@ -7,7 +7,8 @@
 - `place`: 地名及历史地名信息。
 - `media_asset`: R2 对象键、文件哈希、MIME、尺寸、大小、隐私。
 - `person_media`: 人物与附件关联。
-- `account`、`person_claim`: 登录身份与人物认领关系；不等同于 `person`。
+- `account`：用户名（唯一）与族谱姓名（可重名）分开保存；注册填写的房支、父辈/祖辈名称仅为待核验线索。账号状态为 `pending`、`active`、`disabled`、`rejected`。
+- `account_person_link`：仅管理员人工审核后建立的账号与具体人物关联；不按姓名自动匹配，不等同于对人物资料的编辑权。
 
 ## 2. 亲属关系与承谱
 - `kinship_relation`: 生父母、养父母、嗣父母等关系，状态、有效期/依据。
@@ -43,7 +44,7 @@
 - `content_post`、`comment`、`feedback`、`album`、`album_item`。
 - `shrine`、`shrine_person`、`shrine_event`。
 - `donation_project`、`donation_record`、`finance_transaction`。
-- `role`、`permission`、`account_scope`、`setting`、`backup_record`。
+- `role`、`permission`、`account_scope`、`setting`、`backup_record`。游客为匿名主体；持久化角色为族人、编辑员、管理员。
 
 ## 6. 建模与迁移注意
 - 以上是逻辑实体清单，不要求一实体一张表；由 Codex 提出可维护的 D1 物理模型和索引方案供确认。

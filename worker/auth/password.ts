@@ -1,11 +1,17 @@
 const encoder = new TextEncoder();
 
 export const PBKDF2_SCHEME = "pbkdf2-sha256";
-export const PBKDF2_ITERATIONS = 600_000;
+/**
+ * Workers Web Crypto currently accepts at most 100,000 PBKDF2 iterations.
+ * This is a documented, project-approved runtime compromise for this small,
+ * personally operated site; it is not represented as OWASP-strength storage.
+ */
+export const PBKDF2_ITERATIONS = 100_000;
 
 const HASH_LENGTH_BITS = 256;
 const SALT_LENGTH_BYTES = 16;
-const MAX_PASSWORD_LENGTH = 1_024;
+const MIN_PASSWORD_LENGTH = 12;
+const MAX_PASSWORD_LENGTH = 128;
 
 interface PasswordRecord {
   iterations: number;
@@ -54,7 +60,7 @@ function parsePasswordRecord(value: string): PasswordRecord | null {
 }
 
 function validatePassword(password: string): void {
-  if (password.length === 0 || password.length > MAX_PASSWORD_LENGTH) {
+  if (password.length < MIN_PASSWORD_LENGTH || password.length > MAX_PASSWORD_LENGTH) {
     throw new Error("Password length is invalid.");
   }
 }
@@ -98,7 +104,7 @@ export async function hashPassword(password: string, iterations = PBKDF2_ITERATI
 }
 
 export async function verifyPassword(password: string, storedRecord: string): Promise<boolean> {
-  if (password.length === 0 || password.length > MAX_PASSWORD_LENGTH) return false;
+  if (password.length < MIN_PASSWORD_LENGTH || password.length > MAX_PASSWORD_LENGTH) return false;
 
   const record = parsePasswordRecord(storedRecord);
   if (!record) return false;

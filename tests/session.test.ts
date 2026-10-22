@@ -12,7 +12,7 @@ function createDatabase(session: Record<string, string> | null) {
               return query.includes("FROM auth_session") ? session : null;
             },
             async all() {
-              return { results: [{ name: "administrator" }] };
+              return { results: [{ name: "admin" }] };
             },
           };
         },
@@ -29,13 +29,13 @@ describe("active sessions and CSRF", () => {
       createDatabase({
         account_id: "account-1",
         csrf_secret_hash: await hashOpaqueToken(csrfToken),
-        email: "admin@example.test",
+        username: "admin",
         display_name: "管理员",
       }),
       token,
     );
 
-    expect(auth).toMatchObject({ accountId: "account-1", roles: ["administrator"] });
+    expect(auth).toMatchObject({ accountId: "account-1", roles: ["admin"] });
     await expect(hasValidCsrfToken("POST", csrfToken, auth!.csrfSecretHash)).resolves.toBe(true);
     await expect(hasValidCsrfToken("POST", "incorrect", auth!.csrfSecretHash)).resolves.toBe(false);
   });

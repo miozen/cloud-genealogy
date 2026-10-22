@@ -7,7 +7,7 @@ export interface Env {
 
 export interface AuthContext {
   accountId: string;
-  email: string;
+  username: string;
   displayName: string;
   csrfSecretHash: string;
   roles: RoleName[];
@@ -22,10 +22,11 @@ export interface AppEnv {
   Variables: AppVariables;
 }
 
-export type RoleName = "administrator" | "reviewer" | "branch_editor" | "member" | "guest";
+export type RoleName = "visitor" | "member" | "editor" | "admin";
 
 export type PermissionName =
   | "system.manage"
   | "lineage.review"
   | "lineage.propose"
-  | "person.read_restricted";
+  | "person.read_member"
+  | "person.read_admin";

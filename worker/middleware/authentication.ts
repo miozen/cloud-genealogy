@@ -35,6 +35,14 @@ export const csrfProtection = createMiddleware<AppEnv>(async (context, next) => 
     return;
   }
 
+  // These endpoints establish authentication and therefore cannot yet carry
+  // an authenticated CSRF secret. They perform their own strict validation
+  // and never act as an already signed-in account.
+  if (context.req.path === "/api/auth/register" || context.req.path === "/api/auth/login") {
+    await next();
+    return;
+  }
+
   const auth = context.get("auth");
   if (!auth) {
     return context.json(

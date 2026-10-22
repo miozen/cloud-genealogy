@@ -2,12 +2,13 @@ import type { AuthContext, RoleName } from "../types";
 import { hashOpaqueToken, matchesOpaqueToken } from "./opaque-token";
 
 export const SESSION_COOKIE_NAME = "cg_session";
+export const CSRF_COOKIE_NAME = "cg_csrf";
 export const CSRF_HEADER_NAME = "x-csrf-token";
 
 interface SessionRow {
   account_id: string;
   csrf_secret_hash: string;
-  email: string;
+  username: string;
   display_name: string;
 }
 
@@ -21,7 +22,7 @@ export async function loadActiveSession(database: D1Database, token: string, now
   const tokenHash = await hashOpaqueToken(token);
   const session = await database
     .prepare(
-      `SELECT session.account_id, session.csrf_secret_hash, account.email, account.display_name
+      `SELECT session.account_id, session.csrf_secret_hash, account.username, account.display_name
        FROM auth_session AS session
        INNER JOIN account ON account.id = session.account_id
        WHERE session.id_hash = ?
@@ -47,7 +48,7 @@ export async function loadActiveSession(database: D1Database, token: string, now
 
   return {
     accountId: session.account_id,
-    email: session.email,
+    username: session.username,
     displayName: session.display_name,
     csrfSecretHash: session.csrf_secret_hash,
     roles: roleResult.results.map((role) => role.name),

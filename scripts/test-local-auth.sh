@@ -267,6 +267,10 @@ expectStatus(supersedingFactClaim, 201);
 const claims = await request(`/api/admin/genealogy-editions/${edition.body.edition.id}/source-claims`, { cookie: adminCookie });
 expectStatus(claims, 200);
 assert.equal(claims.body.factClaims.length, 2);
+const historicalProjection = await request(`/api/admin/genealogy-editions/${edition.body.edition.id}/historical-projection`, { cookie: adminCookie });
+expectStatus(historicalProjection, 200);
+assert.equal(historicalProjection.body.view, "historical");
+assert.equal(historicalProjection.body.relationClaims.length, 1);
 expectStatus(await request(`/api/admin/source-relation-claims/${sourceRelationClaim.body.sourceRelationClaim.id}/retract`, {
   method: "POST", cookie: adminCookie, csrf: adminCsrf,
 }), 200);
@@ -303,6 +307,10 @@ const validPublish = await request(`/api/admin/lineages/${lineageId}/revisions/p
   },
 });
 expectStatus(validPublish, 201);
+const canonicalProjection = await request(`/api/admin/lineages/${lineageId}/projection`, { cookie: adminCookie });
+expectStatus(canonicalProjection, 200);
+assert.equal(canonicalProjection.body.view, "canonical");
+assert.equal(canonicalProjection.body.edges.length, 1);
 const rollback = await request(`/api/admin/lineages/${lineageId}/revisions/rollback`, {
   method: "POST",
   cookie: adminCookie,

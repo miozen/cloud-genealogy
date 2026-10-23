@@ -305,6 +305,30 @@ export function createApp() {
     });
   });
 
+  app.get("/api/admin/lineages/:lineageId/projection", requireAuthentication, async (context) => {
+    const auth = context.get("auth")!;
+    if (!hasPermission(auth.roles, "system.manage")) return context.json({ code: "forbidden" }, 403);
+    const lineageId = context.req.param("lineageId");
+    const pointer = await context.env.DB.prepare("SELECT revision_id, version FROM lineage_published_pointer WHERE lineage_id = ?").bind(lineageId).first<PublishedPointerRow>();
+    if (!pointer) return context.json({ code: "published_revision_not_found" }, 404);
+    const edges = await context.env.DB.prepare(
+      "SELECT parent_person_id, child_person_id, order_key FROM lineage_succession_snapshot WHERE revision_id = ? ORDER BY order_key, id",
+    ).bind(pointer.revision_id).all();
+    return context.json({ view: "canonical", lineageId, revisionId: pointer.revision_id, pointerVersion: pointer.version, edges: edges.results });
+  });
+
+  app.get("/api/admin/genealogy-editions/:editionId/historical-projection", requireAuthentication, async (context) => {
+    const auth = context.get("auth")!;
+    if (!hasPermission(auth.roles, "system.manage")) return context.json({ code: "forbidden" }, 403);
+    const editionId = context.req.param("editionId");
+    const edition = await context.env.DB.prepare("SELECT id FROM genealogy_edition WHERE id = ? AND retired_at IS NULL").bind(editionId).first<{ id: string }>();
+    if (!edition) return context.json({ code: "edition_not_found" }, 404);
+    const claims = await context.env.DB.prepare(
+      "SELECT c.id, c.subject_record_id, c.related_record_id, c.relation_kind, c.raw_text, s.name_text AS subject_name, r.name_text AS related_name FROM source_relation_claim c LEFT JOIN source_person_record s ON s.id = c.subject_record_id LEFT JOIN source_person_record r ON r.id = c.related_record_id WHERE c.edition_id = ? AND c.retracted_at IS NULL ORDER BY c.created_at, c.id",
+    ).bind(editionId).all();
+    return context.json({ view: "historical", editionId, relationClaims: claims.results });
+  });
+
   app.post("/api/admin/lineages/:lineageId/revisions/publish", requireAuthentication, async (context) => {
     const auth = context.get("auth")!;
     if (!hasPermission(auth.roles, "system.manage")) return context.json({ code: "forbidden" }, 403);

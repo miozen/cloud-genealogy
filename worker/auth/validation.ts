@@ -37,6 +37,10 @@ export const publishRevisionInput = successionEdgesInput.extend({
   revisionId: z.string().uuid(),
   basedOnRevisionId: z.string().uuid().optional(),
 });
+export const rollbackRevisionInput = z.object({
+  targetRevisionId: z.string().uuid(),
+  newRevisionId: z.string().uuid(),
+});
 
 export function validationMessage(result: z.ZodSafeParseResult<unknown>): string {
   if (result.success) return "";

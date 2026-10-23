@@ -21,11 +21,13 @@ clean_test_rows() {
     DELETE FROM lineage_published_pointer;
     DELETE FROM lineage_succession_snapshot;
     DELETE FROM canonical_relation_snapshot;
-    DELETE FROM lineage_revision;
     DELETE FROM branch_membership_snapshot;
+    UPDATE lineage_revision SET based_on_revision_id = NULL;
+    DELETE FROM lineage_revision;
     DELETE FROM branch;
     DELETE FROM lineage;
     DELETE FROM audit_log;
+    DELETE FROM auth_login_rate_limit;
     DELETE FROM auth_session;
     DELETE FROM account_person_link;
     DELETE FROM account_role;
@@ -203,6 +205,17 @@ const validPublish = await request(`/api/admin/lineages/${lineageId}/revisions/p
   },
 });
 expectStatus(validPublish, 201);
+const rollback = await request(`/api/admin/lineages/${lineageId}/revisions/rollback`, {
+  method: "POST",
+  cookie: adminCookie,
+  csrf: adminCsrf,
+  body: {
+    targetRevisionId: "33333333-3333-4333-8333-333333333333",
+    newRevisionId: "44444444-4444-4444-8444-444444444444",
+  },
+});
+expectStatus(rollback, 201);
+assert.equal(rollback.body.revisionId, "44444444-4444-4444-8444-444444444444");
 
 const approval = await request(`/api/admin/accounts/${member.id}/approve`, {
   method: "POST",

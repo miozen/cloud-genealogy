@@ -16,10 +16,11 @@ import {
   resetPasswordInput,
   successionEdgesInput,
   publishRevisionInput,
+  rollbackRevisionInput,
   validationMessage,
 } from "./auth/validation";
 import { previewSuccessionRevision } from "./lineage/revision-preview";
-import { publishSuccessionRevision } from "./lineage/revision-publish";
+import { publishSuccessionRevision, rollbackSuccessionRevision } from "./lineage/revision-publish";
 import { csrfProtection, requireAuthentication, sessionMiddleware } from "./middleware/authentication";
 import { securityHeaders } from "./middleware/security";
 import type { AppEnv } from "./types";
@@ -292,6 +293,27 @@ export function createApp() {
     if (!result.published) return context.json({ code: "revision_invalid", issues: result.issues }, 400);
     await writeAudit(context.env.DB, auth.accountId, "lineage.revision_published", "lineage_revision", result.revisionId, { lineageId });
     return context.json(result, 201);
+  });
+
+  app.post("/api/admin/lineages/:lineageId/revisions/rollback", requireAuthentication, async (context) => {
+    const auth = context.get("auth")!;
+    if (!hasPermission(auth.roles, "system.manage")) return context.json({ code: "forbidden" }, 403);
+    const parsed = rollbackRevisionInput.safeParse(await context.req.json().catch(() => null));
+    if (!parsed.success) return context.json({ code: "validation_failed", message: validationMessage(parsed) }, 400);
+    const lineageId = context.req.param("lineageId");
+    try {
+      const result = await rollbackSuccessionRevision(context.env.DB, {
+        lineageId, targetRevisionId: parsed.data.targetRevisionId, newRevisionId: parsed.data.newRevisionId, now: now(),
+      });
+      if (!result.published) return context.json({ code: "revision_invalid", issues: result.issues }, 400);
+      await writeAudit(context.env.DB, auth.accountId, "lineage.revision_rolled_back", "lineage_revision", result.revisionId, { lineageId, targetRevisionId: parsed.data.targetRevisionId });
+      return context.json(result, 201);
+    } catch (error) {
+      if (error instanceof Error && /Rollback target|no published revision/.test(error.message)) {
+        return context.json({ code: "rollback_unavailable" }, 409);
+      }
+      throw error;
+    }
   });
 
   app.get("/api/admin/accounts/pending", requireAuthentication, async (context) => {

@@ -27,6 +27,12 @@ clean_test_rows() {
     DELETE FROM branch;
     DELETE FROM lineage;
     DELETE FROM audit_log;
+    DELETE FROM source_person_link;
+    DELETE FROM source_relation_claim;
+    DELETE FROM source_fact_claim;
+    DELETE FROM source_person_record;
+    DELETE FROM genealogy_edition;
+    DELETE FROM genealogy;
     DELETE FROM auth_login_rate_limit;
     DELETE FROM auth_session;
     DELETE FROM account_person_link;
@@ -174,6 +180,25 @@ const secondPerson = await request("/api/admin/persons", {
   body: { displayName: "本地承谱父", visibility: "MEMBER" },
 });
 expectStatus(secondPerson, 201);
+
+const genealogy = await request("/api/admin/genealogies", {
+  method: "POST", cookie: adminCookie, csrf: adminCsrf, body: { title: "本地测试谱书" },
+});
+expectStatus(genealogy, 201);
+const edition = await request(`/api/admin/genealogies/${genealogy.body.genealogy.id}/editions`, {
+  method: "POST", cookie: adminCookie, csrf: adminCsrf, body: { title: "民国续修本", editionLabel: "测试版" },
+});
+expectStatus(edition, 201);
+const sourceRecord = await request(`/api/admin/genealogy-editions/${edition.body.edition.id}/source-person-records`, {
+  method: "POST", cookie: adminCookie, csrf: adminCsrf,
+  body: { sourceKey: "卷一-001", nameText: "本地人物锚点", rawText: "本地测试原文记载" },
+});
+expectStatus(sourceRecord, 201);
+const sourceLink = await request(`/api/admin/source-person-records/${sourceRecord.body.sourcePersonRecord.id}/links`, {
+  method: "POST", cookie: adminCookie, csrf: adminCsrf, body: { personId: personResult.body.person.id },
+});
+expectStatus(sourceLink, 201);
+assert.equal(sourceLink.body.sourcePersonLink.personId, personResult.body.person.id);
 
 const lineageId = "11111111-1111-4111-8111-111111111111";
 expectStatus(await request(`/api/admin/lineages/${lineageId}/revisions/preview`, {

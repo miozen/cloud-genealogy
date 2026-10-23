@@ -70,6 +70,16 @@ export const sourceRelationClaimInput = z.object({
   relationKind: z.string().trim().min(1, "关系类型不能为空。").max(80, "关系类型最长 80 个字符。"),
   rawText: z.string().trim().min(1, "原文不能为空。").max(10_000, "原文过长。"),
 });
+export const sourceRelationSemanticRuleInput = z.object({
+  relationKind: z.string().trim().min(1, "原始关系词不能为空。").max(80, "原始关系词最长 80 个字符。"),
+  graphKind: z.enum(["parent_to_child", "child_to_parent", "spouse", "non_graph"]),
+  parentKind: z.enum(["biological_parent", "adoptive_parent", "successor_parent"]).optional(),
+}).superRefine((value, context) => {
+  const needsParentKind = value.graphKind === "parent_to_child" || value.graphKind === "child_to_parent";
+  if (needsParentKind !== Boolean(value.parentKind)) {
+    context.addIssue({ code: "custom", message: needsParentKind ? "父子关系必须指定父系类型。" : "非父子关系不能指定父系类型。" });
+  }
+});
 const visibility = z.enum(["PUBLIC", "MEMBER", "ADMIN"]);
 export const personNameInput = z.object({
   nameText: z.string().trim().min(1, "姓名不能为空。").max(80, "姓名最长 80 个字符。"),

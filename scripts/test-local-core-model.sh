@@ -16,6 +16,7 @@ npx wrangler d1 execute DB --local --persist-to "$state_dir" --command "
   DELETE FROM canonical_relation_snapshot;
   DELETE FROM lineage_revision;
   DELETE FROM lineage;
+  DELETE FROM source_relation_semantic_rule;
   DELETE FROM source_person_link;
   DELETE FROM source_relation_claim;
   DELETE FROM source_fact_claim;

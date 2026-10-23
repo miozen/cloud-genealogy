@@ -31,6 +31,7 @@ clean_test_rows() {
     DELETE FROM branch;
     DELETE FROM lineage;
     DELETE FROM audit_log;
+    DELETE FROM source_relation_semantic_rule;
     DELETE FROM source_person_link;
     UPDATE source_relation_claim SET supersedes_claim_id = NULL;
     UPDATE source_fact_claim SET supersedes_claim_id = NULL;
@@ -255,6 +256,14 @@ const sourceRelationClaim = await request(`/api/admin/genealogy-editions/${editi
   body: { subjectRecordId: sourceRecord.body.sourcePersonRecord.id, relatedRecordId: relatedSourceRecord.body.sourcePersonRecord.id, relationKind: "biological_parent", rawText: "父某某" },
 });
 expectStatus(sourceRelationClaim, 201);
+const semanticRule = await request("/api/admin/source-relation-semantics", {
+  method: "POST", cookie: adminCookie, csrf: adminCsrf,
+  body: { relationKind: "biological_parent", graphKind: "child_to_parent", parentKind: "biological_parent" },
+});
+expectStatus(semanticRule, 201);
+const semanticRules = await request("/api/admin/source-relation-semantics", { cookie: adminCookie });
+expectStatus(semanticRules, 200);
+assert.equal(semanticRules.body.rules.some((rule) => rule.id === semanticRule.body.rule.id), true);
 const supersedingFactClaim = await request(`/api/admin/genealogy-editions/${edition.body.edition.id}/source-fact-claims`, {
   method: "POST", cookie: adminCookie, csrf: adminCsrf,
   body: { subjectRecordId: sourceRecord.body.sourcePersonRecord.id, supersedesClaimId: sourceFactClaim.body.sourceFactClaim.id, factKind: "birth", rawText: "生年待考" },
@@ -267,6 +276,25 @@ const historicalProjection = await request(`/api/admin/genealogy-editions/${edit
 expectStatus(historicalProjection, 200);
 assert.equal(historicalProjection.body.view, "historical");
 assert.equal(historicalProjection.body.relationClaims.length, 1);
+assert.deepEqual(historicalProjection.body.projection.parentChildEdges, [{
+  claimId: sourceRelationClaim.body.sourceRelationClaim.id,
+  parentRecordId: relatedSourceRecord.body.sourcePersonRecord.id,
+  childRecordId: sourceRecord.body.sourcePersonRecord.id,
+  parentKind: "biological_parent",
+  rawText: "父某某",
+}]);
+assert.equal(historicalProjection.body.projection.nodes.find((node) => node.sourceRecordId === relatedSourceRecord.body.sourcePersonRecord.id).confirmedPersonId, null);
+expectStatus(await request(`/api/admin/source-relation-semantics/${semanticRule.body.rule.id}/retire`, {
+  method: "POST", cookie: adminCookie, csrf: adminCsrf,
+}), 200);
+const projectionWithRetiredSemantic = await request(`/api/admin/genealogy-editions/${edition.body.edition.id}/historical-projection`, { cookie: adminCookie });
+expectStatus(projectionWithRetiredSemantic, 200);
+assert.deepEqual(projectionWithRetiredSemantic.body.projection.annotations, [{
+  claimId: sourceRelationClaim.body.sourceRelationClaim.id,
+  status: "pending_interpretation",
+  relationKind: "biological_parent",
+  rawText: "父某某",
+}]);
 expectStatus(await request(`/api/admin/source-relation-claims/${sourceRelationClaim.body.sourceRelationClaim.id}/retract`, {
   method: "POST", cookie: adminCookie, csrf: adminCsrf,
 }), 200);

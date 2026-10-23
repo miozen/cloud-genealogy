@@ -23,6 +23,7 @@ import {
   sourcePersonRecordInput,
   sourceFactClaimInput,
   sourceRelationClaimInput,
+  sourceRelationSemanticRuleInput,
   successionEdgesInput,
   publishRevisionInput,
   rollbackRevisionInput,
@@ -31,6 +32,7 @@ import {
 import { previewSuccessionRevision } from "./lineage/revision-preview";
 import { publishSuccessionRevision, rollbackSuccessionRevision } from "./lineage/revision-publish";
 import { buildPublishedHangingChart } from "./lineage/hanging-chart-service";
+import { projectHistoricalLineage } from "./lineage/historical-lineage-projection";
 import { csrfProtection, requireAuthentication, sessionMiddleware } from "./middleware/authentication";
 import { securityHeaders } from "./middleware/security";
 import type { AppEnv } from "./types";
@@ -390,16 +392,77 @@ export function createApp() {
     });
   });
 
+  app.get("/api/admin/source-relation-semantics", requireAuthentication, async (context) => {
+    const auth = context.get("auth")!;
+    if (!hasPermission(auth.roles, "system.manage")) return context.json({ code: "forbidden" }, 403);
+    const rules = await context.env.DB.prepare(
+      "SELECT id, relation_kind, graph_kind, parent_kind, created_at FROM source_relation_semantic_rule WHERE retired_at IS NULL ORDER BY relation_kind, id",
+    ).all();
+    return context.json({ rules: rules.results });
+  });
+
+  app.post("/api/admin/source-relation-semantics", requireAuthentication, async (context) => {
+    const auth = context.get("auth")!;
+    if (!hasPermission(auth.roles, "system.manage")) return context.json({ code: "forbidden" }, 403);
+    const parsed = sourceRelationSemanticRuleInput.safeParse(await context.req.json().catch(() => null));
+    if (!parsed.success) return context.json({ code: "validation_failed", message: validationMessage(parsed) }, 400);
+    const id = crypto.randomUUID();
+    const timestamp = now();
+    try {
+      await context.env.DB.batch([
+        context.env.DB.prepare(
+          "INSERT INTO source_relation_semantic_rule (id, relation_kind, graph_kind, parent_kind, created_at) VALUES (?, ?, ?, ?, ?)",
+        ).bind(id, parsed.data.relationKind, parsed.data.graphKind, parsed.data.parentKind ?? null, timestamp),
+        context.env.DB.prepare("INSERT INTO audit_log (id, actor_account_id, action, object_type, object_id, metadata_json, created_at) VALUES (?, ?, ?, ?, ?, ?, ?)")
+          .bind(crypto.randomUUID(), auth.accountId, "source.relation_semantic_created", "source_relation_semantic_rule", id, JSON.stringify({ relationKind: parsed.data.relationKind }), timestamp),
+      ]);
+    } catch (error) {
+      if (error instanceof Error && /UNIQUE constraint failed/.test(error.message)) return context.json({ code: "relation_semantic_exists" }, 409);
+      throw error;
+    }
+    return context.json({ rule: { id, relationKind: parsed.data.relationKind, graphKind: parsed.data.graphKind, parentKind: parsed.data.parentKind ?? null } }, 201);
+  });
+
+  app.post("/api/admin/source-relation-semantics/:ruleId/retire", requireAuthentication, async (context) => {
+    const auth = context.get("auth")!;
+    if (!hasPermission(auth.roles, "system.manage")) return context.json({ code: "forbidden" }, 403);
+    const ruleId = context.req.param("ruleId");
+    const result = await context.env.DB.prepare("UPDATE source_relation_semantic_rule SET retired_at = ? WHERE id = ? AND retired_at IS NULL").bind(now(), ruleId).run();
+    if (result.meta.changes !== 1) return context.json({ code: "relation_semantic_not_found" }, 404);
+    await writeAudit(context.env.DB, auth.accountId, "source.relation_semantic_retired", "source_relation_semantic_rule", ruleId, {});
+    return context.json({ retired: true });
+  });
+
   app.get("/api/admin/genealogy-editions/:editionId/historical-projection", requireAuthentication, async (context) => {
     const auth = context.get("auth")!;
     if (!hasPermission(auth.roles, "system.manage")) return context.json({ code: "forbidden" }, 403);
     const editionId = context.req.param("editionId");
     const edition = await context.env.DB.prepare("SELECT id FROM genealogy_edition WHERE id = ? AND retired_at IS NULL").bind(editionId).first<{ id: string }>();
     if (!edition) return context.json({ code: "edition_not_found" }, 404);
-    const claims = await context.env.DB.prepare(
-      "SELECT c.id, c.subject_record_id, c.related_record_id, c.relation_kind, c.raw_text, s.name_text AS subject_name, r.name_text AS related_name FROM source_relation_claim c LEFT JOIN source_person_record s ON s.id = c.subject_record_id LEFT JOIN source_person_record r ON r.id = c.related_record_id WHERE c.edition_id = ? AND c.retracted_at IS NULL ORDER BY c.created_at, c.id",
-    ).bind(editionId).all();
-    return context.json({ view: "historical", editionId, relationClaims: claims.results });
+    const [records, claims, rules] = await context.env.DB.batch([
+      context.env.DB.prepare(
+        `SELECT r.id, r.name_text, l.person_id
+         FROM source_person_record r
+         LEFT JOIN source_person_link l ON l.source_record_id = r.id AND l.status = 'confirmed' AND l.revoked_at IS NULL
+         WHERE r.edition_id = ? ORDER BY r.created_at, r.id`,
+      ).bind(editionId),
+      context.env.DB.prepare(
+        "SELECT id, subject_record_id, related_record_id, relation_kind, raw_text FROM source_relation_claim WHERE edition_id = ? AND retracted_at IS NULL ORDER BY created_at, id",
+      ).bind(editionId),
+      context.env.DB.prepare(
+        "SELECT relation_kind, graph_kind, parent_kind FROM source_relation_semantic_rule WHERE retired_at IS NULL ORDER BY relation_kind, id",
+      ),
+    ]);
+    if (!records || !claims || !rules) throw new Error("historical projection query did not return every result set");
+    const recordRows = records.results as Array<{ id: string; name_text: string | null; person_id: string | null }>;
+    const claimRows = claims.results as Array<{ id: string; subject_record_id: string; related_record_id: string | null; relation_kind: string; raw_text: string }>;
+    const ruleRows = rules.results as Array<{ relation_kind: string; graph_kind: "parent_to_child" | "child_to_parent" | "spouse" | "non_graph"; parent_kind: "biological_parent" | "adoptive_parent" | "successor_parent" | null }>;
+    const projection = projectHistoricalLineage(
+      recordRows.map((record) => ({ id: record.id, displayName: record.name_text, confirmedPersonId: record.person_id })),
+      claimRows.map((claim) => ({ id: claim.id, subjectRecordId: claim.subject_record_id, relatedRecordId: claim.related_record_id, relationKind: claim.relation_kind, rawText: claim.raw_text })),
+      ruleRows.map((rule) => ({ relationKind: rule.relation_kind, graphKind: rule.graph_kind, parentKind: rule.parent_kind })),
+    );
+    return context.json({ view: "historical", editionId, relationClaims: claimRows, projection });
   });
 
   app.post("/api/admin/lineages/:lineageId/revisions/publish", requireAuthentication, async (context) => {

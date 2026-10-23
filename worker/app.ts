@@ -13,6 +13,8 @@ import {
   genealogyEditionInput,
   genealogyInput,
   personAnchorInput,
+  personFactInput,
+  personNameInput,
   registrationInput,
   rejectionInput,
   resetPasswordInput,
@@ -378,6 +380,45 @@ export function createApp() {
         .bind(crypto.randomUUID(), auth.accountId, "person.anchor_created", "person", id, JSON.stringify({ visibility: parsed.data.visibility }), timestamp),
     ]);
     return context.json({ person: { id, displayName: parsed.data.displayName, visibility: parsed.data.visibility } }, 201);
+  });
+
+  app.post("/api/admin/persons/:personId/names", requireAuthentication, async (context) => {
+    const auth = context.get("auth")!;
+    if (!hasPermission(auth.roles, "system.manage")) return context.json({ code: "forbidden" }, 403);
+    const parsed = personNameInput.safeParse(await context.req.json().catch(() => null));
+    if (!parsed.success) return context.json({ code: "validation_failed", message: validationMessage(parsed) }, 400);
+    const personId = context.req.param("personId");
+    const person = await context.env.DB.prepare("SELECT id FROM person WHERE id = ?").bind(personId).first<{ id: string }>();
+    if (!person) return context.json({ code: "person_not_found" }, 404);
+    const id = crypto.randomUUID(); const timestamp = now();
+    await context.env.DB.batch([
+      ...(parsed.data.isPrimary ? [context.env.DB.prepare("UPDATE person_name SET is_primary = 0 WHERE person_id = ? AND retired_at IS NULL").bind(personId)] : []),
+      context.env.DB.prepare("INSERT INTO person_name (id, person_id, name_text, name_kind, is_primary, visibility, created_at) VALUES (?, ?, ?, ?, ?, ?, ?)").bind(id, personId, parsed.data.nameText, parsed.data.nameKind, Number(parsed.data.isPrimary), parsed.data.visibility, timestamp),
+      ...(parsed.data.isPrimary ? [context.env.DB.prepare("UPDATE person SET display_name = ?, updated_at = ? WHERE id = ?").bind(parsed.data.nameText, timestamp, personId)] : []),
+      context.env.DB.prepare("INSERT INTO audit_log (id, actor_account_id, action, object_type, object_id, metadata_json, created_at) VALUES (?, ?, ?, ?, ?, ?, ?)").bind(crypto.randomUUID(), auth.accountId, "person.name_added", "person_name", id, JSON.stringify({ personId, isPrimary: parsed.data.isPrimary }), timestamp),
+    ]);
+    return context.json({ personName: { id, personId, nameText: parsed.data.nameText, nameKind: parsed.data.nameKind, isPrimary: parsed.data.isPrimary, visibility: parsed.data.visibility } }, 201);
+  });
+
+  app.post("/api/admin/persons/:personId/facts", requireAuthentication, async (context) => {
+    const auth = context.get("auth")!;
+    if (!hasPermission(auth.roles, "system.manage")) return context.json({ code: "forbidden" }, 403);
+    const parsed = personFactInput.safeParse(await context.req.json().catch(() => null));
+    if (!parsed.success) return context.json({ code: "validation_failed", message: validationMessage(parsed) }, 400);
+    const personId = context.req.param("personId");
+    const person = await context.env.DB.prepare("SELECT id FROM person WHERE id = ?").bind(personId).first<{ id: string }>();
+    if (!person) return context.json({ code: "person_not_found" }, 404);
+    if (parsed.data.placeId) {
+      const place = await context.env.DB.prepare("SELECT id FROM place WHERE id = ? AND retired_at IS NULL").bind(parsed.data.placeId).first<{ id: string }>();
+      if (!place) return context.json({ code: "place_not_found" }, 404);
+    }
+    const id = crypto.randomUUID(); const placeId = parsed.data.placeId ?? (parsed.data.placeName ? crypto.randomUUID() : null); const timestamp = now();
+    await context.env.DB.batch([
+      ...(parsed.data.placeName ? [context.env.DB.prepare("INSERT INTO place (id, name_text, place_kind, created_at) VALUES (?, ?, ?, ?)").bind(placeId, parsed.data.placeName, parsed.data.placeKind ?? "unknown", timestamp)] : []),
+      context.env.DB.prepare("INSERT INTO person_fact (id, person_id, fact_kind, value_text, date_text, date_precision, place_id, visibility, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)").bind(id, personId, parsed.data.factKind, parsed.data.valueText ?? null, parsed.data.dateText ?? null, parsed.data.datePrecision, placeId, parsed.data.visibility, timestamp),
+      context.env.DB.prepare("INSERT INTO audit_log (id, actor_account_id, action, object_type, object_id, metadata_json, created_at) VALUES (?, ?, ?, ?, ?, ?, ?)").bind(crypto.randomUUID(), auth.accountId, "person.fact_added", "person_fact", id, JSON.stringify({ personId, factKind: parsed.data.factKind }), timestamp),
+    ]);
+    return context.json({ personFact: { id, personId, factKind: parsed.data.factKind, valueText: parsed.data.valueText ?? null, dateText: parsed.data.dateText ?? null, datePrecision: parsed.data.datePrecision, placeId, visibility: parsed.data.visibility } }, 201);
   });
 
   app.post("/api/admin/genealogies", requireAuthentication, async (context) => {

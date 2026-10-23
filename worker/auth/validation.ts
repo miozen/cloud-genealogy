@@ -56,6 +56,23 @@ export const sourcePersonRecordInput = z.object({
   rawText: z.string().trim().min(1, "原始记载不能为空。").max(10_000, "原始记载过长。"),
 });
 export const sourcePersonLinkInput = z.object({ personId: z.string().uuid() });
+const visibility = z.enum(["PUBLIC", "MEMBER", "ADMIN"]);
+export const personNameInput = z.object({
+  nameText: z.string().trim().min(1, "姓名不能为空。").max(80, "姓名最长 80 个字符。"),
+  nameKind: z.enum(["genealogy", "courtesy", "art_name", "alias", "source_text"]),
+  isPrimary: z.boolean().default(false),
+  visibility: visibility.default("MEMBER"),
+});
+export const personFactInput = z.object({
+  factKind: z.string().trim().min(1, "事实类型不能为空。").max(80, "事实类型最长 80 个字符。"),
+  valueText: z.string().trim().min(1).max(500).optional(),
+  dateText: z.string().trim().min(1).max(64).optional(),
+  datePrecision: z.enum(["exact", "year_month", "year", "approximate", "unknown"]).default("unknown"),
+  placeId: z.string().uuid().optional(),
+  placeName: z.string().trim().min(1).max(160).optional(),
+  placeKind: z.string().trim().min(1).max(40).optional(),
+  visibility: visibility.default("MEMBER"),
+}).refine((value) => !(value.placeId && value.placeName), { message: "地点只能选择已有地点或填写新地点。" });
 
 export function validationMessage(result: z.ZodSafeParseResult<unknown>): string {
   if (result.success) return "";

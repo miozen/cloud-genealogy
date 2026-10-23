@@ -172,6 +172,17 @@ const personResult = await request("/api/admin/persons", {
   body: { displayName: "本地人物锚点", visibility: "MEMBER" },
 });
 expectStatus(personResult, 201);
+const personName = await request(`/api/admin/persons/${personResult.body.person.id}/names`, {
+  method: "POST", cookie: adminCookie, csrf: adminCsrf,
+  body: { nameText: "本地人物谱名", nameKind: "genealogy", isPrimary: true, visibility: "MEMBER" },
+});
+expectStatus(personName, 201);
+const personFact = await request(`/api/admin/persons/${personResult.body.person.id}/facts`, {
+  method: "POST", cookie: adminCookie, csrf: adminCsrf,
+  body: { factKind: "birth", dateText: "1901", datePrecision: "year", placeName: "本地测试村", placeKind: "village", visibility: "MEMBER" },
+});
+expectStatus(personFact, 201);
+assert.ok(personFact.body.personFact.placeId);
 
 const secondPerson = await request("/api/admin/persons", {
   method: "POST",

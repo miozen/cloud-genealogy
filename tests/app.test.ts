@@ -1,9 +1,14 @@
 import { describe, expect, it } from "vitest";
 import { createApp } from "../worker/app";
+import type { Env } from "../worker/types";
 
 describe("worker app", () => {
   it("serves a health response", async () => {
-    const response = await createApp().request("https://example.test/api/health");
+    const response = await createApp().request(
+      "https://example.test/api/health",
+      undefined,
+      { DB: { prepare: () => ({ first: async () => ({ value: 1 }) }) } } as unknown as Env,
+    );
 
     expect(response.status).toBe(200);
     await expect(response.json()).resolves.toMatchObject({ status: "ok" });

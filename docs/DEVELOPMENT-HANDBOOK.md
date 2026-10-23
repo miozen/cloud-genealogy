@@ -161,8 +161,8 @@ git push origin v0.1.0
 
 ## 6. 认证与首个管理员初始化
 
-- 已确认采用论坛式用户名密码注册审核。密码固定为 Workers 原生 PBKDF2-HMAC-SHA-256、100,000 次迭代、每账号随机 Salt 和版本化哈希记录；这是个人站点接受的运行时折中，不宣称符合 OWASP 当前推荐强度。
-- preview 已实际验证该参数可完成注册；不得改为明文、更低工作因子、Passkey、第三方认证或 Cloudflare Access。
+- 已确认采用论坛式用户名密码注册审核。密码固定为 Workers 原生 PBKDF2-HMAC-SHA-256、10,000 次迭代、每账号随机 Salt 和版本化哈希记录；这是审核制个人站点确认的基础防护，不宣称符合 OWASP 当前推荐强度。
+- 不得改为明文、Passkey、第三方认证或 Cloudflare Access。
 - 首个管理员只能经 `POST /api/setup/bootstrap` 初始化：请求须携带 `x-bootstrap-secret`，环境须存在 `BOOTSTRAP_SECRET`，且数据库中没有活跃 `admin`。该操作同时创建管理员、其人物锚点、`member`/`admin` 角色和审计记录。
 - Bootstrap Secret 仅用于受控初始化，成功后立即通过 `wrangler secret delete BOOTSTRAP_SECRET --env preview` 删除；不得提交、记录或复用。生产初始化仍须获得单独明确授权。
 - 后续账号一律走注册待审流程；管理员必须人工选择人物锚点，不能按姓名自动关联。

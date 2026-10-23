@@ -56,6 +56,17 @@ export const sourcePersonRecordInput = z.object({
   rawText: z.string().trim().min(1, "原始记载不能为空。").max(10_000, "原始记载过长。"),
 });
 export const sourcePersonLinkInput = z.object({ personId: z.string().uuid() });
+export const sourceFactClaimInput = z.object({
+  subjectRecordId: z.string().uuid().optional(),
+  factKind: z.string().trim().min(1, "事实类型不能为空。").max(80, "事实类型最长 80 个字符。"),
+  rawText: z.string().trim().min(1, "原文不能为空。").max(10_000, "原文过长。"),
+});
+export const sourceRelationClaimInput = z.object({
+  subjectRecordId: z.string().uuid(),
+  relatedRecordId: z.string().uuid().optional(),
+  relationKind: z.string().trim().min(1, "关系类型不能为空。").max(80, "关系类型最长 80 个字符。"),
+  rawText: z.string().trim().min(1, "原文不能为空。").max(10_000, "原文过长。"),
+});
 const visibility = z.enum(["PUBLIC", "MEMBER", "ADMIN"]);
 export const personNameInput = z.object({
   nameText: z.string().trim().min(1, "姓名不能为空。").max(80, "姓名最长 80 个字符。"),

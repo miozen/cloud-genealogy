@@ -476,6 +476,30 @@ export function createApp() {
     return context.json({ status: "retired" });
   });
 
+  app.get("/api/admin/places", requireAuthentication, async (context) => {
+    const auth = context.get("auth")!;
+    if (!hasPermission(auth.roles, "system.manage")) return context.json({ code: "forbidden" }, 403);
+    const query = context.req.query("query")?.trim() ?? "";
+    const rows = await context.env.DB.prepare("SELECT id, name_text, parent_place_id, place_kind FROM place WHERE retired_at IS NULL AND name_text LIKE ? ESCAPE '\\' ORDER BY name_text LIMIT 30").bind(`%${query.replaceAll("\\", "\\\\").replaceAll("%", "\\%").replaceAll("_", "\\_")}%`).all();
+    return context.json({ places: rows.results });
+  });
+
+  app.post("/api/admin/places/:placeId/retire", requireAuthentication, async (context) => {
+    const auth = context.get("auth")!;
+    if (!hasPermission(auth.roles, "system.manage")) return context.json({ code: "forbidden" }, 403);
+    const placeId = context.req.param("placeId");
+    const place = await context.env.DB.prepare("SELECT id FROM place WHERE id = ? AND retired_at IS NULL").bind(placeId).first<{ id: string }>();
+    if (!place) return context.json({ code: "place_not_found" }, 404);
+    const use = await context.env.DB.prepare("SELECT 1 FROM person_fact WHERE place_id = ? AND retired_at IS NULL LIMIT 1").bind(placeId).first();
+    if (use) return context.json({ code: "place_in_use" }, 409);
+    const timestamp = now();
+    await context.env.DB.batch([
+      context.env.DB.prepare("UPDATE place SET retired_at = ? WHERE id = ? AND retired_at IS NULL").bind(timestamp, placeId),
+      context.env.DB.prepare("INSERT INTO audit_log (id, actor_account_id, action, object_type, object_id, metadata_json, created_at) VALUES (?, ?, ?, ?, ?, ?, ?)").bind(crypto.randomUUID(), auth.accountId, "place.retired", "place", placeId, "{}", timestamp),
+    ]);
+    return context.json({ status: "retired" });
+  });
+
   app.post("/api/admin/genealogies", requireAuthentication, async (context) => {
     const auth = context.get("auth")!;
     if (!hasPermission(auth.roles, "system.manage")) return context.json({ code: "forbidden" }, 403);

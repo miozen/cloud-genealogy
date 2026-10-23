@@ -304,6 +304,17 @@ export function createApp() {
     return context.json({ lineages: lineages.results });
   });
 
+  app.get("/api/admin/genealogy-editions", requireAuthentication, async (context) => {
+    const auth = context.get("auth")!;
+    if (!hasPermission(auth.roles, "system.manage")) return context.json({ code: "forbidden" }, 403);
+    const editions = await context.env.DB.prepare(
+      `SELECT e.id, e.title, e.edition_label, g.id AS genealogy_id, g.title AS genealogy_title
+       FROM genealogy_edition e INNER JOIN genealogy g ON g.id = e.genealogy_id
+       WHERE e.retired_at IS NULL AND g.retired_at IS NULL ORDER BY g.title, e.created_at, e.id`,
+    ).all();
+    return context.json({ editions: editions.results });
+  });
+
   app.post("/api/admin/lineages", requireAuthentication, async (context) => {
     const auth = context.get("auth")!;
     if (!hasPermission(auth.roles, "system.manage")) return context.json({ code: "forbidden" }, 403);

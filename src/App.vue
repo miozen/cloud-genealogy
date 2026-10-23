@@ -11,6 +11,8 @@ type ChartConnector = { parentPersonId: string; childPersonId: string; points: A
 type HangingChart = { revisionId: string; projection: { nodes: ChartNode[] }; layout: { nodes: ChartLayoutNode[]; connectors: ChartConnector[] } };
 type PersonDetail = { person: { id: string; displayName: string; visibility: string }; names: Array<{ id: string; name_text: string; name_kind: string; is_primary: number }>; facts: Array<{ id: string; fact_kind: string; value_text: string | null; date_text: string | null; place_name: string | null }> };
 type Lineage = { id: string; name: string; succession_rule: string; published_revision_id: string | null; pointer_version: number | null };
+type Edition = { id: string; title: string; edition_label: string | null; genealogy_title: string };
+type HistoricalComparison = { projection: { annotations: Array<{ claimId: string; status: string; relationKind: string; rawText: string }> }; comparison: { canonicalEdges: Array<{ status: string }>; historicalEdges: Array<{ status: string }> } };
 const status = ref("正在检查 API…"), notice = ref(""), account = ref<Account | null>(null), csrfToken = ref("");
 const registerForm = ref({ username: "", password: "", genealogyName: "", branchName: "", ancestorName: "" });
 const loginForm = ref({ username: "", password: "" });
@@ -19,7 +21,7 @@ const newPerson = ref({ displayName: "", visibility: "MEMBER" as Person["visibil
 const selectedPerson = ref<Record<string, string>>({}), selectedRole = ref<Record<string, "member" | "editor" | "admin">>({});
 const lineageId = ref(""), rootPersonId = ref(""), chart = ref<HangingChart | null>(null), chartSearch = ref("");
 const chartZoom = ref(1), centeredPersonId = ref<string | null>(null), chartPersonId = ref<string | null>(null), chartPerson = ref<PersonDetail | null>(null);
-const lineages = ref<Lineage[]>([]), newLineageName = ref("");
+const lineages = ref<Lineage[]>([]), editions = ref<Edition[]>([]), editionId = ref(""), comparison = ref<HistoricalComparison | null>(null), newLineageName = ref("");
 const chartSvg = ref<SVGSVGElement | null>(null);
 const chartPan = ref({ x: 0, y: 0 }), chartDrag = ref<{ pointerId: number; clientX: number; clientY: number } | null>(null);
 const isAdmin = computed(() => account.value?.roles.includes("admin") ?? false);
@@ -51,13 +53,14 @@ async function message(response: Response) {
   return body.message ?? "请求未能完成。";
 }
 async function refreshAdminData() {
-  const [pendingResponse, personsResponse, lineagesResponse] = await Promise.all([request("/api/admin/accounts/pending"), request("/api/admin/persons"), request("/api/admin/lineages")]);
+  const [pendingResponse, personsResponse, lineagesResponse, editionsResponse] = await Promise.all([request("/api/admin/accounts/pending"), request("/api/admin/persons"), request("/api/admin/lineages"), request("/api/admin/genealogy-editions")]);
   if (pendingResponse.ok) pendingAccounts.value = ((await pendingResponse.json()) as { accounts: PendingAccount[] }).accounts;
   if (personsResponse.ok) persons.value = ((await personsResponse.json()) as { persons: Person[] }).persons;
   if (lineagesResponse.ok) {
     lineages.value = ((await lineagesResponse.json()) as { lineages: Lineage[] }).lineages;
     if (!lineageId.value && lineages.value[0]) lineageId.value = lineages.value[0].id;
   }
+  if (editionsResponse.ok) { editions.value = ((await editionsResponse.json()) as { editions: Edition[] }).editions; if (!editionId.value && editions.value[0]) editionId.value = editions.value[0].id; }
 }
 async function refreshIdentity() {
   const response = await request("/api/me");
@@ -106,6 +109,13 @@ async function loadHangingChart() {
   chart.value = await response.json() as HangingChart;
   chartZoom.value = 1; chartPan.value = { x: 0, y: 0 }; centeredPersonId.value = root || null; chartPersonId.value = null; chartPerson.value = null;
   notice.value = `已载入 ${chart.value.projection.nodes.length} 位人物的已发布世系。`;
+}
+async function loadHistoricalComparison() {
+  if (!lineageId.value || !editionId.value) return void (notice.value = "请选择已发布世系和谱书版本。");
+  const response = await request(`/api/admin/lineages/${encodeURIComponent(lineageId.value)}/historical-comparison?editionId=${encodeURIComponent(editionId.value)}`);
+  if (!response.ok) return void (notice.value = await message(response));
+  comparison.value = await response.json() as HistoricalComparison;
+  notice.value = "已载入统一世系与历史谱书的只读差异。";
 }
 async function selectChartPerson(personId: string) {
   chartPersonId.value = personId; centeredPersonId.value = personId; chartPan.value = { x: 0, y: 0 };
@@ -184,6 +194,8 @@ onMounted(async () => { try { const response = await request("/api/health"); sta
       <section class="chart-admin">
         <h2>传统吊线图</h2><p>仅读取当前已发布世系；输入世系 ID 后载入，选择人物不会修改关系。</p>
         <form class="chart-controls" @submit.prevent="loadHangingChart"><label>世系<select v-model="lineageId" required><option value="" disabled>请选择世系</option><option v-for="lineage in lineages" :key="lineage.id" :value="lineage.id">{{ lineage.name }}{{ lineage.published_revision_id ? "（已发布）" : "（未发布）" }}</option></select></label><label>根人物 ID（可选）<input v-model.trim="rootPersonId" placeholder="仅展示该支后代" /></label><button>载入吊线图</button></form>
+        <form class="chart-controls" @submit.prevent="loadHistoricalComparison"><label>历史谱书版本<select v-model="editionId"><option value="" disabled>请选择谱书版本</option><option v-for="edition in editions" :key="edition.id" :value="edition.id">{{ edition.genealogy_title }} · {{ edition.title }}</option></select></label><p>仅比较已确认映射和已解释的关系。</p><button>读取历史差异</button></form>
+        <section v-if="comparison" class="pending"><h3>历史差异（只读）</h3><p>统一边：{{ comparison.comparison.canonicalEdges.filter((edge) => edge.status === "same").length }} 一致，{{ comparison.comparison.canonicalEdges.filter((edge) => edge.status === "canonical_only").length }} 仅统一。</p><p>历史边：{{ comparison.comparison.historicalEdges.filter((edge) => edge.status === "same").length }} 一致，{{ comparison.comparison.historicalEdges.filter((edge) => edge.status === "historical_only").length }} 仅历史，{{ comparison.comparison.historicalEdges.filter((edge) => edge.status === "uncomparable").length }} 无法比较。</p><p v-for="item in comparison.projection.annotations" :key="item.claimId">{{ item.status }}：{{ item.relationKind }}（{{ item.rawText }}）</p></section>
         <form class="new-lineage" @submit.prevent="createLineage"><label>新建世系名称<input v-model.trim="newLineageName" maxlength="160" required /></label><button type="submit" class="secondary">建立空世系</button></form>
         <div v-if="chart" class="chart-tools"><label>姓名定位<input v-model.trim="chartSearch" placeholder="输入姓名" /></label><div class="actions"><button type="button" class="secondary" @click="zoomChart(-1)">缩小</button><button type="button" class="secondary" @click="resetChartViewport">重置视图</button><button type="button" class="secondary" @click="zoomChart(1)">放大</button><button type="button" @click="exportChartSvg">导出 SVG</button></div></div>
         <div v-if="chartMatches.length" class="chart-matches"><button v-for="node in chartMatches" :key="node.personId" type="button" @click="selectChartPerson(node.personId)">{{ node.displayName }}</button></div>

@@ -14,8 +14,12 @@ import {
   registrationInput,
   rejectionInput,
   resetPasswordInput,
+  successionEdgesInput,
+  publishRevisionInput,
   validationMessage,
 } from "./auth/validation";
+import { previewSuccessionRevision } from "./lineage/revision-preview";
+import { publishSuccessionRevision } from "./lineage/revision-publish";
 import { csrfProtection, requireAuthentication, sessionMiddleware } from "./middleware/authentication";
 import { securityHeaders } from "./middleware/security";
 import type { AppEnv } from "./types";
@@ -45,6 +49,7 @@ interface PersonAnchorRow {
   display_name: string;
   visibility: "PUBLIC" | "MEMBER" | "ADMIN";
 }
+interface SuccessionRow { parent_person_id: string; child_person_id: string; }
 
 function now(): string {
   return new Date().toISOString();
@@ -256,6 +261,37 @@ export function createApp() {
     deleteCookie(context, SESSION_COOKIE_NAME, { path: "/" });
     deleteCookie(context, CSRF_COOKIE_NAME, { path: "/" });
     return context.body(null, 204);
+  });
+
+  app.post("/api/admin/lineages/:lineageId/revisions/preview", requireAuthentication, async (context) => {
+    const auth = context.get("auth")!;
+    if (!hasPermission(auth.roles, "system.manage")) return context.json({ code: "forbidden" }, 403);
+    const parsed = successionEdgesInput.safeParse(await context.req.json().catch(() => null));
+    if (!parsed.success) return context.json({ code: "validation_failed", message: validationMessage(parsed) }, 400);
+    const lineageId = context.req.param("lineageId");
+    const base = await context.env.DB.prepare(
+      "SELECT s.parent_person_id, s.child_person_id FROM lineage_published_pointer p JOIN lineage_succession_snapshot s ON s.revision_id = p.revision_id WHERE p.lineage_id = ? ORDER BY s.order_key",
+    ).bind(lineageId).all<SuccessionRow>();
+    return context.json({ preview: previewSuccessionRevision({ baseEdges: base.results.map((row) => ({ parentPersonId: row.parent_person_id, childPersonId: row.child_person_id })), proposedEdges: parsed.data.edges }) });
+  });
+
+  app.post("/api/admin/lineages/:lineageId/revisions/publish", requireAuthentication, async (context) => {
+    const auth = context.get("auth")!;
+    if (!hasPermission(auth.roles, "system.manage")) return context.json({ code: "forbidden" }, 403);
+    const parsed = publishRevisionInput.safeParse(await context.req.json().catch(() => null));
+    if (!parsed.success) return context.json({ code: "validation_failed", message: validationMessage(parsed) }, 400);
+    const lineageId = context.req.param("lineageId");
+    const base = await context.env.DB.prepare(
+      "SELECT s.parent_person_id, s.child_person_id FROM lineage_published_pointer p JOIN lineage_succession_snapshot s ON s.revision_id = p.revision_id WHERE p.lineage_id = ? ORDER BY s.order_key",
+    ).bind(lineageId).all<SuccessionRow>();
+    const result = await publishSuccessionRevision(context.env.DB, {
+      lineageId, revisionId: parsed.data.revisionId, basedOnRevisionId: parsed.data.basedOnRevisionId,
+      baseEdges: base.results.map((row) => ({ parentPersonId: row.parent_person_id, childPersonId: row.child_person_id })),
+      proposedEdges: parsed.data.edges, now: now(),
+    });
+    if (!result.published) return context.json({ code: "revision_invalid", issues: result.issues }, 400);
+    await writeAudit(context.env.DB, auth.accountId, "lineage.revision_published", "lineage_revision", result.revisionId, { lineageId });
+    return context.json(result, 201);
   });
 
   app.get("/api/admin/accounts/pending", requireAuthentication, async (context) => {

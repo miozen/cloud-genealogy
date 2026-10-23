@@ -18,6 +18,13 @@ export WRANGLER_SEND_METRICS=false
 
 clean_test_rows() {
   npx wrangler d1 execute DB --local --persist-to "$state_dir" --command "
+    DELETE FROM lineage_published_pointer;
+    DELETE FROM lineage_succession_snapshot;
+    DELETE FROM canonical_relation_snapshot;
+    DELETE FROM lineage_revision;
+    DELETE FROM branch_membership_snapshot;
+    DELETE FROM branch;
+    DELETE FROM lineage;
     DELETE FROM audit_log;
     DELETE FROM auth_session;
     DELETE FROM account_person_link;
@@ -40,6 +47,9 @@ trap shutdown EXIT
 
 npx wrangler d1 migrations apply DB --local --persist-to "$state_dir" >/dev/null
 clean_test_rows
+npx wrangler d1 execute DB --local --persist-to "$state_dir" --command "
+  INSERT INTO lineage (id, name, created_at) VALUES ('11111111-1111-4111-8111-111111111111', '本地测试世系', '2026-01-01T00:00:00Z');
+" >/dev/null
 
 npx wrangler dev --local --port "$port" --persist-to "$state_dir" \
   --var AUTH_RATE_LIMIT_SECRET:local-integration-rate-limit-secret \
@@ -154,6 +164,45 @@ const personResult = await request("/api/admin/persons", {
   body: { displayName: "本地人物锚点", visibility: "MEMBER" },
 });
 expectStatus(personResult, 201);
+
+const secondPerson = await request("/api/admin/persons", {
+  method: "POST",
+  cookie: adminCookie,
+  csrf: adminCsrf,
+  body: { displayName: "本地承谱父", visibility: "MEMBER" },
+});
+expectStatus(secondPerson, 201);
+
+const lineageId = "11111111-1111-4111-8111-111111111111";
+expectStatus(await request(`/api/admin/lineages/${lineageId}/revisions/preview`, {
+  method: "POST",
+  cookie: adminCookie,
+  body: { edges: [] },
+}), 403);
+const invalidPublish = await request(`/api/admin/lineages/${lineageId}/revisions/publish`, {
+  method: "POST",
+  cookie: adminCookie,
+  csrf: adminCsrf,
+  body: {
+    revisionId: "22222222-2222-4222-8222-222222222222",
+    edges: [
+      { parentPersonId: personResult.body.person.id, childPersonId: secondPerson.body.person.id },
+      { parentPersonId: secondPerson.body.person.id, childPersonId: personResult.body.person.id },
+    ],
+  },
+});
+expectStatus(invalidPublish, 400);
+assert.equal(invalidPublish.body.code, "revision_invalid");
+const validPublish = await request(`/api/admin/lineages/${lineageId}/revisions/publish`, {
+  method: "POST",
+  cookie: adminCookie,
+  csrf: adminCsrf,
+  body: {
+    revisionId: "33333333-3333-4333-8333-333333333333",
+    edges: [{ parentPersonId: personResult.body.person.id, childPersonId: secondPerson.body.person.id }],
+  },
+});
+expectStatus(validPublish, 201);
 
 const approval = await request(`/api/admin/accounts/${member.id}/approve`, {
   method: "POST",

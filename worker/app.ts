@@ -20,6 +20,8 @@ import {
   resetPasswordInput,
   sourcePersonLinkInput,
   sourcePersonRecordInput,
+  sourceFactClaimInput,
+  sourceRelationClaimInput,
   successionEdgesInput,
   publishRevisionInput,
   rollbackRevisionInput,
@@ -107,12 +109,14 @@ export function createApp() {
   app.use("/api/*", sessionMiddleware);
   app.use("/api/*", csrfProtection);
 
-  app.get("/api/health", (context) =>
-    context.json({
-      status: "ok",
-      service: "cloud-genealogy",
-    }),
-  );
+  app.get("/api/health", async (context) => {
+    try {
+      await context.env.DB.prepare("SELECT 1").first();
+      return context.json({ status: "ok", service: "cloud-genealogy" });
+    } catch {
+      return context.json({ status: "unavailable", service: "cloud-genealogy" }, 503);
+    }
+  });
 
   app.get("/api/me", requireAuthentication, (context) => {
     const auth = context.get("auth")!;
@@ -147,7 +151,15 @@ export function createApp() {
     const accountId = crypto.randomUUID();
     const personId = crypto.randomUUID();
     const timestamp = now();
-    const passwordHash = await hashPassword(input.password);
+    let passwordHash: string;
+    try {
+      passwordHash = await hashPassword(input.password);
+    } catch (error) {
+      return context.json({
+        code: "password_hash_failed",
+        ...(context.env.APP_ENV === "development" && error instanceof Error ? { message: error.message } : {}),
+      }, 500);
+    }
     try {
       await context.env.DB.batch([
         context.env.DB
@@ -159,6 +171,8 @@ export function createApp() {
         context.env.DB
           .prepare("INSERT INTO person (id, display_name, visibility, created_at, updated_at) VALUES (?, ?, 'MEMBER', ?, ?)")
           .bind(personId, input.genealogyName, timestamp, timestamp),
+      ]);
+      await context.env.DB.batch([
         context.env.DB
           .prepare("INSERT INTO account_role (account_id, role_id, granted_at, granted_by_account_id) VALUES (?, 'role-member', ?, ?)")
           .bind(accountId, timestamp, accountId),
@@ -487,6 +501,47 @@ export function createApp() {
     return context.json({ sourcePersonLink: { id, sourceRecordId, personId: parsed.data.personId, status: "confirmed" } }, 201);
   });
 
+  app.post("/api/admin/genealogy-editions/:editionId/source-fact-claims", requireAuthentication, async (context) => {
+    const auth = context.get("auth")!;
+    if (!hasPermission(auth.roles, "system.manage")) return context.json({ code: "forbidden" }, 403);
+    const parsed = sourceFactClaimInput.safeParse(await context.req.json().catch(() => null));
+    if (!parsed.success) return context.json({ code: "validation_failed", message: validationMessage(parsed) }, 400);
+    const editionId = context.req.param("editionId");
+    const edition = await context.env.DB.prepare("SELECT id FROM genealogy_edition WHERE id = ? AND retired_at IS NULL").bind(editionId).first<{ id: string }>();
+    if (!edition) return context.json({ code: "edition_not_found" }, 404);
+    if (parsed.data.subjectRecordId) {
+      const subject = await context.env.DB.prepare("SELECT id FROM source_person_record WHERE id = ? AND edition_id = ?").bind(parsed.data.subjectRecordId, editionId).first<{ id: string }>();
+      if (!subject) return context.json({ code: "source_record_not_found" }, 404);
+    }
+    const id = crypto.randomUUID(); const timestamp = now();
+    await context.env.DB.batch([
+      context.env.DB.prepare("INSERT INTO source_fact_claim (id, edition_id, subject_record_id, fact_kind, raw_text, created_at) VALUES (?, ?, ?, ?, ?, ?)").bind(id, editionId, parsed.data.subjectRecordId ?? null, parsed.data.factKind, parsed.data.rawText, timestamp),
+      context.env.DB.prepare("INSERT INTO audit_log (id, actor_account_id, action, object_type, object_id, metadata_json, created_at) VALUES (?, ?, ?, ?, ?, ?, ?)").bind(crypto.randomUUID(), auth.accountId, "source.fact_claim_created", "source_fact_claim", id, JSON.stringify({ editionId }), timestamp),
+    ]);
+    return context.json({ sourceFactClaim: { id, editionId, subjectRecordId: parsed.data.subjectRecordId ?? null, factKind: parsed.data.factKind, rawText: parsed.data.rawText } }, 201);
+  });
+
+  app.post("/api/admin/genealogy-editions/:editionId/source-relation-claims", requireAuthentication, async (context) => {
+    const auth = context.get("auth")!;
+    if (!hasPermission(auth.roles, "system.manage")) return context.json({ code: "forbidden" }, 403);
+    const parsed = sourceRelationClaimInput.safeParse(await context.req.json().catch(() => null));
+    if (!parsed.success) return context.json({ code: "validation_failed", message: validationMessage(parsed) }, 400);
+    const editionId = context.req.param("editionId");
+    const edition = await context.env.DB.prepare("SELECT id FROM genealogy_edition WHERE id = ? AND retired_at IS NULL").bind(editionId).first<{ id: string }>();
+    if (!edition) return context.json({ code: "edition_not_found" }, 404);
+    const records = [parsed.data.subjectRecordId, parsed.data.relatedRecordId].filter((id): id is string => Boolean(id));
+    for (const recordId of records) {
+      const record = await context.env.DB.prepare("SELECT id FROM source_person_record WHERE id = ? AND edition_id = ?").bind(recordId, editionId).first<{ id: string }>();
+      if (!record) return context.json({ code: "source_record_not_found" }, 404);
+    }
+    const id = crypto.randomUUID(); const timestamp = now();
+    await context.env.DB.batch([
+      context.env.DB.prepare("INSERT INTO source_relation_claim (id, edition_id, subject_record_id, related_record_id, relation_kind, raw_text, created_at) VALUES (?, ?, ?, ?, ?, ?, ?)").bind(id, editionId, parsed.data.subjectRecordId, parsed.data.relatedRecordId ?? null, parsed.data.relationKind, parsed.data.rawText, timestamp),
+      context.env.DB.prepare("INSERT INTO audit_log (id, actor_account_id, action, object_type, object_id, metadata_json, created_at) VALUES (?, ?, ?, ?, ?, ?, ?)").bind(crypto.randomUUID(), auth.accountId, "source.relation_claim_created", "source_relation_claim", id, JSON.stringify({ editionId }), timestamp),
+    ]);
+    return context.json({ sourceRelationClaim: { id, editionId, subjectRecordId: parsed.data.subjectRecordId, relatedRecordId: parsed.data.relatedRecordId ?? null, relationKind: parsed.data.relationKind, rawText: parsed.data.rawText } }, 201);
+  });
+
   app.post("/api/admin/accounts/:accountId/approve", requireAuthentication, async (context) => {
     const auth = context.get("auth")!;
     if (!hasPermission(auth.roles, "system.manage")) return context.json({ code: "forbidden" }, 403);
@@ -583,6 +638,13 @@ export function createApp() {
     return context.body(null, 204);
   });
 
+  app.onError((error, context) => {
+    console.error(error);
+    return context.json({
+      code: "internal_error",
+      ...(context.env.APP_ENV === "development" && error instanceof Error ? { message: error.message } : {}),
+    }, 500);
+  });
   app.notFound((context) => context.json({ code: "not_found" }, 404));
 
   return app;

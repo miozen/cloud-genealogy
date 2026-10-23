@@ -2,11 +2,11 @@ const encoder = new TextEncoder();
 
 export const PBKDF2_SCHEME = "pbkdf2-sha256";
 /**
- * Workers Web Crypto currently accepts at most 100,000 PBKDF2 iterations.
- * This is a documented, project-approved runtime compromise for this small,
- * personally operated site; it is not represented as OWASP-strength storage.
+ * This small, personally operated site uses a deliberately modest work factor.
+ * Account approval, rate limiting and sessions remain in place; it is not
+ * represented as OWASP-strength storage.
  */
-export const PBKDF2_ITERATIONS = 100_000;
+export const PBKDF2_ITERATIONS = 10_000;
 
 const HASH_LENGTH_BITS = 256;
 const SALT_LENGTH_BYTES = 16;

@@ -16,6 +16,10 @@ worker_pid=""
 export XDG_CONFIG_HOME="$config_dir"
 export WRANGLER_SEND_METRICS=false
 
+# This directory belongs only to this integration test. Starting fresh prevents
+# old schema fixtures from affecting a later test run.
+rm -rf "$state_dir"
+
 clean_test_rows() {
   npx wrangler d1 execute DB --local --persist-to "$state_dir" --command "
     DELETE FROM lineage_published_pointer;
@@ -28,6 +32,10 @@ clean_test_rows() {
     DELETE FROM lineage;
     DELETE FROM audit_log;
     DELETE FROM source_person_link;
+    UPDATE source_relation_claim SET supersedes_claim_id = NULL;
+    UPDATE source_fact_claim SET supersedes_claim_id = NULL;
+    UPDATE source_person_record SET supersedes_record_id = NULL;
+    UPDATE genealogy_edition SET supersedes_edition_id = NULL;
     DELETE FROM source_relation_claim;
     DELETE FROM source_fact_claim;
     DELETE FROM source_person_record;
@@ -49,9 +57,10 @@ shutdown() {
     wait "$worker_pid" 2>/dev/null || true
   fi
   clean_test_rows 2>/dev/null || true
-  rm -f "$log_file"
+  if [[ ${test_status:-0} -eq 0 ]]; then rm -f "$log_file"; else echo "Worker log retained: $log_file" >&2; fi
 }
-trap shutdown EXIT
+test_status=0
+trap 'test_status=$?; shutdown' EXIT
 
 npx wrangler d1 migrations apply DB --local --persist-to "$state_dir" >/dev/null
 clean_test_rows
@@ -205,11 +214,26 @@ const sourceRecord = await request(`/api/admin/genealogy-editions/${edition.body
   body: { sourceKey: "卷一-001", nameText: "本地人物锚点", rawText: "本地测试原文记载" },
 });
 expectStatus(sourceRecord, 201);
+const relatedSourceRecord = await request(`/api/admin/genealogy-editions/${edition.body.edition.id}/source-person-records`, {
+  method: "POST", cookie: adminCookie, csrf: adminCsrf,
+  body: { sourceKey: "卷一-002", nameText: "本地承谱父", rawText: "本地测试父辈原文记载" },
+});
+expectStatus(relatedSourceRecord, 201);
 const sourceLink = await request(`/api/admin/source-person-records/${sourceRecord.body.sourcePersonRecord.id}/links`, {
   method: "POST", cookie: adminCookie, csrf: adminCsrf, body: { personId: personResult.body.person.id },
 });
 expectStatus(sourceLink, 201);
 assert.equal(sourceLink.body.sourcePersonLink.personId, personResult.body.person.id);
+const sourceFactClaim = await request(`/api/admin/genealogy-editions/${edition.body.edition.id}/source-fact-claims`, {
+  method: "POST", cookie: adminCookie, csrf: adminCsrf,
+  body: { subjectRecordId: sourceRecord.body.sourcePersonRecord.id, factKind: "birth", rawText: "生于光绪二十七年" },
+});
+expectStatus(sourceFactClaim, 201);
+const sourceRelationClaim = await request(`/api/admin/genealogy-editions/${edition.body.edition.id}/source-relation-claims`, {
+  method: "POST", cookie: adminCookie, csrf: adminCsrf,
+  body: { subjectRecordId: sourceRecord.body.sourcePersonRecord.id, relatedRecordId: relatedSourceRecord.body.sourcePersonRecord.id, relationKind: "biological_parent", rawText: "父某某" },
+});
+expectStatus(sourceRelationClaim, 201);
 
 const lineageId = "11111111-1111-4111-8111-111111111111";
 expectStatus(await request(`/api/admin/lineages/${lineageId}/revisions/preview`, {

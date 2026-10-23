@@ -1,0 +1,206 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+# Runs only against a separate Wrangler local-state directory. It neither
+# reads nor writes preview/production resources or the normal local D1 state.
+project_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+cd "$project_root"
+
+state_dir=".wrangler/local-auth-integration"
+config_dir="$state_dir/config"
+port="${LOCAL_AUTH_TEST_PORT:-8791}"
+base_url="http://127.0.0.1:$port"
+log_file="$(mktemp)"
+worker_pid=""
+
+export XDG_CONFIG_HOME="$config_dir"
+export WRANGLER_SEND_METRICS=false
+
+clean_test_rows() {
+  npx wrangler d1 execute DB --local --persist-to "$state_dir" --command "
+    DELETE FROM audit_log;
+    DELETE FROM auth_session;
+    DELETE FROM account_person_link;
+    DELETE FROM account_role;
+    DELETE FROM account_scope;
+    DELETE FROM person;
+    DELETE FROM account;
+  " >/dev/null
+}
+
+shutdown() {
+  if [[ -n "$worker_pid" ]] && kill -0 "$worker_pid" 2>/dev/null; then
+    kill "$worker_pid" 2>/dev/null || true
+    wait "$worker_pid" 2>/dev/null || true
+  fi
+  clean_test_rows 2>/dev/null || true
+  rm -f "$log_file"
+}
+trap shutdown EXIT
+
+npx wrangler d1 migrations apply DB --local --persist-to "$state_dir" >/dev/null
+clean_test_rows
+
+npx wrangler dev --local --port "$port" --persist-to "$state_dir" \
+  --var AUTH_RATE_LIMIT_SECRET:local-integration-rate-limit-secret \
+  --var BOOTSTRAP_SECRET:local-integration-bootstrap-secret >"$log_file" 2>&1 &
+worker_pid="$!"
+
+for _ in {1..40}; do
+  if curl --silent --fail "$base_url/api/health" >/dev/null 2>&1; then
+    break
+  fi
+  sleep 0.25
+done
+
+if ! curl --silent --fail "$base_url/api/health" >/dev/null; then
+  echo "本地 Worker 未能启动：" >&2
+  tail -n 80 "$log_file" >&2
+  exit 1
+fi
+
+BASE_URL="$base_url" node --input-type=module <<'NODE'
+import assert from "node:assert/strict";
+
+const baseUrl = process.env.BASE_URL;
+
+async function request(path, { method = "GET", body, cookie, csrf, bootstrapSecret } = {}) {
+  const response = await fetch(`${baseUrl}${path}`, {
+    method,
+    headers: {
+      ...(body ? { "content-type": "application/json" } : {}),
+      ...(cookie ? { cookie } : {}),
+      ...(csrf ? { "x-csrf-token": csrf } : {}),
+      ...(bootstrapSecret ? { "x-bootstrap-secret": bootstrapSecret } : {}),
+    },
+    body: body ? JSON.stringify(body) : undefined,
+  });
+  const text = await response.text();
+  return {
+    response,
+    body: text ? JSON.parse(text) : null,
+    cookies: typeof response.headers.getSetCookie === "function" ? response.headers.getSetCookie() : [],
+  };
+}
+
+function expectStatus(result, expected) {
+  assert.equal(result.response.status, expected, JSON.stringify(result.body));
+}
+
+function sessionCookie(result) {
+  const entry = result.cookies.find((value) => value.startsWith("cg_session="));
+  assert.ok(entry, "登录响应应设置会话 Cookie");
+  return entry.split(";", 1)[0];
+}
+
+const password = "local-auth-integration-password";
+const newPassword = "local-auth-integration-new-password";
+
+expectStatus(await request("/api/health"), 200);
+
+const bootstrap = await request("/api/setup/bootstrap", {
+  method: "POST",
+  bootstrapSecret: "local-integration-bootstrap-secret",
+  body: { username: "local.admin", password, genealogyName: "本地管理员" },
+});
+expectStatus(bootstrap, 201);
+
+const registration = await request("/api/auth/register", {
+  method: "POST",
+  body: {
+    username: "local.member",
+    password,
+    genealogyName: "本地族人",
+    branchName: "测试房",
+    ancestorName: "测试祖先",
+  },
+});
+expectStatus(registration, 201);
+assert.equal(registration.body.status, "pending");
+
+const pendingLogin = await request("/api/auth/login", {
+  method: "POST",
+  body: { username: "local.member", password },
+});
+expectStatus(pendingLogin, 403);
+assert.equal(pendingLogin.body.code, "account_unavailable");
+assert.equal(pendingLogin.cookies.length, 0);
+
+const adminLogin = await request("/api/auth/login", {
+  method: "POST",
+  body: { username: "local.admin", password },
+});
+expectStatus(adminLogin, 200);
+const adminCookie = sessionCookie(adminLogin);
+const adminCsrf = adminLogin.body.csrfToken;
+
+const pending = await request("/api/admin/accounts/pending", { cookie: adminCookie });
+expectStatus(pending, 200);
+const member = pending.body.accounts.find((account) => account.username === "local.member");
+assert.ok(member, "待审核账号必须可由管理员读取");
+
+const rejectedForMissingCsrf = await request("/api/admin/persons", {
+  method: "POST",
+  cookie: adminCookie,
+  body: { displayName: "本地人物锚点", visibility: "MEMBER" },
+});
+expectStatus(rejectedForMissingCsrf, 403);
+assert.equal(rejectedForMissingCsrf.body.code, "csrf_token_invalid");
+
+const personResult = await request("/api/admin/persons", {
+  method: "POST",
+  cookie: adminCookie,
+  csrf: adminCsrf,
+  body: { displayName: "本地人物锚点", visibility: "MEMBER" },
+});
+expectStatus(personResult, 201);
+
+const approval = await request(`/api/admin/accounts/${member.id}/approve`, {
+  method: "POST",
+  cookie: adminCookie,
+  csrf: adminCsrf,
+  body: { personId: personResult.body.person.id, role: "editor", version: member.version },
+});
+expectStatus(approval, 200);
+
+const memberLogin = await request("/api/auth/login", {
+  method: "POST",
+  body: { username: "local.member", password },
+});
+expectStatus(memberLogin, 200);
+const memberCookie = sessionCookie(memberLogin);
+const memberCsrf = memberLogin.body.csrfToken;
+
+const identity = await request("/api/me", { cookie: memberCookie });
+expectStatus(identity, 200);
+assert.deepEqual(identity.body.account.roles.sort(), ["editor", "member"]);
+
+const passwordReset = await request(`/api/admin/accounts/${member.id}/reset-password`, {
+  method: "POST",
+  cookie: adminCookie,
+  csrf: adminCsrf,
+  body: { password: newPassword },
+});
+expectStatus(passwordReset, 204);
+
+expectStatus(await request("/api/me", { cookie: memberCookie }), 401);
+expectStatus(
+  await request("/api/auth/login", { method: "POST", body: { username: "local.member", password } }),
+  401,
+);
+
+const relogin = await request("/api/auth/login", {
+  method: "POST",
+  body: { username: "local.member", password: newPassword },
+});
+expectStatus(relogin, 200);
+const refreshedCookie = sessionCookie(relogin);
+
+expectStatus(
+  await request("/api/auth/logout", { method: "POST", cookie: refreshedCookie, csrf: relogin.body.csrfToken }),
+  204,
+);
+expectStatus(await request("/api/me", { cookie: refreshedCookie }), 401);
+
+console.log("本地认证集成流程通过。");
+NODE

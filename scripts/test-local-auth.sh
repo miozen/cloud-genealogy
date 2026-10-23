@@ -192,6 +192,25 @@ const personFact = await request(`/api/admin/persons/${personResult.body.person.
 });
 expectStatus(personFact, 201);
 assert.ok(personFact.body.personFact.placeId);
+const aliasName = await request(`/api/admin/persons/${personResult.body.person.id}/names`, {
+  method: "POST", cookie: adminCookie, csrf: adminCsrf,
+  body: { nameText: "本地人物别名", nameKind: "alias", visibility: "MEMBER" },
+});
+expectStatus(aliasName, 201);
+const personDetail = await request(`/api/admin/persons/${personResult.body.person.id}`, { cookie: adminCookie });
+expectStatus(personDetail, 200);
+assert.equal(personDetail.body.names.length, 2);
+assert.equal(personDetail.body.facts.length, 1);
+expectStatus(await request(`/api/admin/person-names/${aliasName.body.personName.id}/retire`, {
+  method: "POST", cookie: adminCookie, csrf: adminCsrf,
+}), 200);
+expectStatus(await request(`/api/admin/person-facts/${personFact.body.personFact.id}/retire`, {
+  method: "POST", cookie: adminCookie, csrf: adminCsrf,
+}), 200);
+const retiredDetail = await request(`/api/admin/persons/${personResult.body.person.id}`, { cookie: adminCookie });
+expectStatus(retiredDetail, 200);
+assert.equal(retiredDetail.body.names.length, 1);
+assert.equal(retiredDetail.body.facts.length, 0);
 
 const secondPerson = await request("/api/admin/persons", {
   method: "POST",

@@ -435,6 +435,47 @@ export function createApp() {
     return context.json({ personFact: { id, personId, factKind: parsed.data.factKind, valueText: parsed.data.valueText ?? null, dateText: parsed.data.dateText ?? null, datePrecision: parsed.data.datePrecision, placeId, visibility: parsed.data.visibility } }, 201);
   });
 
+  app.get("/api/admin/persons/:personId", requireAuthentication, async (context) => {
+    const auth = context.get("auth")!;
+    if (!hasPermission(auth.roles, "system.manage")) return context.json({ code: "forbidden" }, 403);
+    const personId = context.req.param("personId");
+    const person = await context.env.DB.prepare("SELECT id, display_name, visibility FROM person WHERE id = ?").bind(personId).first<PersonAnchorRow>();
+    if (!person) return context.json({ code: "person_not_found" }, 404);
+    const [names, facts] = await Promise.all([
+      context.env.DB.prepare("SELECT id, name_text, name_kind, is_primary, visibility FROM person_name WHERE person_id = ? AND retired_at IS NULL ORDER BY is_primary DESC, created_at, id").bind(personId).all(),
+      context.env.DB.prepare("SELECT f.id, f.fact_kind, f.value_text, f.date_text, f.date_precision, f.visibility, f.place_id, p.name_text AS place_name FROM person_fact f LEFT JOIN place p ON p.id = f.place_id AND p.retired_at IS NULL WHERE f.person_id = ? AND f.retired_at IS NULL ORDER BY f.created_at, f.id").bind(personId).all(),
+    ]);
+    return context.json({ person: { id: person.id, displayName: person.display_name, visibility: person.visibility }, names: names.results, facts: facts.results });
+  });
+
+  app.post("/api/admin/person-names/:nameId/retire", requireAuthentication, async (context) => {
+    const auth = context.get("auth")!;
+    if (!hasPermission(auth.roles, "system.manage")) return context.json({ code: "forbidden" }, 403);
+    const nameId = context.req.param("nameId");
+    const name = await context.env.DB.prepare("SELECT person_id, is_primary FROM person_name WHERE id = ? AND retired_at IS NULL").bind(nameId).first<{ person_id: string; is_primary: number }>();
+    if (!name) return context.json({ code: "person_name_not_found" }, 404);
+    if (name.is_primary) return context.json({ code: "primary_name_requires_replacement" }, 409);
+    await context.env.DB.batch([
+      context.env.DB.prepare("UPDATE person_name SET retired_at = ? WHERE id = ? AND retired_at IS NULL").bind(now(), nameId),
+      context.env.DB.prepare("INSERT INTO audit_log (id, actor_account_id, action, object_type, object_id, metadata_json, created_at) VALUES (?, ?, ?, ?, ?, ?, ?)").bind(crypto.randomUUID(), auth.accountId, "person.name_retired", "person_name", nameId, JSON.stringify({ personId: name.person_id }), now()),
+    ]);
+    return context.json({ status: "retired" });
+  });
+
+  app.post("/api/admin/person-facts/:factId/retire", requireAuthentication, async (context) => {
+    const auth = context.get("auth")!;
+    if (!hasPermission(auth.roles, "system.manage")) return context.json({ code: "forbidden" }, 403);
+    const factId = context.req.param("factId");
+    const fact = await context.env.DB.prepare("SELECT person_id FROM person_fact WHERE id = ? AND retired_at IS NULL").bind(factId).first<{ person_id: string }>();
+    if (!fact) return context.json({ code: "person_fact_not_found" }, 404);
+    const timestamp = now();
+    await context.env.DB.batch([
+      context.env.DB.prepare("UPDATE person_fact SET retired_at = ? WHERE id = ? AND retired_at IS NULL").bind(timestamp, factId),
+      context.env.DB.prepare("INSERT INTO audit_log (id, actor_account_id, action, object_type, object_id, metadata_json, created_at) VALUES (?, ?, ?, ?, ?, ?, ?)").bind(crypto.randomUUID(), auth.accountId, "person.fact_retired", "person_fact", factId, JSON.stringify({ personId: fact.person_id }), timestamp),
+    ]);
+    return context.json({ status: "retired" });
+  });
+
   app.post("/api/admin/genealogies", requireAuthentication, async (context) => {
     const auth = context.get("auth")!;
     if (!hasPermission(auth.roles, "system.manage")) return context.json({ code: "forbidden" }, 403);

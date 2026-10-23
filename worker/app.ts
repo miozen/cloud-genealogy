@@ -1,4 +1,4 @@
-import { Hono } from "hono";
+import { Hono, type Context } from "hono";
 import { deleteCookie, getCookie, setCookie } from "hono/cookie";
 import { hasPermission } from "./auth/authorization";
 import { consumeLoginRateLimit } from "./auth/login-rate-limit-store";
@@ -513,12 +513,16 @@ export function createApp() {
       const subject = await context.env.DB.prepare("SELECT id FROM source_person_record WHERE id = ? AND edition_id = ?").bind(parsed.data.subjectRecordId, editionId).first<{ id: string }>();
       if (!subject) return context.json({ code: "source_record_not_found" }, 404);
     }
+    if (parsed.data.supersedesClaimId) {
+      const previous = await context.env.DB.prepare("SELECT id FROM source_fact_claim WHERE id = ? AND edition_id = ? AND retracted_at IS NULL").bind(parsed.data.supersedesClaimId, editionId).first<{ id: string }>();
+      if (!previous) return context.json({ code: "source_claim_not_found" }, 404);
+    }
     const id = crypto.randomUUID(); const timestamp = now();
     await context.env.DB.batch([
-      context.env.DB.prepare("INSERT INTO source_fact_claim (id, edition_id, subject_record_id, fact_kind, raw_text, created_at) VALUES (?, ?, ?, ?, ?, ?)").bind(id, editionId, parsed.data.subjectRecordId ?? null, parsed.data.factKind, parsed.data.rawText, timestamp),
+      context.env.DB.prepare("INSERT INTO source_fact_claim (id, edition_id, subject_record_id, fact_kind, raw_text, created_at, supersedes_claim_id) VALUES (?, ?, ?, ?, ?, ?, ?)").bind(id, editionId, parsed.data.subjectRecordId ?? null, parsed.data.factKind, parsed.data.rawText, timestamp, parsed.data.supersedesClaimId ?? null),
       context.env.DB.prepare("INSERT INTO audit_log (id, actor_account_id, action, object_type, object_id, metadata_json, created_at) VALUES (?, ?, ?, ?, ?, ?, ?)").bind(crypto.randomUUID(), auth.accountId, "source.fact_claim_created", "source_fact_claim", id, JSON.stringify({ editionId }), timestamp),
     ]);
-    return context.json({ sourceFactClaim: { id, editionId, subjectRecordId: parsed.data.subjectRecordId ?? null, factKind: parsed.data.factKind, rawText: parsed.data.rawText } }, 201);
+    return context.json({ sourceFactClaim: { id, editionId, subjectRecordId: parsed.data.subjectRecordId ?? null, factKind: parsed.data.factKind, rawText: parsed.data.rawText, supersedesClaimId: parsed.data.supersedesClaimId ?? null } }, 201);
   });
 
   app.post("/api/admin/genealogy-editions/:editionId/source-relation-claims", requireAuthentication, async (context) => {
@@ -534,13 +538,42 @@ export function createApp() {
       const record = await context.env.DB.prepare("SELECT id FROM source_person_record WHERE id = ? AND edition_id = ?").bind(recordId, editionId).first<{ id: string }>();
       if (!record) return context.json({ code: "source_record_not_found" }, 404);
     }
+    if (parsed.data.supersedesClaimId) {
+      const previous = await context.env.DB.prepare("SELECT id FROM source_relation_claim WHERE id = ? AND edition_id = ? AND retracted_at IS NULL").bind(parsed.data.supersedesClaimId, editionId).first<{ id: string }>();
+      if (!previous) return context.json({ code: "source_claim_not_found" }, 404);
+    }
     const id = crypto.randomUUID(); const timestamp = now();
     await context.env.DB.batch([
-      context.env.DB.prepare("INSERT INTO source_relation_claim (id, edition_id, subject_record_id, related_record_id, relation_kind, raw_text, created_at) VALUES (?, ?, ?, ?, ?, ?, ?)").bind(id, editionId, parsed.data.subjectRecordId, parsed.data.relatedRecordId ?? null, parsed.data.relationKind, parsed.data.rawText, timestamp),
+      context.env.DB.prepare("INSERT INTO source_relation_claim (id, edition_id, subject_record_id, related_record_id, relation_kind, raw_text, created_at, supersedes_claim_id) VALUES (?, ?, ?, ?, ?, ?, ?, ?)").bind(id, editionId, parsed.data.subjectRecordId, parsed.data.relatedRecordId ?? null, parsed.data.relationKind, parsed.data.rawText, timestamp, parsed.data.supersedesClaimId ?? null),
       context.env.DB.prepare("INSERT INTO audit_log (id, actor_account_id, action, object_type, object_id, metadata_json, created_at) VALUES (?, ?, ?, ?, ?, ?, ?)").bind(crypto.randomUUID(), auth.accountId, "source.relation_claim_created", "source_relation_claim", id, JSON.stringify({ editionId }), timestamp),
     ]);
-    return context.json({ sourceRelationClaim: { id, editionId, subjectRecordId: parsed.data.subjectRecordId, relatedRecordId: parsed.data.relatedRecordId ?? null, relationKind: parsed.data.relationKind, rawText: parsed.data.rawText } }, 201);
+    return context.json({ sourceRelationClaim: { id, editionId, subjectRecordId: parsed.data.subjectRecordId, relatedRecordId: parsed.data.relatedRecordId ?? null, relationKind: parsed.data.relationKind, rawText: parsed.data.rawText, supersedesClaimId: parsed.data.supersedesClaimId ?? null } }, 201);
   });
+
+  app.get("/api/admin/genealogy-editions/:editionId/source-claims", requireAuthentication, async (context) => {
+    const auth = context.get("auth")!;
+    if (!hasPermission(auth.roles, "system.manage")) return context.json({ code: "forbidden" }, 403);
+    const editionId = context.req.param("editionId");
+    const [facts, relations] = await Promise.all([
+      context.env.DB.prepare("SELECT id, subject_record_id, fact_kind, raw_text, supersedes_claim_id, retracted_at FROM source_fact_claim WHERE edition_id = ? ORDER BY created_at, id").bind(editionId).all(),
+      context.env.DB.prepare("SELECT id, subject_record_id, related_record_id, relation_kind, raw_text, supersedes_claim_id, retracted_at FROM source_relation_claim WHERE edition_id = ? ORDER BY created_at, id").bind(editionId).all(),
+    ]);
+    return context.json({ factClaims: facts.results, relationClaims: relations.results });
+  });
+
+  const retractSourceClaim = (table: "source_fact_claim" | "source_relation_claim", claimKind: "fact" | "relation") => async (context: Context<AppEnv>) => {
+    const auth = context.get("auth")!;
+    if (!hasPermission(auth.roles, "system.manage")) return context.json({ code: "forbidden" }, 403);
+    const claimId = context.req.param("claimId");
+    if (!claimId) return context.json({ code: "not_found" }, 404);
+    const timestamp = now();
+    const result = await context.env.DB.prepare(`UPDATE ${table} SET retracted_at = ? WHERE id = ? AND retracted_at IS NULL`).bind(timestamp, claimId).run();
+    if (result.meta.changes !== 1) return context.json({ code: "source_claim_not_found" }, 404);
+    await writeAudit(context.env.DB, auth.accountId, "source.claim_retracted", table, claimId, { claimKind });
+    return context.json({ status: "retracted" });
+  };
+  app.post("/api/admin/source-fact-claims/:claimId/retract", requireAuthentication, retractSourceClaim("source_fact_claim", "fact"));
+  app.post("/api/admin/source-relation-claims/:claimId/retract", requireAuthentication, retractSourceClaim("source_relation_claim", "relation"));
 
   app.post("/api/admin/accounts/:accountId/approve", requireAuthentication, async (context) => {
     const auth = context.get("auth")!;

@@ -11,6 +11,7 @@
     "dev:worker": "wrangler dev --local",
     "build": "npm run typecheck && vite build",
     "test": "vitest run",
+    "test:local-auth": "bash scripts/test-local-auth.sh",
     "lint": "eslint . --max-warnings=0",
     "typecheck": "vue-tsc --noEmit",
     "check": "npm run typecheck && npm run test"

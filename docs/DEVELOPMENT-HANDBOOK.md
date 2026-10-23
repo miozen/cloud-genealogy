@@ -18,6 +18,7 @@
 - 只有本地验证通过且确实需要验证 Cloudflare 平台行为时，才申请 preview 环境授权；production 操作始终需要单独明确授权。
 - 交付报告必须区分“已执行且通过”“已执行但失败”“未执行及原因”；未执行项绝不写为通过。
 - 当前已有本地命令：`npm run lint`（ESLint 代码规范检查）、`npm run check`（类型检查和单元测试）、`npm run build`（生产构建）、`npm run dev:worker`（本地 Worker）、`wrangler d1 ... --local`（本地迁移/查询）。交付前至少运行与改动相关的 lint、check 和 build，并如实记录结果。
+- `npm run test:local-auth` 会在独立的 `.wrangler/local-auth-integration/` 状态目录中启动本地 Worker，自动迁移并验证 bootstrap、注册待审、CSRF、人工人物关联、批准、登录、重置密码、会话撤销与退出。脚本使用临时测试凭证，退出时清理测试账号及关联记录；不得加 `--remote`。
 
 ## 1. 工作站前置条件
 
@@ -61,6 +62,7 @@ npm run dev:worker
 ```bash
 npm run check
 npm run build
+npm run test:local-auth
 npx wrangler d1 migrations apply DB --local
 npx wrangler d1 execute DB --local --command "SELECT name FROM sqlite_master WHERE type = 'table';"
 ```
@@ -152,7 +154,7 @@ git push origin v0.1.0
 
 ## 5. Cloudflare 环境与部署边界
 
-- `wrangler.jsonc` 已分开 local、`preview`、`production` binding 名称。preview/production 中的资源 ID 为故意占位值，必须在获授权创建实际资源后才替换。
+- `wrangler.jsonc` 已分开 local、`preview`、`production` binding。preview 是已隔离的验证环境；production 的资源 ID 仍为占位值。无论资源是否存在，任何 preview/production 的 D1、R2、Secret 或部署操作均须获得对应明确授权。
 - preview 与 production 必须使用不同 D1 数据库、R2 桶、Cookie 名称/密钥和 Cloudflare Secrets。
 - GitHub Actions 仅使用最小权限、可轮换的 Cloudflare Token；Token 只存 GitHub Secrets。
 - 所有远程迁移、Secrets 写入、资源创建与部署都必须先通过 review，且生产操作须有明确授权。

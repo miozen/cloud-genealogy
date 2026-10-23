@@ -25,6 +25,7 @@ describe("rollback publishing", () => {
     } as unknown as D1Database;
     await expect(rollbackSuccessionRevision(database, {
       lineageId: "lineage", targetRevisionId: "old", newRevisionId: "new", expectedPointerVersion: 1, now: "2026-01-01T00:00:00Z",
+      audit: { id: "audit-rollback", actorAccountId: "admin", action: "lineage.revision_rolled_back", objectType: "lineage_revision", objectId: "new", metadataJson: "{}" },
     })).rejects.toThrow("no published revision");
   });
 });

@@ -21,7 +21,20 @@ export function projectHangingChart(
       if (parentGeneration !== undefined) generation.set(edge.childPersonId, parentGeneration + 1);
     }
   }
-  const nodes = people.map((person) => ({ personId: person.id, displayName: person.displayName, generation: generation.get(person.id) ?? 0, branchIds: person.branchIds ?? [] }));
-  const generations = [...new Set(nodes.map((node) => node.generation))].sort((a, b) => a - b).map((value) => ({ generation: value, personIds: nodes.filter((node) => node.generation === value).map((node) => node.personId) }));
+  const nodesByPerson = new Map(people.map((person) => [person.id, {
+    personId: person.id,
+    displayName: person.displayName,
+    generation: generation.get(person.id) ?? 0,
+    branchIds: person.branchIds ?? [],
+  }]));
+  const generations = [...new Set(Array.from(nodesByPerson.values(), (node) => node.generation))]
+    .sort((a, b) => a - b)
+    .map((value) => ({
+      generation: value,
+      personIds: people
+        .filter((person) => nodesByPerson.get(person.id)?.generation === value)
+        .map((person) => person.id),
+    }));
+  const nodes = generations.flatMap((group) => group.personIds.map((personId) => nodesByPerson.get(personId)!));
   return { nodes, edges: sortedEdges, generations };
 }

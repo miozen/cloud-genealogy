@@ -8,12 +8,19 @@
 - `worker/lineage/hanging-chart-layout.ts`：输出世代横向分列、同辈纵排坐标与正交连接点列；坐标只存在于布局输出。
 - `expandHangingChart`：按根人物返回该人物及后代的纯数据投影，不修改权威数据。
 - 单元测试验证三代世代列、同辈纵排、正交点列和逐支展开。
+- 新增管理员受权的 `GET /api/admin/lineages/{lineageId}/hanging-chart`：只读取当前发布指针所指 revision，返回无坐标投影及 SVG 所需布局结果；可选 `rootPersonId` 仅收窄读取结果，不改写权威数据。
+- revision 发布与回退的审计记录现随 immutable snapshot 与发布指针在同一 D1 batch 写入，避免发布成功而审计缺失。
+- 管理员界面已接入 SVG 吊线图：可载入已发布世系、按根人物收窄、缩放、按姓名定位并在右侧只读查看人物资料。选择或定位节点只改变浏览器状态；未增加任何绕过 revision/审核的编辑写入。
+- 管理员可受权列出已有世系、选择世系并建立空世系；创建会写入审计，空世系必须经后续 revision 发布后才可被吊线图读取，不再要求在界面手工输入世系 UUID。
+- SVG 导出在浏览器端按完整图谱边界生成；仅在管理员主动点击时下载，不上传、持久化或修改任何世系数据。
 
 ## 实际验证
 
-- `npm run lint`、`npm run check`（28 个测试）、`npm run build` 均通过。
+- 在 `d4e03cc` 时，`npm run lint`、`npm run check`（28 个测试）、`npm run build` 均通过。
+- 本次受权 API、节点世代顺序、SVG 读取交互、世系列表/创建与原子审计改动已在 Node `22.23.4` 下验证：`npm run lint`、`npm run check`（31 个测试）与 `npm run build` 均通过；`npm run test:local-core-model` 与 `npm run test:local-auth` 也通过，后者已覆盖世系创建与列出、已发布 revision 的吊线图读取、根节点展开和正交连接输出。
+- 新增约 1000 人合成世系的纯投影/布局回归：验证确定性、世代列/同辈行间距与坐标不重复。它不是浏览器设备帧率或真实资料数据验收。
 - 未部署；未访问 Preview、生产 D1/R2。
 
 ## 接力起点
 
-从 `dev` 创建 `feat/p0-3-chart-api-svg`。优先实现受权 API，将已发布承谱投影串到吊线图投影与布局输出；随后才实现 SVG 视图、缩放、搜索定位和右侧人物面板。不得将布局坐标写入人物、世系或任何权威表。
+当前工作位于 `feat/p0-3-chart-api-svg`。受权 canonical API、世系选择/创建、SVG 视图、缩放、姓名定位和只读人物面板均已完成，并已有 Worker/D1 集成覆盖。下一步是在真实约 1000 人的固定数据中验证布局稳定性、节点不重叠与视口性能；人物编辑仍应走后续 P0-5 的变更请求/审核流程。不得将布局坐标写入人物、世系或任何权威表。

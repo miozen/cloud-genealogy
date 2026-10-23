@@ -44,6 +44,7 @@ export const rollbackRevisionInput = z.object({
   expectedPointerVersion: z.number().int().positive(),
 });
 const sourceTitle = z.string().trim().min(1, "标题不能为空。").max(160, "标题最长 160 个字符。");
+export const lineageInput = z.object({ name: sourceTitle });
 export const genealogyInput = z.object({ title: sourceTitle });
 export const genealogyEditionInput = z.object({
   title: sourceTitle,

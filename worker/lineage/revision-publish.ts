@@ -1,6 +1,15 @@
 import type { SuccessionEdgeCandidate } from "./succession-validation";
 import { previewSuccessionRevision } from "./revision-preview";
 
+export interface RevisionAuditEntry {
+  id: string;
+  actorAccountId: string;
+  action: string;
+  objectType: string;
+  objectId: string;
+  metadataJson: string;
+}
+
 export interface PublishRevisionInput {
   lineageId: string;
   revisionId: string;
@@ -9,6 +18,7 @@ export interface PublishRevisionInput {
   proposedEdges: readonly SuccessionEdgeCandidate[];
   expectedPointerVersion: number;
   now: string;
+  audit: RevisionAuditEntry;
 }
 
 export type PublishRevisionResult =
@@ -38,6 +48,19 @@ export async function publishSuccessionRevision(
     database.prepare(
       "INSERT INTO lineage_published_pointer (lineage_id, revision_id, updated_at, version) VALUES (?, ?, ?, 1) ON CONFLICT(lineage_id) DO UPDATE SET revision_id = excluded.revision_id, updated_at = excluded.updated_at, version = lineage_published_pointer.version + 1 WHERE lineage_published_pointer.version = ?",
     ).bind(input.lineageId, input.revisionId, input.now, input.expectedPointerVersion),
+    ...[
+      database.prepare(
+        "INSERT INTO audit_log (id, actor_account_id, action, object_type, object_id, metadata_json, created_at) VALUES (?, ?, ?, ?, ?, ?, ?)",
+      ).bind(
+        input.audit.id,
+        input.audit.actorAccountId,
+        input.audit.action,
+        input.audit.objectType,
+        input.audit.objectId,
+        input.audit.metadataJson,
+        input.now,
+      ),
+    ],
   ];
   await database.batch(statements);
   return { published: true, revisionId: input.revisionId };
@@ -56,6 +79,7 @@ export interface RollbackRevisionInput {
   newRevisionId: string;
   expectedPointerVersion: number;
   now: string;
+  audit: RevisionAuditEntry;
 }
 
 /** Rollback republishes a historical snapshot as a new immutable revision. */
@@ -81,5 +105,6 @@ export async function rollbackSuccessionRevision(
     proposedEdges: await buildRollbackEdges(database, input.targetRevisionId),
     expectedPointerVersion: input.expectedPointerVersion,
     now: input.now,
+    audit: input.audit,
   });
 }

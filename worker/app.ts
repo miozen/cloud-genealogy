@@ -12,6 +12,7 @@ import {
   loginInput,
   genealogyEditionInput,
   genealogyInput,
+  lineageInput,
   personAnchorInput,
   personFactInput,
   personNameInput,
@@ -29,6 +30,7 @@ import {
 } from "./auth/validation";
 import { previewSuccessionRevision } from "./lineage/revision-preview";
 import { publishSuccessionRevision, rollbackSuccessionRevision } from "./lineage/revision-publish";
+import { buildPublishedHangingChart } from "./lineage/hanging-chart-service";
 import { csrfProtection, requireAuthentication, sessionMiddleware } from "./middleware/authentication";
 import { securityHeaders } from "./middleware/security";
 import type { AppEnv } from "./types";
@@ -285,6 +287,33 @@ export function createApp() {
     return context.body(null, 204);
   });
 
+  app.get("/api/admin/lineages", requireAuthentication, async (context) => {
+    const auth = context.get("auth")!;
+    if (!hasPermission(auth.roles, "system.manage")) return context.json({ code: "forbidden" }, 403);
+    const lineages = await context.env.DB.prepare(
+      `SELECT lineage.id, lineage.name, lineage.succession_rule, pointer.revision_id AS published_revision_id, pointer.version AS pointer_version
+       FROM lineage
+       LEFT JOIN lineage_published_pointer AS pointer ON pointer.lineage_id = lineage.id
+       WHERE lineage.retired_at IS NULL
+       ORDER BY lineage.name, lineage.id
+       LIMIT 100`,
+    ).all();
+    return context.json({ lineages: lineages.results });
+  });
+
+  app.post("/api/admin/lineages", requireAuthentication, async (context) => {
+    const auth = context.get("auth")!;
+    if (!hasPermission(auth.roles, "system.manage")) return context.json({ code: "forbidden" }, 403);
+    const parsed = lineageInput.safeParse(await context.req.json().catch(() => null));
+    if (!parsed.success) return context.json({ code: "validation_failed", message: validationMessage(parsed) }, 400);
+    const id = crypto.randomUUID(); const timestamp = now();
+    await context.env.DB.batch([
+      context.env.DB.prepare("INSERT INTO lineage (id, name, created_at) VALUES (?, ?, ?)").bind(id, parsed.data.name, timestamp),
+      context.env.DB.prepare("INSERT INTO audit_log (id, actor_account_id, action, object_type, object_id, metadata_json, created_at) VALUES (?, ?, ?, ?, ?, ?, ?)").bind(crypto.randomUUID(), auth.accountId, "lineage.created", "lineage", id, "{}", timestamp),
+    ]);
+    return context.json({ lineage: { id, name: parsed.data.name, successionRule: "configured", publishedRevisionId: null, pointerVersion: null } }, 201);
+  });
+
   app.post("/api/admin/lineages/:lineageId/revisions/preview", requireAuthentication, async (context) => {
     const auth = context.get("auth")!;
     if (!hasPermission(auth.roles, "system.manage")) return context.json({ code: "forbidden" }, 403);
@@ -317,6 +346,50 @@ export function createApp() {
     return context.json({ view: "canonical", lineageId, revisionId: pointer.revision_id, pointerVersion: pointer.version, edges: edges.results });
   });
 
+  app.get("/api/admin/lineages/:lineageId/hanging-chart", requireAuthentication, async (context) => {
+    const auth = context.get("auth")!;
+    if (!hasPermission(auth.roles, "system.manage")) return context.json({ code: "forbidden" }, 403);
+    const lineageId = context.req.param("lineageId");
+    const rootPersonId = context.req.query("rootPersonId");
+    if (rootPersonId && !/^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/iu.test(rootPersonId)) {
+      return context.json({ code: "validation_failed", message: "rootPersonId 必须是 UUID。" }, 400);
+    }
+    const pointer = await context.env.DB.prepare(
+      "SELECT revision_id, version FROM lineage_published_pointer WHERE lineage_id = ?",
+    ).bind(lineageId).first<PublishedPointerRow>();
+    if (!pointer) return context.json({ code: "published_revision_not_found" }, 404);
+
+    const edges = await context.env.DB.prepare(
+      "SELECT parent_person_id, child_person_id, order_key FROM lineage_succession_snapshot WHERE revision_id = ? ORDER BY order_key, id",
+    ).bind(pointer.revision_id).all<{ parent_person_id: string; child_person_id: string; order_key: string }>();
+    const people = await context.env.DB.prepare(
+      `SELECT DISTINCT person.id, person.display_name
+       FROM person
+       INNER JOIN (
+         SELECT parent_person_id AS person_id FROM lineage_succession_snapshot WHERE revision_id = ?
+         UNION
+         SELECT child_person_id AS person_id FROM lineage_succession_snapshot WHERE revision_id = ?
+       ) AS projected_person ON projected_person.person_id = person.id
+       ORDER BY person.id`,
+    ).bind(pointer.revision_id, pointer.revision_id).all<{ id: string; display_name: string }>();
+    if (rootPersonId && !people.results.some((person) => person.id === rootPersonId)) {
+      return context.json({ code: "root_person_not_found" }, 404);
+    }
+
+    const chart = buildPublishedHangingChart(
+      people.results.map((person) => ({ id: person.id, displayName: person.display_name })),
+      edges.results.map((edge) => ({ parentPersonId: edge.parent_person_id, childPersonId: edge.child_person_id, orderKey: edge.order_key })),
+      rootPersonId,
+    );
+    return context.json({
+      view: "canonical",
+      lineageId,
+      revisionId: pointer.revision_id,
+      pointerVersion: pointer.version,
+      ...chart,
+    });
+  });
+
   app.get("/api/admin/genealogy-editions/:editionId/historical-projection", requireAuthentication, async (context) => {
     const auth = context.get("auth")!;
     if (!hasPermission(auth.roles, "system.manage")) return context.json({ code: "forbidden" }, 403);
@@ -342,13 +415,16 @@ export function createApp() {
       lineageId, revisionId: parsed.data.revisionId, basedOnRevisionId: parsed.data.basedOnRevisionId,
       baseEdges: base.results.map((row) => ({ parentPersonId: row.parent_person_id, childPersonId: row.child_person_id })),
       proposedEdges: parsed.data.edges, expectedPointerVersion: parsed.data.expectedPointerVersion, now: now(),
+      audit: {
+        id: crypto.randomUUID(), actorAccountId: auth.accountId, action: "lineage.revision_published",
+        objectType: "lineage_revision", objectId: parsed.data.revisionId, metadataJson: JSON.stringify({ lineageId }),
+      },
     }).catch((error: unknown) => {
       if (error instanceof Error && /lineage publish conflict/.test(error.message)) return null;
       throw error;
     });
     if (!result) return context.json({ code: "revision_conflict" }, 409);
     if (!result.published) return context.json({ code: "revision_invalid", issues: result.issues }, 400);
-    await writeAudit(context.env.DB, auth.accountId, "lineage.revision_published", "lineage_revision", result.revisionId, { lineageId });
     return context.json(result, 201);
   });
 
@@ -362,9 +438,13 @@ export function createApp() {
       const result = await rollbackSuccessionRevision(context.env.DB, {
         lineageId, targetRevisionId: parsed.data.targetRevisionId, newRevisionId: parsed.data.newRevisionId,
         expectedPointerVersion: parsed.data.expectedPointerVersion, now: now(),
+        audit: {
+          id: crypto.randomUUID(), actorAccountId: auth.accountId, action: "lineage.revision_rolled_back",
+          objectType: "lineage_revision", objectId: parsed.data.newRevisionId,
+          metadataJson: JSON.stringify({ lineageId, targetRevisionId: parsed.data.targetRevisionId }),
+        },
       });
       if (!result.published) return context.json({ code: "revision_invalid", issues: result.issues }, 400);
-      await writeAudit(context.env.DB, auth.accountId, "lineage.revision_rolled_back", "lineage_revision", result.revisionId, { lineageId, targetRevisionId: parsed.data.targetRevisionId });
       return context.json(result, 201);
     } catch (error) {
       if (error instanceof Error && /Rollback target|no published revision/.test(error.message)) {

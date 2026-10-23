@@ -64,10 +64,6 @@ trap 'test_status=$?; shutdown' EXIT
 
 npx wrangler d1 migrations apply DB --local --persist-to "$state_dir" >/dev/null
 clean_test_rows
-npx wrangler d1 execute DB --local --persist-to "$state_dir" --command "
-  INSERT INTO lineage (id, name, created_at) VALUES ('11111111-1111-4111-8111-111111111111', '本地测试世系', '2026-01-01T00:00:00Z');
-" >/dev/null
-
 npx wrangler dev --local --port "$port" --persist-to "$state_dir" \
   --var AUTH_RATE_LIMIT_SECRET:local-integration-rate-limit-secret \
   --var BOOTSTRAP_SECRET:local-integration-bootstrap-secret >"$log_file" 2>&1 &
@@ -275,7 +271,14 @@ expectStatus(await request(`/api/admin/source-relation-claims/${sourceRelationCl
   method: "POST", cookie: adminCookie, csrf: adminCsrf,
 }), 200);
 
-const lineageId = "11111111-1111-4111-8111-111111111111";
+const lineageCreate = await request("/api/admin/lineages", {
+  method: "POST", cookie: adminCookie, csrf: adminCsrf, body: { name: "本地测试世系" },
+});
+expectStatus(lineageCreate, 201);
+const lineageId = lineageCreate.body.lineage.id;
+const lineages = await request("/api/admin/lineages", { cookie: adminCookie });
+expectStatus(lineages, 200);
+assert.equal(lineages.body.lineages.some((lineage) => lineage.id === lineageId && lineage.published_revision_id === null), true);
 expectStatus(await request(`/api/admin/lineages/${lineageId}/revisions/preview`, {
   method: "POST",
   cookie: adminCookie,
@@ -311,6 +314,12 @@ const canonicalProjection = await request(`/api/admin/lineages/${lineageId}/proj
 expectStatus(canonicalProjection, 200);
 assert.equal(canonicalProjection.body.view, "canonical");
 assert.equal(canonicalProjection.body.edges.length, 1);
+const hangingChart = await request(`/api/admin/lineages/${lineageId}/hanging-chart?rootPersonId=${personResult.body.person.id}`, { cookie: adminCookie });
+expectStatus(hangingChart, 200);
+assert.equal(hangingChart.body.view, "canonical");
+assert.equal(hangingChart.body.revisionId, validPublish.body.revisionId);
+assert.deepEqual(hangingChart.body.projection.nodes.map((node) => node.personId), [personResult.body.person.id, secondPerson.body.person.id]);
+assert.equal(hangingChart.body.layout.connectors.length, 1);
 const rollback = await request(`/api/admin/lineages/${lineageId}/revisions/rollback`, {
   method: "POST",
   cookie: adminCookie,

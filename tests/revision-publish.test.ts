@@ -22,6 +22,7 @@ describe("revision publishing", () => {
     const result = await publishSuccessionRevision(database, {
       lineageId: "lineage", revisionId: "r2", baseEdges: [], expectedPointerVersion: 0, now: "2026-01-01T00:00:00Z",
       proposedEdges: [{ parentPersonId: "a", childPersonId: "b" }, { parentPersonId: "b", childPersonId: "a" }],
+      audit: { id: "audit-invalid", actorAccountId: "admin", action: "lineage.revision_published", objectType: "lineage_revision", objectId: "r2", metadataJson: "{}" },
     });
     expect(result.published).toBe(false);
     expect(statements).toEqual([]);
@@ -32,10 +33,12 @@ describe("revision publishing", () => {
     const result = await publishSuccessionRevision(database, {
       lineageId: "lineage", revisionId: "r2", basedOnRevisionId: "r1", baseEdges: [],
       proposedEdges: [{ parentPersonId: "parent", childPersonId: "child" }], expectedPointerVersion: 1, now: "2026-01-01T00:00:00Z",
+      audit: { id: "audit-1", actorAccountId: "admin", action: "lineage.revision_published", objectType: "lineage_revision", objectId: "r2", metadataJson: "{}" },
     });
     expect(result).toEqual({ published: true, revisionId: "r2" });
     expect(JSON.stringify(statements)).toContain("lineage_published_pointer");
     expect(JSON.stringify(statements)).toContain("expected_pointer_version");
+    expect(JSON.stringify(statements)).toContain("lineage.revision_published");
     expect(JSON.stringify(statements)).not.toContain("UPDATE lineage_revision");
   });
 });

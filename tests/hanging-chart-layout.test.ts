@@ -13,4 +13,21 @@ describe("hanging chart layout", () => {
     expect(layout.connectors[0]?.points).toHaveLength(4);
   });
   it("expands only a selected branch", () => expect(expandHangingChart(projection, "b").nodes.map((node) => node.personId)).toEqual(["b", "d"]));
+
+  it("keeps a synthetic 1000-person chart deterministic and non-overlapping", () => {
+    const people = Array.from({ length: 1000 }, (_, index) => ({ id: `p-${index}`, displayName: `人物${index}` }));
+    const edges = people.slice(1).map((person, index) => ({
+      parentPersonId: `p-${Math.floor(index / 3)}`,
+      childPersonId: person.id,
+      orderKey: String(index % 3).padStart(3, "0"),
+    }));
+    const full = projectHangingChart(people, edges);
+    const layout = layoutHangingChart(full);
+    const expanded = expandHangingChart(full, "p-1");
+
+    expect(layout.nodes).toHaveLength(1000);
+    expect(new Set(layout.nodes.map((node) => `${node.x}:${node.y}`))).toHaveLength(1000);
+    expect(layout.nodes.every((node) => node.x === node.generation * 240 && node.y % 96 === 0)).toBe(true);
+    expect(expanded.nodes.map((node) => node.personId)).toEqual(expandHangingChart(full, "p-1").nodes.map((node) => node.personId));
+  });
 });

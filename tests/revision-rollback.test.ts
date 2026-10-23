@@ -24,7 +24,7 @@ describe("rollback publishing", () => {
       prepare: () => ({ bind: () => ({ first: async () => null }) }),
     } as unknown as D1Database;
     await expect(rollbackSuccessionRevision(database, {
-      lineageId: "lineage", targetRevisionId: "old", newRevisionId: "new", now: "2026-01-01T00:00:00Z",
+      lineageId: "lineage", targetRevisionId: "old", newRevisionId: "new", expectedPointerVersion: 1, now: "2026-01-01T00:00:00Z",
     })).rejects.toThrow("no published revision");
   });
 });

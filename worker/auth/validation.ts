@@ -36,10 +36,12 @@ export const successionEdgesInput = z.object({
 export const publishRevisionInput = successionEdgesInput.extend({
   revisionId: z.string().uuid(),
   basedOnRevisionId: z.string().uuid().optional(),
+  expectedPointerVersion: z.number().int().nonnegative(),
 });
 export const rollbackRevisionInput = z.object({
   targetRevisionId: z.string().uuid(),
   newRevisionId: z.string().uuid(),
+  expectedPointerVersion: z.number().int().positive(),
 });
 
 export function validationMessage(result: z.ZodSafeParseResult<unknown>): string {

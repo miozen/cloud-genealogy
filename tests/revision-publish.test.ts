@@ -20,7 +20,7 @@ describe("revision publishing", () => {
   it("does not write an invalid snapshot", async () => {
     const { database, statements } = fakeDatabase();
     const result = await publishSuccessionRevision(database, {
-      lineageId: "lineage", revisionId: "r2", baseEdges: [], now: "2026-01-01T00:00:00Z",
+      lineageId: "lineage", revisionId: "r2", baseEdges: [], expectedPointerVersion: 0, now: "2026-01-01T00:00:00Z",
       proposedEdges: [{ parentPersonId: "a", childPersonId: "b" }, { parentPersonId: "b", childPersonId: "a" }],
     });
     expect(result.published).toBe(false);
@@ -31,10 +31,11 @@ describe("revision publishing", () => {
     const { database, statements } = fakeDatabase();
     const result = await publishSuccessionRevision(database, {
       lineageId: "lineage", revisionId: "r2", basedOnRevisionId: "r1", baseEdges: [],
-      proposedEdges: [{ parentPersonId: "parent", childPersonId: "child" }], now: "2026-01-01T00:00:00Z",
+      proposedEdges: [{ parentPersonId: "parent", childPersonId: "child" }], expectedPointerVersion: 1, now: "2026-01-01T00:00:00Z",
     });
     expect(result).toEqual({ published: true, revisionId: "r2" });
     expect(JSON.stringify(statements)).toContain("lineage_published_pointer");
+    expect(JSON.stringify(statements)).toContain("expected_pointer_version");
     expect(JSON.stringify(statements)).not.toContain("UPDATE lineage_revision");
   });
 });

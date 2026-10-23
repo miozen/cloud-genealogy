@@ -51,6 +51,7 @@ interface PersonAnchorRow {
   visibility: "PUBLIC" | "MEMBER" | "ADMIN";
 }
 interface SuccessionRow { parent_person_id: string; child_person_id: string; }
+interface PublishedPointerRow { revision_id: string; version: number; }
 
 function now(): string {
   return new Date().toISOString();
@@ -270,10 +271,18 @@ export function createApp() {
     const parsed = successionEdgesInput.safeParse(await context.req.json().catch(() => null));
     if (!parsed.success) return context.json({ code: "validation_failed", message: validationMessage(parsed) }, 400);
     const lineageId = context.req.param("lineageId");
-    const base = await context.env.DB.prepare(
-      "SELECT s.parent_person_id, s.child_person_id FROM lineage_published_pointer p JOIN lineage_succession_snapshot s ON s.revision_id = p.revision_id WHERE p.lineage_id = ? ORDER BY s.order_key",
-    ).bind(lineageId).all<SuccessionRow>();
-    return context.json({ preview: previewSuccessionRevision({ baseEdges: base.results.map((row) => ({ parentPersonId: row.parent_person_id, childPersonId: row.child_person_id })), proposedEdges: parsed.data.edges }) });
+    const pointer = await context.env.DB.prepare(
+      "SELECT revision_id, version FROM lineage_published_pointer WHERE lineage_id = ?",
+    ).bind(lineageId).first<PublishedPointerRow>();
+    const base = pointer
+      ? await context.env.DB.prepare(
+        "SELECT parent_person_id, child_person_id FROM lineage_succession_snapshot WHERE revision_id = ? ORDER BY order_key",
+      ).bind(pointer.revision_id).all<SuccessionRow>()
+      : { results: [] as SuccessionRow[] };
+    return context.json({
+      pointer: { revisionId: pointer?.revision_id ?? null, version: pointer?.version ?? 0 },
+      preview: previewSuccessionRevision({ baseEdges: base.results.map((row) => ({ parentPersonId: row.parent_person_id, childPersonId: row.child_person_id })), proposedEdges: parsed.data.edges }),
+    });
   });
 
   app.post("/api/admin/lineages/:lineageId/revisions/publish", requireAuthentication, async (context) => {
@@ -288,8 +297,12 @@ export function createApp() {
     const result = await publishSuccessionRevision(context.env.DB, {
       lineageId, revisionId: parsed.data.revisionId, basedOnRevisionId: parsed.data.basedOnRevisionId,
       baseEdges: base.results.map((row) => ({ parentPersonId: row.parent_person_id, childPersonId: row.child_person_id })),
-      proposedEdges: parsed.data.edges, now: now(),
+      proposedEdges: parsed.data.edges, expectedPointerVersion: parsed.data.expectedPointerVersion, now: now(),
+    }).catch((error: unknown) => {
+      if (error instanceof Error && /lineage publish conflict/.test(error.message)) return null;
+      throw error;
     });
+    if (!result) return context.json({ code: "revision_conflict" }, 409);
     if (!result.published) return context.json({ code: "revision_invalid", issues: result.issues }, 400);
     await writeAudit(context.env.DB, auth.accountId, "lineage.revision_published", "lineage_revision", result.revisionId, { lineageId });
     return context.json(result, 201);
@@ -303,7 +316,8 @@ export function createApp() {
     const lineageId = context.req.param("lineageId");
     try {
       const result = await rollbackSuccessionRevision(context.env.DB, {
-        lineageId, targetRevisionId: parsed.data.targetRevisionId, newRevisionId: parsed.data.newRevisionId, now: now(),
+        lineageId, targetRevisionId: parsed.data.targetRevisionId, newRevisionId: parsed.data.newRevisionId,
+        expectedPointerVersion: parsed.data.expectedPointerVersion, now: now(),
       });
       if (!result.published) return context.json({ code: "revision_invalid", issues: result.issues }, 400);
       await writeAudit(context.env.DB, auth.accountId, "lineage.revision_rolled_back", "lineage_revision", result.revisionId, { lineageId, targetRevisionId: parsed.data.targetRevisionId });
@@ -312,6 +326,7 @@ export function createApp() {
       if (error instanceof Error && /Rollback target|no published revision/.test(error.message)) {
         return context.json({ code: "rollback_unavailable" }, 409);
       }
+      if (error instanceof Error && /lineage publish conflict/.test(error.message)) return context.json({ code: "revision_conflict" }, 409);
       throw error;
     }
   });

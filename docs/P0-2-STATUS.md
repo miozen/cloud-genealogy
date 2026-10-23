@@ -15,11 +15,12 @@
 - 同一 revision 的双承谱上行边与重复血缘主房均由数据库唯一索引拒绝。
 - 新增承谱 revision 预览服务：返回有效性、结构化错误、受影响子节点与边增删数；不写入 D1，未来草稿预览与发布事务复用同一规则。
 - 新增发布指针与 D1 batch 发布服务：合法候选写入完整 immutable snapshot，再切换当前 revision 指针；旧 revision 不被更新。
-- 管理员 revision 预览/发布 API 已接入既有会话、CSRF 与 system.manage 权限；本地 Worker/D1 集成测试确认缺失 CSRF 被拒绝、环路不写入、合法发布成功。
+- 管理员 revision 预览/发布/回退 API 已接入既有会话、CSRF 与 system.manage 权限；预览返回当前指针版本，发布与回退要求该版本。
+- 0006 以指针版本和 D1 触发器防止陈旧编辑发布：仅首发可使用版本 0，后续发布必须匹配当前版本；冲突返回 `409 revision_conflict`，不会切换当前指针或写入新 revision。
+- 本地 Worker/D1 集成测试确认缺失 CSRF 被拒绝、环路不写入、合法发布、回退发布和陈旧版本冲突被拒绝。
 - npm run lint、npm run check（16 个测试）、npm run build 通过。
 - 未使用 --remote，未访问 Preview 或生产 D1/R2。
 
 ## 下一步
 
-1. 补充回退发布与并发冲突的真实本地 D1 集成测试。
-2. 实现人物与来源的受权 API；不在该阶段加入传统吊线图坐标或 SVG 渲染。
+1. 实现人物与来源的受权 API；不在该阶段加入传统吊线图坐标或 SVG 渲染。

@@ -187,6 +187,7 @@ const invalidPublish = await request(`/api/admin/lineages/${lineageId}/revisions
   csrf: adminCsrf,
   body: {
     revisionId: "22222222-2222-4222-8222-222222222222",
+    expectedPointerVersion: 0,
     edges: [
       { parentPersonId: personResult.body.person.id, childPersonId: secondPerson.body.person.id },
       { parentPersonId: secondPerson.body.person.id, childPersonId: personResult.body.person.id },
@@ -201,6 +202,7 @@ const validPublish = await request(`/api/admin/lineages/${lineageId}/revisions/p
   csrf: adminCsrf,
   body: {
     revisionId: "33333333-3333-4333-8333-333333333333",
+    expectedPointerVersion: 0,
     edges: [{ parentPersonId: personResult.body.person.id, childPersonId: secondPerson.body.person.id }],
   },
 });
@@ -212,10 +214,23 @@ const rollback = await request(`/api/admin/lineages/${lineageId}/revisions/rollb
   body: {
     targetRevisionId: "33333333-3333-4333-8333-333333333333",
     newRevisionId: "44444444-4444-4444-8444-444444444444",
+    expectedPointerVersion: 1,
   },
 });
 expectStatus(rollback, 201);
 assert.equal(rollback.body.revisionId, "44444444-4444-4444-8444-444444444444");
+const stalePublish = await request(`/api/admin/lineages/${lineageId}/revisions/publish`, {
+  method: "POST",
+  cookie: adminCookie,
+  csrf: adminCsrf,
+  body: {
+    revisionId: "55555555-5555-4555-8555-555555555555",
+    expectedPointerVersion: 1,
+    edges: [{ parentPersonId: personResult.body.person.id, childPersonId: secondPerson.body.person.id }],
+  },
+});
+expectStatus(stalePublish, 409);
+assert.equal(stalePublish.body.code, "revision_conflict");
 
 const approval = await request(`/api/admin/accounts/${member.id}/approve`, {
   method: "POST",

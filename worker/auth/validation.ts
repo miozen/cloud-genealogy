@@ -43,6 +43,19 @@ export const rollbackRevisionInput = z.object({
   newRevisionId: z.string().uuid(),
   expectedPointerVersion: z.number().int().positive(),
 });
+const sourceTitle = z.string().trim().min(1, "标题不能为空。").max(160, "标题最长 160 个字符。");
+export const genealogyInput = z.object({ title: sourceTitle });
+export const genealogyEditionInput = z.object({
+  title: sourceTitle,
+  editionLabel: z.string().trim().min(1).max(80).optional(),
+  supersedesEditionId: z.string().uuid().optional(),
+});
+export const sourcePersonRecordInput = z.object({
+  sourceKey: z.string().trim().min(1).max(120).optional(),
+  nameText: z.string().trim().min(1).max(80).optional(),
+  rawText: z.string().trim().min(1, "原始记载不能为空。").max(10_000, "原始记载过长。"),
+});
+export const sourcePersonLinkInput = z.object({ personId: z.string().uuid() });
 
 export function validationMessage(result: z.ZodSafeParseResult<unknown>): string {
   if (result.success) return "";

@@ -10,10 +10,14 @@ import {
   approvalInput,
   bootstrapInput,
   loginInput,
+  genealogyEditionInput,
+  genealogyInput,
   personAnchorInput,
   registrationInput,
   rejectionInput,
   resetPasswordInput,
+  sourcePersonLinkInput,
+  sourcePersonRecordInput,
   successionEdgesInput,
   publishRevisionInput,
   rollbackRevisionInput,
@@ -374,6 +378,72 @@ export function createApp() {
         .bind(crypto.randomUUID(), auth.accountId, "person.anchor_created", "person", id, JSON.stringify({ visibility: parsed.data.visibility }), timestamp),
     ]);
     return context.json({ person: { id, displayName: parsed.data.displayName, visibility: parsed.data.visibility } }, 201);
+  });
+
+  app.post("/api/admin/genealogies", requireAuthentication, async (context) => {
+    const auth = context.get("auth")!;
+    if (!hasPermission(auth.roles, "system.manage")) return context.json({ code: "forbidden" }, 403);
+    const parsed = genealogyInput.safeParse(await context.req.json().catch(() => null));
+    if (!parsed.success) return context.json({ code: "validation_failed", message: validationMessage(parsed) }, 400);
+    const id = crypto.randomUUID(); const timestamp = now();
+    await context.env.DB.batch([
+      context.env.DB.prepare("INSERT INTO genealogy (id, title, created_at) VALUES (?, ?, ?)").bind(id, parsed.data.title, timestamp),
+      context.env.DB.prepare("INSERT INTO audit_log (id, actor_account_id, action, object_type, object_id, metadata_json, created_at) VALUES (?, ?, ?, ?, ?, ?, ?)").bind(crypto.randomUUID(), auth.accountId, "source.genealogy_created", "genealogy", id, "{}", timestamp),
+    ]);
+    return context.json({ genealogy: { id, title: parsed.data.title } }, 201);
+  });
+
+  app.post("/api/admin/genealogies/:genealogyId/editions", requireAuthentication, async (context) => {
+    const auth = context.get("auth")!;
+    if (!hasPermission(auth.roles, "system.manage")) return context.json({ code: "forbidden" }, 403);
+    const parsed = genealogyEditionInput.safeParse(await context.req.json().catch(() => null));
+    if (!parsed.success) return context.json({ code: "validation_failed", message: validationMessage(parsed) }, 400);
+    const genealogyId = context.req.param("genealogyId");
+    const genealogy = await context.env.DB.prepare("SELECT id FROM genealogy WHERE id = ? AND retired_at IS NULL").bind(genealogyId).first<{ id: string }>();
+    if (!genealogy) return context.json({ code: "genealogy_not_found" }, 404);
+    const id = crypto.randomUUID(); const timestamp = now();
+    await context.env.DB.batch([
+      context.env.DB.prepare("INSERT INTO genealogy_edition (id, genealogy_id, title, edition_label, supersedes_edition_id, created_at) VALUES (?, ?, ?, ?, ?, ?)").bind(id, genealogyId, parsed.data.title, parsed.data.editionLabel ?? null, parsed.data.supersedesEditionId ?? null, timestamp),
+      context.env.DB.prepare("INSERT INTO audit_log (id, actor_account_id, action, object_type, object_id, metadata_json, created_at) VALUES (?, ?, ?, ?, ?, ?, ?)").bind(crypto.randomUUID(), auth.accountId, "source.edition_created", "genealogy_edition", id, JSON.stringify({ genealogyId }), timestamp),
+    ]);
+    return context.json({ edition: { id, genealogyId, title: parsed.data.title, editionLabel: parsed.data.editionLabel ?? null } }, 201);
+  });
+
+  app.post("/api/admin/genealogy-editions/:editionId/source-person-records", requireAuthentication, async (context) => {
+    const auth = context.get("auth")!;
+    if (!hasPermission(auth.roles, "system.manage")) return context.json({ code: "forbidden" }, 403);
+    const parsed = sourcePersonRecordInput.safeParse(await context.req.json().catch(() => null));
+    if (!parsed.success) return context.json({ code: "validation_failed", message: validationMessage(parsed) }, 400);
+    const editionId = context.req.param("editionId");
+    const edition = await context.env.DB.prepare("SELECT id FROM genealogy_edition WHERE id = ? AND retired_at IS NULL").bind(editionId).first<{ id: string }>();
+    if (!edition) return context.json({ code: "edition_not_found" }, 404);
+    const id = crypto.randomUUID(); const timestamp = now();
+    await context.env.DB.batch([
+      context.env.DB.prepare("INSERT INTO source_person_record (id, edition_id, source_key, name_text, raw_text, created_at) VALUES (?, ?, ?, ?, ?, ?)").bind(id, editionId, parsed.data.sourceKey ?? null, parsed.data.nameText ?? null, parsed.data.rawText, timestamp),
+      context.env.DB.prepare("INSERT INTO audit_log (id, actor_account_id, action, object_type, object_id, metadata_json, created_at) VALUES (?, ?, ?, ?, ?, ?, ?)").bind(crypto.randomUUID(), auth.accountId, "source.person_record_created", "source_person_record", id, JSON.stringify({ editionId }), timestamp),
+    ]);
+    return context.json({ sourcePersonRecord: { id, editionId, sourceKey: parsed.data.sourceKey ?? null, nameText: parsed.data.nameText ?? null, rawText: parsed.data.rawText } }, 201);
+  });
+
+  app.post("/api/admin/source-person-records/:sourceRecordId/links", requireAuthentication, async (context) => {
+    const auth = context.get("auth")!;
+    if (!hasPermission(auth.roles, "system.manage")) return context.json({ code: "forbidden" }, 403);
+    const parsed = sourcePersonLinkInput.safeParse(await context.req.json().catch(() => null));
+    if (!parsed.success) return context.json({ code: "validation_failed", message: validationMessage(parsed) }, 400);
+    const sourceRecordId = context.req.param("sourceRecordId");
+    const [record, person] = await Promise.all([
+      context.env.DB.prepare("SELECT id FROM source_person_record WHERE id = ?").bind(sourceRecordId).first<{ id: string }>(),
+      context.env.DB.prepare("SELECT id FROM person WHERE id = ?").bind(parsed.data.personId).first<{ id: string }>(),
+    ]);
+    if (!record) return context.json({ code: "source_record_not_found" }, 404);
+    if (!person) return context.json({ code: "person_not_found" }, 404);
+    const id = crypto.randomUUID(); const timestamp = now();
+    await context.env.DB.batch([
+      context.env.DB.prepare("UPDATE source_person_link SET status = 'revoked', revoked_at = ? WHERE source_record_id = ? AND status = 'confirmed' AND revoked_at IS NULL").bind(timestamp, sourceRecordId),
+      context.env.DB.prepare("INSERT INTO source_person_link (id, source_record_id, person_id, status, linked_by_account_id, created_at) VALUES (?, ?, ?, 'confirmed', ?, ?)").bind(id, sourceRecordId, parsed.data.personId, auth.accountId, timestamp),
+      context.env.DB.prepare("INSERT INTO audit_log (id, actor_account_id, action, object_type, object_id, metadata_json, created_at) VALUES (?, ?, ?, ?, ?, ?, ?)").bind(crypto.randomUUID(), auth.accountId, "source.person_link_confirmed", "source_person_link", id, JSON.stringify({ sourceRecordId, personId: parsed.data.personId }), timestamp),
+    ]);
+    return context.json({ sourcePersonLink: { id, sourceRecordId, personId: parsed.data.personId, status: "confirmed" } }, 201);
   });
 
   app.post("/api/admin/accounts/:accountId/approve", requireAuthentication, async (context) => {

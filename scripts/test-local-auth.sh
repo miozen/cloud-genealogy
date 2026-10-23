@@ -234,6 +234,17 @@ const sourceRelationClaim = await request(`/api/admin/genealogy-editions/${editi
   body: { subjectRecordId: sourceRecord.body.sourcePersonRecord.id, relatedRecordId: relatedSourceRecord.body.sourcePersonRecord.id, relationKind: "biological_parent", rawText: "父某某" },
 });
 expectStatus(sourceRelationClaim, 201);
+const supersedingFactClaim = await request(`/api/admin/genealogy-editions/${edition.body.edition.id}/source-fact-claims`, {
+  method: "POST", cookie: adminCookie, csrf: adminCsrf,
+  body: { subjectRecordId: sourceRecord.body.sourcePersonRecord.id, supersedesClaimId: sourceFactClaim.body.sourceFactClaim.id, factKind: "birth", rawText: "生年待考" },
+});
+expectStatus(supersedingFactClaim, 201);
+const claims = await request(`/api/admin/genealogy-editions/${edition.body.edition.id}/source-claims`, { cookie: adminCookie });
+expectStatus(claims, 200);
+assert.equal(claims.body.factClaims.length, 2);
+expectStatus(await request(`/api/admin/source-relation-claims/${sourceRelationClaim.body.sourceRelationClaim.id}/retract`, {
+  method: "POST", cookie: adminCookie, csrf: adminCsrf,
+}), 200);
 
 const lineageId = "11111111-1111-4111-8111-111111111111";
 expectStatus(await request(`/api/admin/lineages/${lineageId}/revisions/preview`, {

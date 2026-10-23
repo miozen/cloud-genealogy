@@ -10,10 +10,11 @@
 5. `P0-0-DECISIONS.md` 已确认的架构、数据、权限和恢复规格
 6. `P0-1-STATUS.md` 项目基础的实际进度、验证和风险
 7. `P0-2-STATUS.md` 人物、来源、世系与投影进度
-8. `P0-3-STATUS.md` 吊线图投影、布局与下一步
-9. `DEVELOPMENT-HANDBOOK.md` 接力电脑的环境、Git、SSH、验证与部署流程
-8. `AGENTS.md` Codex 工作约束
-9. `CODEX_START.md` 首轮可复制提示词
+8. `P0-3-STATUS.md` 吊线图投影、布局与验收记录
+9. `P0-4-DESIGN-REVIEW.md` 历史双视图与完整亲属图的既有边界和待确认语义
+10. `DEVELOPMENT-HANDBOOK.md` 接力电脑的环境、Git、SSH、验证与部署流程
+11. `AGENTS.md` Codex 工作约束
+12. `CODEX_START.md` 首轮可复制提示词
 
 ## 不可随意变更的已确认决策
 - 单一家族，多房支、多本谱书、多座云祠；不是 SaaS 多租户。

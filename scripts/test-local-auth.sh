@@ -211,6 +211,12 @@ const retiredDetail = await request(`/api/admin/persons/${personResult.body.pers
 expectStatus(retiredDetail, 200);
 assert.equal(retiredDetail.body.names.length, 1);
 assert.equal(retiredDetail.body.facts.length, 0);
+const places = await request("/api/admin/places?query=%E6%9C%AC%E5%9C%B0%E6%B5%8B%E8%AF%95%E6%9D%91", { cookie: adminCookie });
+expectStatus(places, 200);
+assert.equal(places.body.places.length, 1);
+expectStatus(await request(`/api/admin/places/${personFact.body.personFact.placeId}/retire`, {
+  method: "POST", cookie: adminCookie, csrf: adminCsrf,
+}), 200);
 
 const secondPerson = await request("/api/admin/persons", {
   method: "POST",

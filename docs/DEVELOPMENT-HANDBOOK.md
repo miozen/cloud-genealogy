@@ -55,6 +55,10 @@ npm run dev
 npm run dev:worker
 ```
 
+### 本地千人吊线图演示
+
+无需部署。执行 `npm run demo:local-chart` 后，脚本会在隔离的 Wrangler local 状态中建立 1000 人、自动建立本地管理员并发布演示世系，再启动 Worker 和 Vite。终端会输出浏览器地址（固定为 `http://127.0.0.1:5173`）与本地测试账号；按 `Ctrl+C` 停止并清理演示状态。该命令不使用 `--remote`，不访问 preview/production。若只需检查本机环境能否完整启动，可执行 `npm run verify:local-chart-demo`；它会验证 Worker、网页服务与 Vite 的 API 代理，然后自动退出。
+
 前端默认端口由 Vite 分配；前端的 `/api` 请求代理至 `http://127.0.0.1:8787`。Worker 本地运行使用 Wrangler local bindings，绝不接触远程 D1 或 R2。
 
 常用检查：

@@ -41,3 +41,42 @@ export async function publishSuccessionRevision(
   await database.batch(statements);
   return { published: true, revisionId: input.revisionId };
 }
+
+export async function buildRollbackEdges(database: D1Database, revisionId: string): Promise<SuccessionEdgeCandidate[]> {
+  const rows = await database.prepare(
+    "SELECT parent_person_id, child_person_id FROM lineage_succession_snapshot WHERE revision_id = ? ORDER BY order_key",
+  ).bind(revisionId).all<{ parent_person_id: string; child_person_id: string }>();
+  return rows.results.map((row) => ({ parentPersonId: row.parent_person_id, childPersonId: row.child_person_id }));
+}
+
+export interface RollbackRevisionInput {
+  lineageId: string;
+  targetRevisionId: string;
+  newRevisionId: string;
+  now: string;
+}
+
+/** Rollback republishes a historical snapshot as a new immutable revision. */
+export async function rollbackSuccessionRevision(
+  database: D1Database,
+  input: RollbackRevisionInput,
+): Promise<PublishRevisionResult> {
+  const current = await database.prepare(
+    "SELECT revision_id FROM lineage_published_pointer WHERE lineage_id = ?",
+  ).bind(input.lineageId).first<{ revision_id: string }>();
+  if (!current) throw new Error("Lineage has no published revision.");
+
+  const target = await database.prepare(
+    "SELECT id FROM lineage_revision WHERE id = ? AND lineage_id = ? AND state = 'published'",
+  ).bind(input.targetRevisionId, input.lineageId).first<{ id: string }>();
+  if (!target) throw new Error("Rollback target is not a published revision of this lineage.");
+
+  return publishSuccessionRevision(database, {
+    lineageId: input.lineageId,
+    revisionId: input.newRevisionId,
+    basedOnRevisionId: input.targetRevisionId,
+    baseEdges: await buildRollbackEdges(database, current.revision_id),
+    proposedEdges: await buildRollbackEdges(database, input.targetRevisionId),
+    now: input.now,
+  });
+}

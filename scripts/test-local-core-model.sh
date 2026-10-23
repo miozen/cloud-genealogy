@@ -27,7 +27,12 @@ npx wrangler d1 execute DB --local --persist-to "$state_dir" --command "
   INSERT INTO person (id, display_name, visibility, created_at, updated_at) VALUES
     ('p-a', '同名', 'MEMBER', '2026-01-01T00:00:00Z', '2026-01-01T00:00:00Z'),
     ('p-b', '同名', 'MEMBER', '2026-01-01T00:00:00Z', '2026-01-01T00:00:00Z'),
-    ('p-c', '子', 'MEMBER', '2026-01-01T00:00:00Z', '2026-01-01T00:00:00Z');
+    ('p-c', '子', 'MEMBER', '2026-01-01T00:00:00Z', '2026-01-01T00:00:00Z'),
+    ('p-g1', '五代始祖', 'MEMBER', '2026-01-01T00:00:00Z', '2026-01-01T00:00:00Z'),
+    ('p-g2', '二世', 'MEMBER', '2026-01-01T00:00:00Z', '2026-01-01T00:00:00Z'),
+    ('p-g3', '三世', 'MEMBER', '2026-01-01T00:00:00Z', '2026-01-01T00:00:00Z'),
+    ('p-g4', '四世', 'MEMBER', '2026-01-01T00:00:00Z', '2026-01-01T00:00:00Z'),
+    ('p-g5', '五世', 'MEMBER', '2026-01-01T00:00:00Z', '2026-01-01T00:00:00Z');
   INSERT INTO genealogy (id, title, created_at) VALUES ('g-1', '旧谱', '2026-01-01T00:00:00Z');
   INSERT INTO genealogy_edition (id, genealogy_id, title, created_at) VALUES ('e-1', 'g-1', '初版', '2026-01-01T00:00:00Z');
   INSERT INTO source_person_record (id, edition_id, source_key, name_text, raw_text, created_at) VALUES
@@ -43,25 +48,36 @@ npx wrangler d1 execute DB --local --persist-to "$state_dir" --command "
     VALUES ('cr-bio', 'r-1', 'p-c', 'p-a', 'biological_parent', '2026-01-01T00:00:00Z'),
            ('cr-successor', 'r-1', 'p-c', 'p-b', 'successor_parent', '2026-01-01T00:00:00Z');
   INSERT INTO lineage_succession_snapshot (id, revision_id, parent_person_id, child_person_id, order_key, created_at)
-    VALUES ('ss-1', 'r-1', 'p-b', 'p-c', '001', '2026-01-01T00:00:00Z');
+    VALUES ('ss-1', 'r-1', 'p-b', 'p-c', '001', '2026-01-01T00:00:00Z'),
+           ('ss-g1-g2', 'r-1', 'p-g1', 'p-g2', '001', '2026-01-01T00:00:00Z'),
+           ('ss-g2-g3', 'r-1', 'p-g2', 'p-g3', '001', '2026-01-01T00:00:00Z'),
+           ('ss-g3-g4', 'r-1', 'p-g3', 'p-g4', '001', '2026-01-01T00:00:00Z'),
+           ('ss-g4-g5', 'r-1', 'p-g4', 'p-g5', '001', '2026-01-01T00:00:00Z');
   INSERT INTO branch (id, lineage_id, name, branch_kind, created_at) VALUES
     ('b-1', 'l-1', '长房', 'agnatic', '2026-01-01T00:00:00Z'),
-    ('b-2', 'l-1', '迁居支', 'migration', '2026-01-01T00:00:00Z');
+    ('b-2', 'l-1', '迁居支', 'migration', '2026-01-01T00:00:00Z'),
+    ('b-3', 'l-1', '管理支', 'administrative', '2026-01-01T00:00:00Z');
   INSERT INTO branch_membership_snapshot (id, revision_id, branch_id, person_id, membership_kind, created_at) VALUES
     ('bm-1', 'r-1', 'b-1', 'p-c', 'blood_primary', '2026-01-01T00:00:00Z'),
-    ('bm-2', 'r-1', 'b-2', 'p-c', 'migration', '2026-01-01T00:00:00Z');
+    ('bm-2', 'r-1', 'b-2', 'p-c', 'migration', '2026-01-01T00:00:00Z'),
+    ('bm-3', 'r-1', 'b-3', 'p-g5', 'administrative', '2026-01-01T00:00:00Z');
   SELECT (SELECT COUNT(*) FROM person WHERE display_name = '同名') AS duplicate_names,
          (SELECT COUNT(*) FROM canonical_relation_snapshot WHERE subject_person_id = 'p-c') AS preserved_parent_relations,
          (SELECT COUNT(*) FROM source_relation_claim) AS source_claims,
          (SELECT COUNT(*) FROM lineage_succession_snapshot) AS succession_edges,
-         (SELECT COUNT(*) FROM branch_membership_snapshot WHERE person_id = 'p-c') AS memberships;
+         (SELECT COUNT(*) FROM branch_membership_snapshot WHERE person_id = 'p-c') AS memberships,
+         (WITH RECURSIVE generations(person_id, depth) AS (
+            SELECT 'p-g1', 1 UNION ALL
+            SELECT s.child_person_id, generations.depth + 1 FROM lineage_succession_snapshot s JOIN generations ON s.parent_person_id = generations.person_id WHERE s.revision_id = 'r-1'
+          ) SELECT MAX(depth) FROM generations) AS generation_depth;
 " > "$state_dir/result.json"
 
 rg -q '"duplicate_names":\s*2' "$state_dir/result.json"
 rg -q '"preserved_parent_relations":\s*2' "$state_dir/result.json"
 rg -q '"source_claims":\s*1' "$state_dir/result.json"
-rg -q '"succession_edges":\s*1' "$state_dir/result.json"
+rg -q '"succession_edges":\s*5' "$state_dir/result.json"
 rg -q '"memberships":\s*2' "$state_dir/result.json"
+rg -q '"generation_depth":\s*5' "$state_dir/result.json"
 
 if npx wrangler d1 execute DB --local --persist-to "$state_dir" --command "
   INSERT INTO lineage_succession_snapshot (id, revision_id, parent_person_id, child_person_id, order_key, created_at)

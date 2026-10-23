@@ -30,7 +30,7 @@ P0-4 要提供两种严格分层的阅读视图：
 
 ### 切片 B：历史/统一差异 API 与只读切换
 
-在同一受权请求中显式提供 `canonical`、`historical` 或 `comparison` 视图。比较结果只包含 `same`、`canonical_only`、`historical_only`、`uncomparable` 四类；不得把 `uncomparable` 当作差异或缺失。前端可复用 SVG 容器，但历史图只显示能被字典安全解释的父子关系；原始文本和待解释主张在只读侧栏呈现。
+已实现受权的 `comparison` API；比较结果只包含 `same`、`canonical_only`、`historical_only`、`uncomparable` 四类，且不把 `uncomparable` 当作差异或缺失。前端只读切换仍待实现；历史图只应显示能被字典安全解释的父子关系，原始文本和待解释主张在侧栏呈现。
 
 ### 切片 C：完整亲属图读模型
 

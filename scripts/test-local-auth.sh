@@ -342,6 +342,22 @@ const canonicalProjection = await request(`/api/admin/lineages/${lineageId}/proj
 expectStatus(canonicalProjection, 200);
 assert.equal(canonicalProjection.body.view, "canonical");
 assert.equal(canonicalProjection.body.edges.length, 1);
+expectStatus(await request(`/api/admin/source-person-records/${relatedSourceRecord.body.sourcePersonRecord.id}/links`, {
+  method: "POST", cookie: adminCookie, csrf: adminCsrf, body: { personId: secondPerson.body.person.id },
+}), 201);
+expectStatus(await request("/api/admin/source-relation-semantics", {
+  method: "POST", cookie: adminCookie, csrf: adminCsrf,
+  body: { relationKind: "biological_parent", graphKind: "child_to_parent", parentKind: "biological_parent" },
+}), 201);
+const comparisonClaim = await request(`/api/admin/genealogy-editions/${edition.body.edition.id}/source-relation-claims`, {
+  method: "POST", cookie: adminCookie, csrf: adminCsrf,
+  body: { subjectRecordId: sourceRecord.body.sourcePersonRecord.id, relatedRecordId: relatedSourceRecord.body.sourcePersonRecord.id, relationKind: "biological_parent", rawText: "父某某（比较）" },
+});
+expectStatus(comparisonClaim, 201);
+const historicalComparison = await request(`/api/admin/lineages/${lineageId}/historical-comparison?editionId=${edition.body.edition.id}`, { cookie: adminCookie });
+expectStatus(historicalComparison, 200);
+assert.deepEqual(historicalComparison.body.comparison.canonicalEdges.map((edge) => edge.status), ["canonical_only"]);
+assert.deepEqual(historicalComparison.body.comparison.historicalEdges.map((edge) => edge.status), ["historical_only"]);
 const hangingChart = await request(`/api/admin/lineages/${lineageId}/hanging-chart?rootPersonId=${personResult.body.person.id}`, { cookie: adminCookie });
 expectStatus(hangingChart, 200);
 assert.equal(hangingChart.body.view, "canonical");

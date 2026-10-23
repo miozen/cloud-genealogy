@@ -33,6 +33,7 @@ import { previewSuccessionRevision } from "./lineage/revision-preview";
 import { publishSuccessionRevision, rollbackSuccessionRevision } from "./lineage/revision-publish";
 import { buildPublishedHangingChart } from "./lineage/hanging-chart-service";
 import { projectHistoricalLineage } from "./lineage/historical-lineage-projection";
+import { compareHistoricalLineage } from "./lineage/historical-lineage-comparison";
 import { csrfProtection, requireAuthentication, sessionMiddleware } from "./middleware/authentication";
 import { securityHeaders } from "./middleware/security";
 import type { AppEnv } from "./types";
@@ -463,6 +464,35 @@ export function createApp() {
       ruleRows.map((rule) => ({ relationKind: rule.relation_kind, graphKind: rule.graph_kind, parentKind: rule.parent_kind })),
     );
     return context.json({ view: "historical", editionId, relationClaims: claimRows, projection });
+  });
+
+  app.get("/api/admin/lineages/:lineageId/historical-comparison", requireAuthentication, async (context) => {
+    const auth = context.get("auth")!;
+    if (!hasPermission(auth.roles, "system.manage")) return context.json({ code: "forbidden" }, 403);
+    const editionId = context.req.query("editionId");
+    if (!editionId) return context.json({ code: "validation_failed", message: "editionId 必填。" }, 400);
+    const lineageId = context.req.param("lineageId");
+    const pointer = await context.env.DB.prepare("SELECT revision_id, version FROM lineage_published_pointer WHERE lineage_id = ?").bind(lineageId).first<PublishedPointerRow>();
+    if (!pointer) return context.json({ code: "published_revision_not_found" }, 404);
+    const edition = await context.env.DB.prepare("SELECT id FROM genealogy_edition WHERE id = ? AND retired_at IS NULL").bind(editionId).first<{ id: string }>();
+    if (!edition) return context.json({ code: "edition_not_found" }, 404);
+    const [canonical, records, claims, rules] = await context.env.DB.batch([
+      context.env.DB.prepare("SELECT parent_person_id, child_person_id FROM lineage_succession_snapshot WHERE revision_id = ? ORDER BY order_key, id").bind(pointer.revision_id),
+      context.env.DB.prepare("SELECT r.id, r.name_text, l.person_id FROM source_person_record r LEFT JOIN source_person_link l ON l.source_record_id = r.id AND l.status = 'confirmed' AND l.revoked_at IS NULL WHERE r.edition_id = ? ORDER BY r.created_at, r.id").bind(editionId),
+      context.env.DB.prepare("SELECT id, subject_record_id, related_record_id, relation_kind, raw_text FROM source_relation_claim WHERE edition_id = ? AND retracted_at IS NULL ORDER BY created_at, id").bind(editionId),
+      context.env.DB.prepare("SELECT relation_kind, graph_kind, parent_kind FROM source_relation_semantic_rule WHERE retired_at IS NULL ORDER BY relation_kind, id"),
+    ]);
+    if (!canonical || !records || !claims || !rules) throw new Error("historical comparison query did not return every result set");
+    const projection = projectHistoricalLineage(
+      (records.results as Array<{ id: string; name_text: string | null; person_id: string | null }>).map((record) => ({ id: record.id, displayName: record.name_text, confirmedPersonId: record.person_id })),
+      (claims.results as Array<{ id: string; subject_record_id: string; related_record_id: string | null; relation_kind: string; raw_text: string }>).map((claim) => ({ id: claim.id, subjectRecordId: claim.subject_record_id, relatedRecordId: claim.related_record_id, relationKind: claim.relation_kind, rawText: claim.raw_text })),
+      (rules.results as Array<{ relation_kind: string; graph_kind: "parent_to_child" | "child_to_parent" | "spouse" | "non_graph"; parent_kind: "biological_parent" | "adoptive_parent" | "successor_parent" | null }>).map((rule) => ({ relationKind: rule.relation_kind, graphKind: rule.graph_kind, parentKind: rule.parent_kind })),
+    );
+    const comparison = compareHistoricalLineage(
+      (canonical.results as Array<{ parent_person_id: string; child_person_id: string }>).map((edge) => ({ parentPersonId: edge.parent_person_id, childPersonId: edge.child_person_id })),
+      projection,
+    );
+    return context.json({ view: "comparison", lineageId, editionId, revisionId: pointer.revision_id, pointerVersion: pointer.version, projection, comparison });
   });
 
   app.post("/api/admin/lineages/:lineageId/revisions/publish", requireAuthentication, async (context) => {

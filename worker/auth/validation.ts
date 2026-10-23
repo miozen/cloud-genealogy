@@ -30,6 +30,13 @@ export const approvalInput = z.object({
 
 export const rejectionInput = z.object({ version: z.number().int().positive() });
 export const resetPasswordInput = z.object({ password });
+export const successionEdgesInput = z.object({
+  edges: z.array(z.object({ parentPersonId: z.string().uuid(), childPersonId: z.string().uuid() })).max(2000),
+});
+export const publishRevisionInput = successionEdgesInput.extend({
+  revisionId: z.string().uuid(),
+  basedOnRevisionId: z.string().uuid().optional(),
+});
 
 export function validationMessage(result: z.ZodSafeParseResult<unknown>): string {
   if (result.success) return "";

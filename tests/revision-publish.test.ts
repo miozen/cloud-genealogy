@@ -1,0 +1,40 @@
+import { describe, expect, it } from "vitest";
+import { publishSuccessionRevision } from "../worker/lineage/revision-publish";
+
+function fakeDatabase(lineageExists = true) {
+  const statements: unknown[] = [];
+  const database = {
+    prepare: (sql: string) => ({
+      bind: (...values: unknown[]) => {
+        const statement = { sql, values };
+        statements.push(statement);
+        return { ...statement, first: async () => (lineageExists ? { id: "lineage" } : null) };
+      },
+    }),
+    batch: async (items: unknown[]) => { statements.push(...items); return []; },
+  };
+  return { database: database as unknown as D1Database, statements };
+}
+
+describe("revision publishing", () => {
+  it("does not write an invalid snapshot", async () => {
+    const { database, statements } = fakeDatabase();
+    const result = await publishSuccessionRevision(database, {
+      lineageId: "lineage", revisionId: "r2", baseEdges: [], now: "2026-01-01T00:00:00Z",
+      proposedEdges: [{ parentPersonId: "a", childPersonId: "b" }, { parentPersonId: "b", childPersonId: "a" }],
+    });
+    expect(result.published).toBe(false);
+    expect(statements).toEqual([]);
+  });
+
+  it("writes a complete snapshot and switches only the pointer", async () => {
+    const { database, statements } = fakeDatabase();
+    const result = await publishSuccessionRevision(database, {
+      lineageId: "lineage", revisionId: "r2", basedOnRevisionId: "r1", baseEdges: [],
+      proposedEdges: [{ parentPersonId: "parent", childPersonId: "child" }], now: "2026-01-01T00:00:00Z",
+    });
+    expect(result).toEqual({ published: true, revisionId: "r2" });
+    expect(JSON.stringify(statements)).toContain("lineage_published_pointer");
+    expect(JSON.stringify(statements)).not.toContain("UPDATE lineage_revision");
+  });
+});

@@ -13,10 +13,13 @@
 
 - npm run test:local-core-model 通过；使用独立 Wrangler local 状态，验证同名、来源主张、人工映射、生父/嗣父保留、承谱选择与多类型房支归属。
 - 同一 revision 的双承谱上行边与重复血缘主房均由数据库唯一索引拒绝。
+- 新增承谱 revision 预览服务：返回有效性、结构化错误、受影响子节点与边增删数；不写入 D1，未来草稿预览与发布事务复用同一规则。
+- 新增发布指针与 D1 batch 发布服务：合法候选写入完整 immutable snapshot，再切换当前 revision 指针；旧 revision 不被更新。
+- 管理员 revision 预览/发布 API 已接入既有会话、CSRF 与 system.manage 权限；本地 Worker/D1 集成测试确认缺失 CSRF 被拒绝、环路不写入、合法发布成功。
 - npm run lint、npm run check（16 个测试）、npm run build 通过。
 - 未使用 --remote，未访问 Preview 或生产 D1/R2。
 
 ## 下一步
 
-1. 为承谱成环补充发布服务层的递归校验；SQLite 结构约束不能单独证明图无环。
+1. 补充已发布 revision 回退和并发冲突的本地集成测试。
 2. 实现人物与来源的受权 API；不在该阶段加入传统吊线图坐标或 SVG 渲染。

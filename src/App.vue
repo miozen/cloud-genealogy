@@ -1,5 +1,6 @@
 <script setup lang="ts">
 import { computed, onMounted, ref } from "vue";
+import { chartViewBox, createChartViewport, panChartViewport } from "./chart-viewport";
 
 type Account = { id: string; username: string; displayName: string; roles: string[] };
 type PendingAccount = { id: string; username: string; display_name: string; registration_branch_name: string | null; registration_ancestor_name: string | null; version: number };
@@ -20,6 +21,7 @@ const lineageId = ref(""), rootPersonId = ref(""), chart = ref<HangingChart | nu
 const chartZoom = ref(1), centeredPersonId = ref<string | null>(null), chartPersonId = ref<string | null>(null), chartPerson = ref<PersonDetail | null>(null);
 const lineages = ref<Lineage[]>([]), newLineageName = ref("");
 const chartSvg = ref<SVGSVGElement | null>(null);
+const chartPan = ref({ x: 0, y: 0 }), chartDrag = ref<{ pointerId: number; clientX: number; clientY: number } | null>(null);
 const isAdmin = computed(() => account.value?.roles.includes("admin") ?? false);
 const chartNodeById = computed(() => new Map(chart.value?.projection.nodes.map((node) => [node.personId, node])));
 const chartPositionById = computed(() => new Map(chart.value?.layout.nodes.map((node) => [node.personId, node])));
@@ -31,14 +33,12 @@ const chartBounds = computed(() => {
   const nodes = chart.value?.layout.nodes ?? [];
   return { width: Math.max(640, ...nodes.map((node) => node.x + 220)), height: Math.max(320, ...nodes.map((node) => node.y + 96)) };
 });
-const chartViewBox = computed(() => {
-  const { width, height } = chartBounds.value;
-  const viewportWidth = width / chartZoom.value, viewportHeight = height / chartZoom.value;
+const chartViewport = computed(() => {
   const centered = centeredPersonId.value ? chartPositionById.value.get(centeredPersonId.value) : undefined;
-  const x = centered ? Math.min(Math.max(0, centered.x - viewportWidth / 2), Math.max(0, width - viewportWidth)) : 0;
-  const y = centered ? Math.min(Math.max(0, centered.y - viewportHeight / 2), Math.max(0, height - viewportHeight)) : 0;
-  return `${x} ${y} ${viewportWidth} ${viewportHeight}`;
+  const base = createChartViewport(chartBounds.value, chartZoom.value, centered);
+  return panChartViewport(chartBounds.value, base, chartPan.value.x, chartPan.value.y);
 });
+const chartViewBoxValue = computed(() => chartViewBox(chartViewport.value));
 
 async function request(path: string, options: RequestInit = {}) {
   const headers = new Headers(options.headers);
@@ -104,11 +104,11 @@ async function loadHangingChart() {
   const response = await request(`/api/admin/lineages/${encodeURIComponent(id)}/hanging-chart${root ? `?rootPersonId=${encodeURIComponent(root)}` : ""}`);
   if (!response.ok) return void (notice.value = await message(response));
   chart.value = await response.json() as HangingChart;
-  chartZoom.value = 1; centeredPersonId.value = root || null; chartPersonId.value = null; chartPerson.value = null;
+  chartZoom.value = 1; chartPan.value = { x: 0, y: 0 }; centeredPersonId.value = root || null; chartPersonId.value = null; chartPerson.value = null;
   notice.value = `已载入 ${chart.value.projection.nodes.length} 位人物的已发布世系。`;
 }
 async function selectChartPerson(personId: string) {
-  chartPersonId.value = personId; centeredPersonId.value = personId;
+  chartPersonId.value = personId; centeredPersonId.value = personId; chartPan.value = { x: 0, y: 0 };
   const response = await request(`/api/admin/persons/${encodeURIComponent(personId)}`);
   chartPerson.value = response.ok ? await response.json() as PersonDetail : null;
   if (!response.ok) notice.value = await message(response);
@@ -122,8 +122,34 @@ async function createLineage() {
 }
 function zoomChart(direction: 1 | -1) {
   chartZoom.value = Math.min(3, Math.max(0.5, Number((chartZoom.value + direction * 0.25).toFixed(2))));
+  chartPan.value = { x: 0, y: 0 };
 }
 function connectorPoints(connector: ChartConnector) { return connector.points.map((point) => `${point.x},${point.y}`).join(" "); }
+function resetChartViewport() {
+  chartZoom.value = 1; chartPan.value = { x: 0, y: 0 }; centeredPersonId.value = null;
+}
+function startChartPan(event: PointerEvent) {
+  if (!chartSvg.value || event.button !== 0) return;
+  chartSvg.value.setPointerCapture(event.pointerId);
+  chartDrag.value = { pointerId: event.pointerId, clientX: event.clientX, clientY: event.clientY };
+}
+function moveChartPan(event: PointerEvent) {
+  const drag = chartDrag.value;
+  if (!drag || drag.pointerId !== event.pointerId || !chartSvg.value) return;
+  const rect = chartSvg.value.getBoundingClientRect();
+  if (!rect.width || !rect.height) return;
+  const deltaX = (drag.clientX - event.clientX) * chartViewport.value.width / rect.width;
+  const deltaY = (drag.clientY - event.clientY) * chartViewport.value.height / rect.height;
+  const next = panChartViewport(chartBounds.value, chartViewport.value, deltaX, deltaY);
+  const base = createChartViewport(chartBounds.value, chartZoom.value, centeredPersonId.value ? chartPositionById.value.get(centeredPersonId.value) : undefined);
+  chartPan.value = { x: next.x - base.x, y: next.y - base.y };
+  chartDrag.value = { ...drag, clientX: event.clientX, clientY: event.clientY };
+}
+function endChartPan(event: PointerEvent) {
+  if (chartDrag.value?.pointerId !== event.pointerId || !chartSvg.value) return;
+  chartSvg.value.releasePointerCapture(event.pointerId);
+  chartDrag.value = null;
+}
 function exportChartSvg() {
   if (!chartSvg.value || !chart.value) return void (notice.value = "请先载入吊线图。");
   const copy = chartSvg.value.cloneNode(true) as SVGSVGElement;
@@ -159,10 +185,10 @@ onMounted(async () => { try { const response = await request("/api/health"); sta
         <h2>传统吊线图</h2><p>仅读取当前已发布世系；输入世系 ID 后载入，选择人物不会修改关系。</p>
         <form class="chart-controls" @submit.prevent="loadHangingChart"><label>世系<select v-model="lineageId" required><option value="" disabled>请选择世系</option><option v-for="lineage in lineages" :key="lineage.id" :value="lineage.id">{{ lineage.name }}{{ lineage.published_revision_id ? "（已发布）" : "（未发布）" }}</option></select></label><label>根人物 ID（可选）<input v-model.trim="rootPersonId" placeholder="仅展示该支后代" /></label><button>载入吊线图</button></form>
         <form class="new-lineage" @submit.prevent="createLineage"><label>新建世系名称<input v-model.trim="newLineageName" maxlength="160" required /></label><button type="submit" class="secondary">建立空世系</button></form>
-        <div v-if="chart" class="chart-tools"><label>姓名定位<input v-model.trim="chartSearch" placeholder="输入姓名" /></label><div class="actions"><button type="button" class="secondary" @click="zoomChart(-1)">缩小</button><button type="button" class="secondary" @click="chartZoom = 1">重置</button><button type="button" class="secondary" @click="zoomChart(1)">放大</button><button type="button" @click="exportChartSvg">导出 SVG</button></div></div>
+        <div v-if="chart" class="chart-tools"><label>姓名定位<input v-model.trim="chartSearch" placeholder="输入姓名" /></label><div class="actions"><button type="button" class="secondary" @click="zoomChart(-1)">缩小</button><button type="button" class="secondary" @click="resetChartViewport">重置视图</button><button type="button" class="secondary" @click="zoomChart(1)">放大</button><button type="button" @click="exportChartSvg">导出 SVG</button></div></div>
         <div v-if="chartMatches.length" class="chart-matches"><button v-for="node in chartMatches" :key="node.personId" type="button" @click="selectChartPerson(node.personId)">{{ node.displayName }}</button></div>
         <div v-if="chart" class="chart-workspace">
-          <div class="chart-canvas"><svg ref="chartSvg" :viewBox="chartViewBox" role="img" aria-label="传统吊线图"><polyline v-for="connector in chart.layout.connectors" :key="`${connector.parentPersonId}:${connector.childPersonId}`" class="chart-connector" :points="connectorPoints(connector)" /><g v-for="node in chart.layout.nodes" :key="node.personId" class="chart-node" :class="{ selected: node.personId === chartPersonId }" :transform="`translate(${node.x} ${node.y})`" @click="selectChartPerson(node.personId)"><rect width="170" height="48" rx="4" /><text x="12" y="29">{{ chartNodeById.get(node.personId)?.displayName ?? node.personId }}</text></g></svg></div>
+          <div class="chart-canvas"><svg ref="chartSvg" :class="{ dragging: chartDrag }" :viewBox="chartViewBoxValue" role="img" aria-label="传统吊线图，可拖拽平移" @pointerdown="startChartPan" @pointermove="moveChartPan" @pointerup="endChartPan" @pointercancel="endChartPan"><polyline v-for="connector in chart.layout.connectors" :key="`${connector.parentPersonId}:${connector.childPersonId}`" class="chart-connector" :points="connectorPoints(connector)" /><g v-for="node in chart.layout.nodes" :key="node.personId" class="chart-node" :class="{ selected: node.personId === chartPersonId }" :transform="`translate(${node.x} ${node.y})`" role="button" tabindex="0" :aria-label="`查看${chartNodeById.get(node.personId)?.displayName ?? node.personId}`" @pointerdown.stop @click="selectChartPerson(node.personId)" @keydown.enter="selectChartPerson(node.personId)" @keydown.space.prevent="selectChartPerson(node.personId)"><rect width="170" height="48" rx="4" /><text x="12" y="29">{{ chartNodeById.get(node.personId)?.displayName ?? node.personId }}</text></g></svg></div>
           <aside class="person-panel"><template v-if="chartPerson"><h3>{{ chartPerson.person.displayName }}</h3><p class="status">{{ chartPerson.person.visibility }} · {{ chartPerson.person.id }}</p><h4>姓名</h4><p v-if="chartPerson.names.length === 0">暂无附加姓名。</p><ul v-else><li v-for="name in chartPerson.names" :key="name.id">{{ name.name_text }}（{{ name.name_kind }}）</li></ul><h4>事实</h4><p v-if="chartPerson.facts.length === 0">暂无已录入事实。</p><ul v-else><li v-for="fact in chartPerson.facts" :key="fact.id">{{ fact.fact_kind }}：{{ fact.value_text || fact.date_text || fact.place_name || "未详" }}</li></ul></template><p v-else>点击节点查看人物资料。</p></aside>
         </div>
       </section>

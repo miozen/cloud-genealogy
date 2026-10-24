@@ -1,5 +1,5 @@
 import { expect, it } from "vitest";
-import { buildSnapshotChangeItems, previewChangeRequest } from "../worker/lineage/change-request-preview";
+import { buildSnapshotChangeItems, buildSnapshotMembershipChangeItems, previewChangeRequest } from "../worker/lineage/change-request-preview";
 
 it("applies explicit succession and relation proposal items without touching the base snapshot", () => {
   const result = previewChangeRequest(
@@ -25,5 +25,25 @@ it("expresses snapshot rollback as explicit proposal items", () => {
     { operation: "succession_remove", subjectPersonId: "new", relatedPersonId: "child" },
     { operation: "succession_add", subjectPersonId: "old", relatedPersonId: "child" },
     { operation: "relation_add", subjectPersonId: "child", relatedPersonId: "old", relationKind: "successor_parent" },
+  ]);
+});
+
+it("previews explicit membership changes separately and rejects multiple primary branches", () => {
+  const result = previewChangeRequest([], [], [],
+    [{ branchId: "branch-a", personId: "person-a", membershipKind: "blood_primary" }],
+    [{ operation: "add", branchId: "branch-b", personId: "person-a", membershipKind: "blood_primary" }],
+  );
+  expect(result.valid).toBe(false);
+  expect(result.issues).toContainEqual({ code: "multiple_primary_branch", personIds: ["person-a"] });
+  expect(result.memberships).toHaveLength(2);
+});
+
+it("expresses membership rollback as explicit add and remove items", () => {
+  expect(buildSnapshotMembershipChangeItems(
+    [{ branchId: "new", personId: "person", membershipKind: "migration" }],
+    [{ branchId: "old", personId: "person", membershipKind: "blood_primary" }],
+  )).toEqual([
+    { operation: "remove", branchId: "new", personId: "person", membershipKind: "migration" },
+    { operation: "add", branchId: "old", personId: "person", membershipKind: "blood_primary" },
   ]);
 });

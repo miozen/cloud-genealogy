@@ -23,7 +23,7 @@
 ## 1. 工作站前置条件
 
 - Git 2.43+。
-- NVM 管理的 Node.js 22 LTS。当前已验证版本为 Node `22.23.4`、npm `10.9.9`。
+- **NVM**（不是 Maven 的 `mvn`）管理的 Node.js 22 LTS。当前已验证版本为 Node `22.23.4`、npm `10.9.9`；接手 WSL 会话时先执行 `source ~/.nvm/nvm.sh && nvm use 22`，再运行 npm 命令。
 - Cloudflare 账户与 GitHub SSH 私钥仅在需要部署或推送时配置；不得把密钥放入仓库、`.dev.vars`、日志或截图。
 
 首次安装或切换 Node：

@@ -31,4 +31,10 @@ describe("registration input", () => {
     };
     expect(createChangeRequestInput.safeParse({ reason: "重复条目", items: [item, item] }).success).toBe(false);
   });
+
+  it("accepts a membership-only request and rejects duplicate membership items", () => {
+    const item = { operation: "add" as const, branchId: "11111111-1111-4111-8111-111111111111", personId: "22222222-2222-4222-8222-222222222222", membershipKind: "blood_primary" as const };
+    expect(createChangeRequestInput.safeParse({ reason: "补充房支归属", membershipItems: [item] }).success).toBe(true);
+    expect(createChangeRequestInput.safeParse({ reason: "重复房支归属", membershipItems: [item, item] }).success).toBe(false);
+  });
 });

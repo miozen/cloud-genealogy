@@ -41,7 +41,7 @@ import { buildPublishedHangingChart } from "./lineage/hanging-chart-service";
 import { projectHistoricalLineage } from "./lineage/historical-lineage-projection";
 import { compareHistoricalLineage } from "./lineage/historical-lineage-comparison";
 import { projectKinship } from "./lineage/kinship-projection";
-import { buildSnapshotChangeItems, previewChangeRequest, type ChangeItemCandidate } from "./lineage/change-request-preview";
+import { buildSnapshotChangeItems, buildSnapshotMembershipChangeItems, previewChangeRequest, type BranchMembershipCandidate, type BranchMembershipChangeItemCandidate, type ChangeItemCandidate } from "./lineage/change-request-preview";
 import { allowsDirectRevisionWrite } from "./lineage/publish-policy";
 import { csrfProtection, requireAuthentication, sessionMiddleware } from "./middleware/authentication";
 import { securityHeaders } from "./middleware/security";
@@ -76,6 +76,8 @@ interface SuccessionRow { parent_person_id: string; child_person_id: string; }
 interface PublishedPointerRow { revision_id: string; version: number; }
 interface ChangeRequestRow { id: string; lineage_id: string; state: "draft" | "pending_review" | "approved" | "rejected" | "published" | "conflicted"; base_revision_id: string | null; base_pointer_version: number; created_by_account_id: string; version: number; }
 interface ChangeItemRow { operation: ChangeItemCandidate["operation"]; subject_person_id: string; related_person_id: string; relation_kind: "biological_parent" | "adoptive_parent" | "successor_parent" | "spouse" | null; }
+interface MembershipRow { branch_id: string; person_id: string; membership_kind: BranchMembershipCandidate["membershipKind"]; }
+interface MembershipChangeItemRow extends MembershipRow { operation: BranchMembershipChangeItemCandidate["operation"]; }
 
 function now(): string {
   return new Date().toISOString();
@@ -97,6 +99,21 @@ function clientRateIdentifier(context: { req: { header(name: string): string | u
 
 function changeItemPersonIds(items: readonly Pick<ChangeItemRow, "subject_person_id" | "related_person_id">[]): string[] {
   return [...new Set(items.flatMap((item) => [item.subject_person_id, item.related_person_id]))];
+}
+
+function toMembershipCandidates(rows: readonly MembershipRow[]): BranchMembershipCandidate[] {
+  return rows.map((row) => ({ branchId: row.branch_id, personId: row.person_id, membershipKind: row.membership_kind }));
+}
+
+function toMembershipChangeCandidates(rows: readonly MembershipChangeItemRow[]): BranchMembershipChangeItemCandidate[] {
+  return rows.map((row) => ({ operation: row.operation, branchId: row.branch_id, personId: row.person_id, membershipKind: row.membership_kind }));
+}
+
+async function membershipBranchesAreActive(database: D1Database, lineageId: string, items: readonly MembershipChangeItemRow[]): Promise<boolean> {
+  const branchIds = [...new Set(items.map((item) => item.branch_id))];
+  if (branchIds.length === 0) return true;
+  const rows = await database.prepare(`SELECT id FROM branch WHERE lineage_id = ? AND retired_at IS NULL AND id IN (${branchIds.map(() => "?").join(",")})`).bind(lineageId, ...branchIds).all<{ id: string }>();
+  return rows.results.length === branchIds.length;
 }
 
 async function canProposeChangeForPeople(database: D1Database, auth: NonNullable<AppEnv["Variables"]["auth"]>, personIds: readonly string[], baseRevisionId: string | null): Promise<boolean> {
@@ -559,16 +576,23 @@ export function createApp() {
     const lineage = await context.env.DB.prepare("SELECT id FROM lineage WHERE id = ? AND retired_at IS NULL").bind(lineageId).first();
     if (!lineage) return context.json({ code: "lineage_not_found" }, 404);
     const pointer = await context.env.DB.prepare("SELECT revision_id, version FROM lineage_published_pointer WHERE lineage_id = ?").bind(lineageId).first<PublishedPointerRow>();
+    if (parsed.data.membershipItems.length > 0 && !hasPermission(auth.roles, "system.manage")) return context.json({ code: "membership_change_requires_admin" }, 403);
     const scopeItems = parsed.data.items.map((item) => ({ subject_person_id: item.subjectPersonId, related_person_id: item.relatedPersonId }));
-    const personIds = changeItemPersonIds(scopeItems);
+    const personIds = [...new Set([...changeItemPersonIds(scopeItems), ...parsed.data.membershipItems.map((item) => item.personId)])];
     const people = await context.env.DB.prepare(`SELECT id FROM person WHERE id IN (${personIds.map(() => "?").join(",")})`).bind(...personIds).all<{ id: string }>();
     if (people.results.length !== personIds.length) return context.json({ code: "change_person_not_found" }, 404);
+    if (parsed.data.membershipItems.length > 0) {
+      const branchIds = [...new Set(parsed.data.membershipItems.map((item) => item.branchId))];
+      const branches = await context.env.DB.prepare(`SELECT id FROM branch WHERE lineage_id = ? AND retired_at IS NULL AND id IN (${branchIds.map(() => "?").join(",")})`).bind(lineageId, ...branchIds).all<{ id: string }>();
+      if (branches.results.length !== branchIds.length) return context.json({ code: "change_branch_not_found_or_retired" }, 404);
+    }
     if (!await canProposeChangeForPeople(context.env.DB, auth, personIds, pointer?.revision_id ?? null)) return context.json({ code: "scope_forbidden" }, 403);
     const id = crypto.randomUUID(); const timestamp = now();
     await context.env.DB.batch([
       context.env.DB.prepare("INSERT INTO change_request (id, lineage_id, state, base_revision_id, base_pointer_version, reason, created_by_account_id, created_at) VALUES (?, ?, 'draft', ?, ?, ?, ?, ?)").bind(id, lineageId, pointer?.revision_id ?? null, pointer?.version ?? 0, parsed.data.reason, auth.accountId, timestamp),
       ...parsed.data.items.map((item) => context.env.DB.prepare("INSERT INTO change_item (id, change_request_id, operation, subject_person_id, related_person_id, relation_kind, created_at) VALUES (?, ?, ?, ?, ?, ?, ?)").bind(crypto.randomUUID(), id, item.operation, item.subjectPersonId, item.relatedPersonId, item.relationKind ?? null, timestamp)),
-      context.env.DB.prepare("INSERT INTO audit_log (id, actor_account_id, action, object_type, object_id, metadata_json, created_at) VALUES (?, ?, ?, ?, ?, ?, ?)").bind(crypto.randomUUID(), auth.accountId, "lineage.change_request_created", "change_request", id, JSON.stringify({ lineageId, itemCount: parsed.data.items.length }), timestamp),
+      ...parsed.data.membershipItems.map((item) => context.env.DB.prepare("INSERT INTO branch_membership_change_item (id, change_request_id, operation, branch_id, person_id, membership_kind, created_at) VALUES (?, ?, ?, ?, ?, ?, ?)").bind(crypto.randomUUID(), id, item.operation, item.branchId, item.personId, item.membershipKind, timestamp)),
+      context.env.DB.prepare("INSERT INTO audit_log (id, actor_account_id, action, object_type, object_id, metadata_json, created_at) VALUES (?, ?, ?, ?, ?, ?, ?)").bind(crypto.randomUUID(), auth.accountId, "lineage.change_request_created", "change_request", id, JSON.stringify({ lineageId, itemCount: parsed.data.items.length, membershipItemCount: parsed.data.membershipItems.length }), timestamp),
     ]);
     return context.json({ changeRequest: { id, lineageId, state: "draft", baseRevisionId: pointer?.revision_id ?? null, basePointerVersion: pointer?.version ?? 0, version: 1 } }, 201);
   });
@@ -583,24 +607,28 @@ export function createApp() {
     if (!pointer) return context.json({ code: "published_revision_not_found" }, 404);
     const target = await context.env.DB.prepare("SELECT id FROM lineage_revision WHERE id = ? AND lineage_id = ? AND state = 'published'").bind(targetRevisionId, lineageId).first();
     if (!target) return context.json({ code: "rollback_target_not_found" }, 404);
-    const [baseEdges, baseRelations, targetEdges, targetRelations] = await context.env.DB.batch([
+    const [baseEdges, baseRelations, targetEdges, targetRelations, baseMemberships, targetMemberships] = await context.env.DB.batch([
       context.env.DB.prepare("SELECT parent_person_id, child_person_id FROM lineage_succession_snapshot WHERE revision_id = ? ORDER BY order_key").bind(pointer.revision_id),
       context.env.DB.prepare("SELECT subject_person_id, related_person_id, relation_kind FROM canonical_relation_snapshot WHERE revision_id = ? ORDER BY id").bind(pointer.revision_id),
       context.env.DB.prepare("SELECT parent_person_id, child_person_id FROM lineage_succession_snapshot WHERE revision_id = ? ORDER BY order_key").bind(targetRevisionId),
       context.env.DB.prepare("SELECT subject_person_id, related_person_id, relation_kind FROM canonical_relation_snapshot WHERE revision_id = ? ORDER BY id").bind(targetRevisionId),
+      context.env.DB.prepare("SELECT branch_id, person_id, membership_kind FROM branch_membership_snapshot WHERE revision_id = ? ORDER BY branch_id, membership_kind, person_id, id").bind(pointer.revision_id),
+      context.env.DB.prepare("SELECT branch_id, person_id, membership_kind FROM branch_membership_snapshot WHERE revision_id = ? ORDER BY branch_id, membership_kind, person_id, id").bind(targetRevisionId),
     ]);
-    if (!baseEdges || !baseRelations || !targetEdges || !targetRelations) throw new Error("rollback change request query did not return every result set");
+    if (!baseEdges || !baseRelations || !targetEdges || !targetRelations || !baseMemberships || !targetMemberships) throw new Error("rollback change request query did not return every result set");
     const toEdges = (rows: D1Result<unknown>) => (rows.results as SuccessionRow[]).map((edge) => ({ parentPersonId: edge.parent_person_id, childPersonId: edge.child_person_id }));
     const toRelations = (rows: D1Result<unknown>) => (rows.results as Array<{ subject_person_id: string; related_person_id: string; relation_kind: "biological_parent" | "adoptive_parent" | "successor_parent" | "spouse" }>).map((relation) => ({ subjectPersonId: relation.subject_person_id, relatedPersonId: relation.related_person_id, relationKind: relation.relation_kind }));
     const items = buildSnapshotChangeItems(toEdges(baseEdges), toRelations(baseRelations), toEdges(targetEdges), toRelations(targetRelations));
-    if (items.length === 0) return context.json({ code: "rollback_not_needed" }, 409);
+    const membershipItems = buildSnapshotMembershipChangeItems(toMembershipCandidates(baseMemberships.results as MembershipRow[]), toMembershipCandidates(targetMemberships.results as MembershipRow[]));
+    if (items.length + membershipItems.length === 0) return context.json({ code: "rollback_not_needed" }, 409);
     const id = crypto.randomUUID(); const timestamp = now();
     await context.env.DB.batch([
       context.env.DB.prepare("INSERT INTO change_request (id, lineage_id, state, base_revision_id, base_pointer_version, reason, created_by_account_id, created_at) VALUES (?, ?, 'draft', ?, ?, ?, ?, ?)").bind(id, lineageId, pointer.revision_id, pointer.version, parsed.data.reason, auth.accountId, timestamp),
       ...items.map((item) => context.env.DB.prepare("INSERT INTO change_item (id, change_request_id, operation, subject_person_id, related_person_id, relation_kind, created_at) VALUES (?, ?, ?, ?, ?, ?, ?)").bind(crypto.randomUUID(), id, item.operation, item.subjectPersonId, item.relatedPersonId, "relationKind" in item ? item.relationKind : null, timestamp)),
+      ...membershipItems.map((item) => context.env.DB.prepare("INSERT INTO branch_membership_change_item (id, change_request_id, operation, branch_id, person_id, membership_kind, created_at) VALUES (?, ?, ?, ?, ?, ?, ?)").bind(crypto.randomUUID(), id, item.operation, item.branchId, item.personId, item.membershipKind, timestamp)),
       context.env.DB.prepare("INSERT INTO audit_log (id, actor_account_id, action, object_type, object_id, metadata_json, created_at) VALUES (?, ?, ?, ?, ?, ?, ?)").bind(crypto.randomUUID(), auth.accountId, "lineage.rollback_change_request_created", "change_request", id, JSON.stringify({ lineageId, targetRevisionId }), timestamp),
     ]);
-    return context.json({ changeRequest: { id, lineageId, targetRevisionId, state: "draft", baseRevisionId: pointer.revision_id, basePointerVersion: pointer.version, version: 1, itemCount: items.length } }, 201);
+    return context.json({ changeRequest: { id, lineageId, targetRevisionId, state: "draft", baseRevisionId: pointer.revision_id, basePointerVersion: pointer.version, version: 1, itemCount: items.length + membershipItems.length } }, 201);
   });
 
   app.get("/api/admin/change-requests/:changeRequestId/preview", requireAuthentication, async (context) => {
@@ -608,18 +636,21 @@ export function createApp() {
     const request = await context.env.DB.prepare("SELECT id, lineage_id, state, base_revision_id, base_pointer_version, created_by_account_id, version FROM change_request WHERE id = ?").bind(context.req.param("changeRequestId")).first<ChangeRequestRow>();
     if (!request) return context.json({ code: "change_request_not_found" }, 404);
     if (!hasPermission(auth.roles, "system.manage") && request.created_by_account_id !== auth.accountId) return context.json({ code: "forbidden" }, 403);
-    const [edges, relations, items] = await context.env.DB.batch([
+    const [edges, relations, items, memberships, membershipItems] = await context.env.DB.batch([
       context.env.DB.prepare("SELECT parent_person_id, child_person_id FROM lineage_succession_snapshot WHERE revision_id = ? ORDER BY order_key").bind(request.base_revision_id),
       context.env.DB.prepare("SELECT subject_person_id, related_person_id, relation_kind FROM canonical_relation_snapshot WHERE revision_id = ? ORDER BY id").bind(request.base_revision_id),
       context.env.DB.prepare("SELECT operation, subject_person_id, related_person_id, relation_kind FROM change_item WHERE change_request_id = ? ORDER BY id").bind(request.id),
+      context.env.DB.prepare("SELECT branch_id, person_id, membership_kind FROM branch_membership_snapshot WHERE revision_id = ? ORDER BY branch_id, membership_kind, person_id, id").bind(request.base_revision_id),
+      context.env.DB.prepare("SELECT operation, branch_id, person_id, membership_kind FROM branch_membership_change_item WHERE change_request_id = ? ORDER BY id").bind(request.id),
     ]);
-    if (!edges || !relations || !items) throw new Error("change request preview query did not return every result set");
+    if (!edges || !relations || !items || !memberships || !membershipItems) throw new Error("change request preview query did not return every result set");
     const changeItems = items.results as ChangeItemRow[];
     if (!hasPermission(auth.roles, "system.manage") && !await canProposeChangeForPeople(context.env.DB, auth, changeItemPersonIds(changeItems), request.base_revision_id)) return context.json({ code: "scope_forbidden" }, 403);
     const preview = previewChangeRequest(
       (edges.results as SuccessionRow[]).map((edge) => ({ parentPersonId: edge.parent_person_id, childPersonId: edge.child_person_id })),
       (relations.results as Array<{ subject_person_id: string; related_person_id: string; relation_kind: "biological_parent" | "adoptive_parent" | "successor_parent" | "spouse" }>).map((relation) => ({ subjectPersonId: relation.subject_person_id, relatedPersonId: relation.related_person_id, relationKind: relation.relation_kind })),
       changeItems.map((item) => ({ operation: item.operation, subjectPersonId: item.subject_person_id, relatedPersonId: item.related_person_id, ...(item.relation_kind ? { relationKind: item.relation_kind } : {}) } as ChangeItemCandidate)),
+      toMembershipCandidates(memberships.results as MembershipRow[]), toMembershipChangeCandidates(membershipItems.results as MembershipChangeItemRow[]),
     );
     return context.json({ changeRequest: request, preview });
   });
@@ -632,6 +663,8 @@ export function createApp() {
     const request = await context.env.DB.prepare("SELECT id, lineage_id, state, base_revision_id, base_pointer_version, created_by_account_id, version FROM change_request WHERE id = ?").bind(id).first<ChangeRequestRow>();
     if (!request || request.state !== "draft" || request.version !== parsed.data.version) return context.json({ code: "change_request_conflict" }, 409);
     if (!hasPermission(auth.roles, "system.manage") && request.created_by_account_id !== auth.accountId) return context.json({ code: "forbidden" }, 403);
+    const membershipItem = await context.env.DB.prepare("SELECT id FROM branch_membership_change_item WHERE change_request_id = ? LIMIT 1").bind(request.id).first();
+    if (membershipItem && !hasPermission(auth.roles, "system.manage")) return context.json({ code: "membership_change_requires_admin" }, 403);
     if (!hasPermission(auth.roles, "system.manage")) {
       const items = await context.env.DB.prepare("SELECT operation, subject_person_id, related_person_id, relation_kind FROM change_item WHERE change_request_id = ? ORDER BY id").bind(request.id).all<ChangeItemRow>();
       if (!await canProposeChangeForPeople(context.env.DB, auth, changeItemPersonIds(items.results), request.base_revision_id)) return context.json({ code: "scope_forbidden" }, 403);
@@ -659,16 +692,21 @@ export function createApp() {
       ]);
       return context.json({ code: "change_request_conflicted" }, 409);
     }
-    const [edges, relations, items] = await context.env.DB.batch([
+    const [edges, relations, items, memberships, membershipItems] = await context.env.DB.batch([
       context.env.DB.prepare("SELECT parent_person_id, child_person_id FROM lineage_succession_snapshot WHERE revision_id = ? ORDER BY order_key").bind(request.base_revision_id),
       context.env.DB.prepare("SELECT subject_person_id, related_person_id, relation_kind FROM canonical_relation_snapshot WHERE revision_id = ? ORDER BY id").bind(request.base_revision_id),
       context.env.DB.prepare("SELECT operation, subject_person_id, related_person_id, relation_kind FROM change_item WHERE change_request_id = ? ORDER BY id").bind(request.id),
+      context.env.DB.prepare("SELECT branch_id, person_id, membership_kind FROM branch_membership_snapshot WHERE revision_id = ? ORDER BY branch_id, membership_kind, person_id, id").bind(request.base_revision_id),
+      context.env.DB.prepare("SELECT operation, branch_id, person_id, membership_kind FROM branch_membership_change_item WHERE change_request_id = ? ORDER BY id").bind(request.id),
     ]);
-    if (!edges || !relations || !items) throw new Error("change request approval query did not return every result set");
+    if (!edges || !relations || !items || !memberships || !membershipItems) throw new Error("change request approval query did not return every result set");
+    if (membershipItems.results.length > 0 && !hasPermission(auth.roles, "system.manage")) return context.json({ code: "membership_change_requires_admin" }, 403);
+    if (!await membershipBranchesAreActive(context.env.DB, request.lineage_id, membershipItems.results as MembershipChangeItemRow[])) return context.json({ code: "membership_branch_not_active" }, 409);
     const preview = previewChangeRequest(
       (edges.results as SuccessionRow[]).map((edge) => ({ parentPersonId: edge.parent_person_id, childPersonId: edge.child_person_id })),
       (relations.results as Array<{ subject_person_id: string; related_person_id: string; relation_kind: "biological_parent" | "adoptive_parent" | "successor_parent" | "spouse" }>).map((relation) => ({ subjectPersonId: relation.subject_person_id, relatedPersonId: relation.related_person_id, relationKind: relation.relation_kind })),
       (items.results as ChangeItemRow[]).map((item) => ({ operation: item.operation, subjectPersonId: item.subject_person_id, relatedPersonId: item.related_person_id, ...(item.relation_kind ? { relationKind: item.relation_kind } : {}) } as ChangeItemCandidate)),
+      toMembershipCandidates(memberships.results as MembershipRow[]), toMembershipChangeCandidates(membershipItems.results as MembershipChangeItemRow[]),
     );
     if (!preview.valid) return context.json({ code: "revision_invalid", issues: preview.issues }, 400);
     await context.env.DB.batch([
@@ -701,22 +739,27 @@ export function createApp() {
     const request = await context.env.DB.prepare("SELECT id, lineage_id, state, base_revision_id, base_pointer_version, created_by_account_id, version FROM change_request WHERE id = ?").bind(context.req.param("changeRequestId")).first<ChangeRequestRow>();
     if (!request || request.state !== "approved" || request.version !== parsed.data.version) return context.json({ code: "change_request_conflict" }, 409);
     if (request.created_by_account_id === auth.accountId) return context.json({ code: "self_review_forbidden" }, 403);
-    const [edges, relations, items] = await context.env.DB.batch([
+    const [edges, relations, items, memberships, membershipItems] = await context.env.DB.batch([
       context.env.DB.prepare("SELECT parent_person_id, child_person_id FROM lineage_succession_snapshot WHERE revision_id = ? ORDER BY order_key").bind(request.base_revision_id),
       context.env.DB.prepare("SELECT subject_person_id, related_person_id, relation_kind FROM canonical_relation_snapshot WHERE revision_id = ? ORDER BY id").bind(request.base_revision_id),
       context.env.DB.prepare("SELECT operation, subject_person_id, related_person_id, relation_kind FROM change_item WHERE change_request_id = ? ORDER BY id").bind(request.id),
+      context.env.DB.prepare("SELECT branch_id, person_id, membership_kind FROM branch_membership_snapshot WHERE revision_id = ? ORDER BY branch_id, membership_kind, person_id, id").bind(request.base_revision_id),
+      context.env.DB.prepare("SELECT operation, branch_id, person_id, membership_kind FROM branch_membership_change_item WHERE change_request_id = ? ORDER BY id").bind(request.id),
     ]);
-    if (!edges || !relations || !items) throw new Error("change request publish query did not return every result set");
+    if (!edges || !relations || !items || !memberships || !membershipItems) throw new Error("change request publish query did not return every result set");
+    if (membershipItems.results.length > 0 && !hasPermission(auth.roles, "system.manage")) return context.json({ code: "membership_change_requires_admin" }, 403);
+    if (!await membershipBranchesAreActive(context.env.DB, request.lineage_id, membershipItems.results as MembershipChangeItemRow[])) return context.json({ code: "membership_branch_not_active" }, 409);
     const preview = previewChangeRequest(
       (edges.results as SuccessionRow[]).map((edge) => ({ parentPersonId: edge.parent_person_id, childPersonId: edge.child_person_id })),
       (relations.results as Array<{ subject_person_id: string; related_person_id: string; relation_kind: "biological_parent" | "adoptive_parent" | "successor_parent" | "spouse" }>).map((relation) => ({ subjectPersonId: relation.subject_person_id, relatedPersonId: relation.related_person_id, relationKind: relation.relation_kind })),
       (items.results as Array<{ operation: ChangeItemCandidate["operation"]; subject_person_id: string; related_person_id: string; relation_kind: "biological_parent" | "adoptive_parent" | "successor_parent" | "spouse" | null }>).map((item) => ({ operation: item.operation, subjectPersonId: item.subject_person_id, relatedPersonId: item.related_person_id, ...(item.relation_kind ? { relationKind: item.relation_kind } : {}) } as ChangeItemCandidate)),
+      toMembershipCandidates(memberships.results as MembershipRow[]), toMembershipChangeCandidates(membershipItems.results as MembershipChangeItemRow[]),
     );
     if (!preview.valid) return context.json({ code: "revision_invalid", issues: preview.issues }, 400);
     const result = await publishSuccessionRevision(context.env.DB, {
       lineageId: request.lineage_id, revisionId: parsed.data.revisionId, basedOnRevisionId: request.base_revision_id ?? undefined,
       baseEdges: (edges.results as SuccessionRow[]).map((edge) => ({ parentPersonId: edge.parent_person_id, childPersonId: edge.child_person_id })),
-      proposedEdges: preview.edges, proposedRelations: preview.relations, expectedPointerVersion: request.base_pointer_version, now: now(),
+      proposedEdges: preview.edges, proposedRelations: preview.relations, proposedBranchMemberships: preview.memberships.map((membership) => ({ branch_id: membership.branchId, person_id: membership.personId, membership_kind: membership.membershipKind })), expectedPointerVersion: request.base_pointer_version, now: now(),
       changeRequest: { id: request.id, version: request.version },
       audit: { id: crypto.randomUUID(), actorAccountId: auth.accountId, action: "lineage.change_request_published", objectType: "change_request", objectId: request.id, metadataJson: JSON.stringify({ lineageId: request.lineage_id, revisionId: parsed.data.revisionId }) },
     }).catch((error: unknown) => {

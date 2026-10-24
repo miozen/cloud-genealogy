@@ -17,13 +17,14 @@ export interface PublishRevisionInput {
   baseEdges: readonly SuccessionEdgeCandidate[];
   proposedEdges: readonly SuccessionEdgeCandidate[];
   proposedRelations?: readonly CanonicalRelationCandidate[];
+  proposedBranchMemberships?: readonly BranchMembershipSnapshotRow[];
   expectedPointerVersion: number;
   now: string;
   audit: RevisionAuditEntry;
   changeRequest?: { id: string; version: number };
 }
 export interface CanonicalRelationCandidate { subjectPersonId: string; relatedPersonId: string; relationKind: "biological_parent" | "adoptive_parent" | "successor_parent" | "spouse"; }
-interface BranchMembershipSnapshotRow { branch_id: string; person_id: string; membership_kind: "blood_primary" | "migration" | "administrative"; }
+export interface BranchMembershipSnapshotRow { branch_id: string; person_id: string; membership_kind: "blood_primary" | "migration" | "administrative"; }
 
 export type PublishRevisionResult =
   | { published: true; revisionId: string }
@@ -42,7 +43,9 @@ export async function publishSuccessionRevision(
   // Branch membership is an independent administrative snapshot. A relation
   // proposal does not infer it, so a new revision carries its base snapshot
   // forward unchanged.
-  const branchMemberships = input.basedOnRevisionId
+  const branchMemberships = input.proposedBranchMemberships
+    ? { results: input.proposedBranchMemberships }
+    : input.basedOnRevisionId
     ? await database.prepare("SELECT branch_id, person_id, membership_kind FROM branch_membership_snapshot WHERE revision_id = ? ORDER BY branch_id, membership_kind, person_id, id").bind(input.basedOnRevisionId).all<BranchMembershipSnapshotRow>()
     : { results: [] as BranchMembershipSnapshotRow[] };
 

@@ -45,4 +45,15 @@ describe("revision publishing", () => {
     expect(JSON.stringify(statements)).toContain("branch-a");
     expect(JSON.stringify(statements)).not.toContain("UPDATE lineage_revision");
   });
+
+  it("uses explicitly previewed membership snapshot when publishing a change request", async () => {
+    const { database, statements } = fakeDatabase(true, [{ branch_id: "old", person_id: "person", membership_kind: "migration" }]);
+    await publishSuccessionRevision(database, {
+      lineageId: "lineage", revisionId: "r2", basedOnRevisionId: "r1", baseEdges: [], proposedEdges: [], expectedPointerVersion: 1, now: "2026-01-01T00:00:00Z",
+      proposedBranchMemberships: [{ branch_id: "new", person_id: "person", membership_kind: "blood_primary" }],
+      audit: { id: "audit-membership", actorAccountId: "admin", action: "lineage.change_request_published", objectType: "change_request", objectId: "request", metadataJson: "{}" },
+    });
+    expect(JSON.stringify(statements)).toContain("new");
+    expect(JSON.stringify(statements)).not.toContain('"old"');
+  });
 });

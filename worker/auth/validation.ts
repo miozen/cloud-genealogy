@@ -57,6 +57,7 @@ export const rollbackRevisionInput = z.object({
   expectedPointerVersion: z.number().int().positive(),
 });
 const changeOperation = z.enum(["succession_add", "succession_remove", "relation_add", "relation_remove"]);
+const membershipOperation = z.enum(["add", "remove"]);
 export const createChangeRequestInput = z.object({
   reason: z.string().trim().min(1, "请说明变更理由。").max(1_000, "变更理由过长。"),
   items: z.array(z.object({
@@ -68,10 +69,19 @@ export const createChangeRequestInput = z.object({
     if (item.subjectPersonId === item.relatedPersonId) context.addIssue({ code: "custom", message: "关系两端不能是同一人物。" });
     const needsRelation = item.operation === "relation_add" || item.operation === "relation_remove";
     if (needsRelation !== Boolean(item.relationKind)) context.addIssue({ code: "custom", message: needsRelation ? "亲属关系变更必须指定关系类型。" : "承谱变更不能指定亲属关系类型。" });
-  })).min(1).max(2_000),
+  })).max(2_000).default([]),
+  membershipItems: z.array(z.object({
+    operation: membershipOperation,
+    branchId: z.string().uuid(),
+    personId: z.string().uuid(),
+    membershipKind: z.enum(["blood_primary", "migration", "administrative"]),
+  })).max(2_000).default([]),
 }).superRefine((value, context) => {
+  if (value.items.length + value.membershipItems.length === 0) context.addIssue({ code: "custom", message: "至少需要一条变更条目。" });
   const keys = value.items.map((item) => `${item.operation}\u0000${item.subjectPersonId}\u0000${item.relatedPersonId}\u0000${item.relationKind ?? ""}`);
   if (new Set(keys).size !== keys.length) context.addIssue({ code: "custom", message: "变更条目不能重复。" });
+  const membershipKeys = value.membershipItems.map((item) => `${item.operation}\u0000${item.branchId}\u0000${item.personId}\u0000${item.membershipKind}`);
+  if (new Set(membershipKeys).size !== membershipKeys.length) context.addIssue({ code: "custom", message: "房支成员变更条目不能重复。" });
 });
 export const changeRequestVersionInput = z.object({ version: z.number().int().positive() });
 export const rejectChangeRequestInput = changeRequestVersionInput.extend({ reviewNote: z.string().trim().min(1, "请说明驳回理由。").max(1_000, "驳回理由过长。") });

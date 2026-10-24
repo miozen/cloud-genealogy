@@ -85,6 +85,7 @@ fi
 
 BASE_URL="$base_url" node --input-type=module <<'NODE'
 import assert from "node:assert/strict";
+import { execFileSync } from "node:child_process";
 
 const baseUrl = process.env.BASE_URL;
 
@@ -642,6 +643,35 @@ const duplicateRevisionPublish = await request(`/api/admin/change-requests/${dup
 });
 expectStatus(duplicateRevisionPublish, 409);
 assert.equal(duplicateRevisionPublish.body.code, "change_request_conflicted");
+
+const membershipBranchId = "aaaaaaaa-1111-4111-8111-aaaaaaaaaaaa";
+execFileSync("npx", ["wrangler", "d1", "execute", "DB", "--local", "--persist-to", ".wrangler/local-auth-integration", "--command",
+  `INSERT INTO branch (id, lineage_id, name, branch_kind, created_at) VALUES ('${membershipBranchId}', '${lineageId}', '本地成员测试房', 'agnatic', '2026-10-24T00:00:00.000Z');`,
+], { stdio: "pipe" });
+const membershipChangeRequest = await request(`/api/admin/lineages/${lineageId}/change-requests`, {
+  method: "POST", cookie: adminCookie, csrf: adminCsrf,
+  body: { reason: "补充已审核房支成员", membershipItems: [{ operation: "add", branchId: membershipBranchId, personId: adoptiveParent.body.person.id, membershipKind: "migration" }] },
+});
+expectStatus(membershipChangeRequest, 201);
+const membershipPreview = await request(`/api/admin/change-requests/${membershipChangeRequest.body.changeRequest.id}/preview`, { cookie: adminCookie });
+expectStatus(membershipPreview, 200);
+assert.equal(membershipPreview.body.preview.memberships.some((membership) => membership.branchId === membershipBranchId && membership.personId === adoptiveParent.body.person.id && membership.membershipKind === "migration"), true);
+expectStatus(await request(`/api/admin/change-requests/${membershipChangeRequest.body.changeRequest.id}/submit`, {
+  method: "POST", cookie: adminCookie, csrf: adminCsrf, body: { version: 1 },
+}), 200);
+const membershipApproval = await request(`/api/admin/change-requests/${membershipChangeRequest.body.changeRequest.id}/approve`, {
+  method: "POST", cookie: reviewerCookie, csrf: reviewerCsrf, body: { version: 2 },
+});
+expectStatus(membershipApproval, 200);
+expectStatus(await request(`/api/admin/change-requests/${membershipChangeRequest.body.changeRequest.id}/publish`, {
+  method: "POST", cookie: reviewerCookie, csrf: reviewerCsrf,
+  body: { version: membershipApproval.body.version, revisionId: "abababab-abab-4bab-8bab-abababababab" },
+}), 201);
+const membershipSnapshot = execFileSync("npx", ["wrangler", "d1", "execute", "DB", "--local", "--persist-to", ".wrangler/local-auth-integration", "--command",
+  `SELECT branch_id, person_id, membership_kind FROM branch_membership_snapshot WHERE revision_id = 'abababab-abab-4bab-8bab-abababababab';`,
+], { encoding: "utf8" });
+assert.match(membershipSnapshot, new RegExp(membershipBranchId));
+assert.match(membershipSnapshot, /migration/);
 
 const passwordReset = await request(`/api/admin/accounts/${member.id}/reset-password`, {
   method: "POST",

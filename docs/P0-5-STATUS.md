@@ -25,14 +25,21 @@
 | `npm run test:local-auth` | 通过：隔离 local Worker/D1，不使用 `--remote`。 |
 | `npm run test:local-core-model` | 通过：隔离 local D1，不使用 `--remote`。 |
 
+## 本切片验证状态（房支成员提案）
+
+- 已激活接力文档规定的 NVM Node `22.23.4` / npm `10.9.9`。
+- `git diff --check`、`npm run lint`、`npm run check`（21 个测试文件、48 项测试）与 `npm run build` 均通过。
+- `npm run test:local-auth` 与 `npm run test:local-core-model` 均通过：使用隔离 local Worker/D1 状态，不使用 `--remote`。两项 Wrangler 本地测试需要回环端口绑定权限；这是执行环境限制，不涉及远程资源。
+
 ## 未完成与风险
 
-- 房支成员的创建/调整、对象级审批人策略与前端编辑工作台尚未启用；当前 `branch` 范围仅使用已存在的基准 revision 快照，不能通过关系提案变更成员归属。
+- 房支成员的**增删提案后端**已经过本地完整验证，但尚没有前端编辑工作台。房支创建、调整、对象级审批人策略仍不在本切片范围；当前 `branch` 范围仍仅使用已存在的基准 revision 快照，不能通过关系提案隐式变更成员归属。
 - 管理员直接 revision 发布/回退 API 仅允许 `development` 环境，供现有 local fixture、千人回归和演示工具使用；preview 与 production 返回 `change_request_required`，不能绕过提案发布路径。生产回退通过历史 revision 自动生成的变更提案完成。
 - 人物合并、拆支、删除、媒体引用与来源纠错不在本切片范围，不能复用当前关系提案机制而省略各自的影响预览与恢复规则。
 
 ## 下一步
 
-1. 管理员可由任一历史 published revision 生成回退提案；系统将当前与目标 snapshot 的承谱/亲属关系差异转换为显式 `change_item`，仍须提交、批准后才会发布新的 immutable revision。
-2. 房支成员变更与对象级审批的待确认最小方案见 `P0-5-BRANCH-MEMBERSHIP-DESIGN-REVIEW.md`；确认前不实现迁移或业务接口。
-3. 在 P0-6 前保持所有迁移仅用于 local 验证；preview/production 迁移、Secrets 和部署仍须单独授权。
+1. 设计并确认房支创建、改名、移动、合并、退休等结构变更的独立高风险提案、影响预览、恢复与审计边界；不得复用成员增删条目。
+2. 设计对象级审批人映射、代理与失效规则；确认前继续由另一位管理员审核，不推断房支负责人。
+3. 单独确认前端编辑工作台的最小交互与权限展示；后端 API 已可供该切片使用。
+4. 在 P0-6 前保持所有迁移仅用于 local 验证；preview/production 迁移、Secrets 和部署仍须单独授权。

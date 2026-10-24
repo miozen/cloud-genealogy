@@ -12,13 +12,14 @@
 - 编辑员可在显式 `global`、覆盖变更双方人物的 `person` 范围，或提案基准 revision 的精确房支 `blood_primary` 成员范围内创建、预览并提交提案；管理员可用受版本保护的 API 替换账号范围。房支权限不递归包含子房，也不从关系图推导。
 - 创建者不能批准、驳回或发布自己的提案；本地集成回归使用第二位管理员验证该分离职责。
 - 发布新 revision 时原样复制基准的 `branch_membership_snapshot`，关系提案不会隐式改变房支成员归属。
+- 创建提案会在写入前拒绝未知人物和重复条目；审核会重新构建候选快照并拒绝成环或其他非法候选，提案继续保留为可驳回的 `pending_review` 状态。
 
 ## 实际验证
 
 | 命令 | 结果 |
 |---|---|
 | `npm run lint` | 通过。 |
-| `npm run check` | 通过：21 个 Vitest 文件、43 项测试。 |
+| `npm run check` | 通过：21 个 Vitest 文件、44 项测试。 |
 | `npm run build` | 通过。 |
 | `npm run test:local-auth` | 通过：隔离 local Worker/D1，不使用 `--remote`。 |
 | `npm run test:local-core-model` | 通过：隔离 local D1，不使用 `--remote`。 |
@@ -33,5 +34,5 @@
 
 1. 管理员可由任一历史 published revision 生成回退提案；系统将当前与目标 snapshot 的承谱/亲属关系差异转换为显式 `change_item`，仍须提交、批准后才会发布新的 immutable revision。
 2. 为房支成员的创建、调整、来源依据与对象级审批人策略做独立设计审查。
-3. 为更多非法候选与审计原子性补充 local Worker/D1 回归。
+3. 为 D1 batch 故障路径、审计原子性补充 local Worker/D1 回归。
 4. 在 P0-6 前保持所有迁移仅用于 local 验证；preview/production 迁移、Secrets 和部署仍须单独授权。

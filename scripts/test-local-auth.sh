@@ -443,6 +443,24 @@ const reviewerLogin = await request("/api/auth/login", {
 expectStatus(reviewerLogin, 200);
 const reviewerCookie = sessionCookie(reviewerLogin);
 const reviewerCsrf = reviewerLogin.body.csrfToken;
+const unknownPersonProposal = await request(`/api/admin/lineages/${lineageId}/change-requests`, {
+  method: "POST", cookie: adminCookie, csrf: adminCsrf,
+  body: { reason: "未知人物必须明确拒绝", items: [{ operation: "succession_add", subjectPersonId: personResult.body.person.id, relatedPersonId: "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa" }] },
+});
+expectStatus(unknownPersonProposal, 404);
+assert.equal(unknownPersonProposal.body.code, "change_person_not_found");
+const duplicateProposal = await request(`/api/admin/lineages/${lineageId}/change-requests`, {
+  method: "POST", cookie: adminCookie, csrf: adminCsrf,
+  body: {
+    reason: "重复条目必须在写入前拒绝",
+    items: [
+      { operation: "relation_add", subjectPersonId: secondPerson.body.person.id, relatedPersonId: adoptiveParent.body.person.id, relationKind: "adoptive_parent" },
+      { operation: "relation_add", subjectPersonId: secondPerson.body.person.id, relatedPersonId: adoptiveParent.body.person.id, relationKind: "adoptive_parent" },
+    ],
+  },
+});
+expectStatus(duplicateProposal, 400);
+assert.equal(duplicateProposal.body.code, "validation_failed");
 const changeRequest = await request(`/api/admin/lineages/${lineageId}/change-requests`, {
   method: "POST", cookie: adminCookie, csrf: adminCsrf,
   body: {
@@ -475,6 +493,23 @@ expectStatus(changePublish, 201);
 const kinshipAfterChangeRequest = await request(`/api/admin/lineages/${lineageId}/kinship?personId=${secondPerson.body.person.id}`, { cookie: adminCookie });
 expectStatus(kinshipAfterChangeRequest, 200);
 assert.equal(kinshipAfterChangeRequest.body.relations.some((relation) => relation.relatedPersonId === adoptiveParent.body.person.id && relation.relationKind === "adoptive_parent"), true);
+const invalidChangeRequest = await request(`/api/admin/lineages/${lineageId}/change-requests`, {
+  method: "POST", cookie: adminCookie, csrf: adminCsrf,
+  body: { reason: "成环候选不得通过审核", items: [{ operation: "succession_add", subjectPersonId: secondPerson.body.person.id, relatedPersonId: personResult.body.person.id }] },
+});
+expectStatus(invalidChangeRequest, 201);
+expectStatus(await request(`/api/admin/change-requests/${invalidChangeRequest.body.changeRequest.id}/submit`, {
+  method: "POST", cookie: adminCookie, csrf: adminCsrf, body: { version: 1 },
+}), 200);
+const invalidApproval = await request(`/api/admin/change-requests/${invalidChangeRequest.body.changeRequest.id}/approve`, {
+  method: "POST", cookie: reviewerCookie, csrf: reviewerCsrf, body: { version: 2 },
+});
+expectStatus(invalidApproval, 400);
+assert.equal(invalidApproval.body.code, "revision_invalid");
+const invalidRejection = await request(`/api/admin/change-requests/${invalidChangeRequest.body.changeRequest.id}/reject`, {
+  method: "POST", cookie: reviewerCookie, csrf: reviewerCsrf, body: { version: 2, reviewNote: "候选关系形成承谱环。" },
+});
+expectStatus(invalidRejection, 200);
 const staleChangeRequest = await request(`/api/admin/lineages/${lineageId}/change-requests`, {
   method: "POST", cookie: adminCookie, csrf: adminCsrf,
   body: { reason: "用于验证陈旧基准冲突", items: [{ operation: "relation_remove", subjectPersonId: secondPerson.body.person.id, relatedPersonId: adoptiveParent.body.person.id, relationKind: "adoptive_parent" }] },

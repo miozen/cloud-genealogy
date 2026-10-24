@@ -69,6 +69,9 @@ export const createChangeRequestInput = z.object({
     const needsRelation = item.operation === "relation_add" || item.operation === "relation_remove";
     if (needsRelation !== Boolean(item.relationKind)) context.addIssue({ code: "custom", message: needsRelation ? "亲属关系变更必须指定关系类型。" : "承谱变更不能指定亲属关系类型。" });
   })).min(1).max(2_000),
+}).superRefine((value, context) => {
+  const keys = value.items.map((item) => `${item.operation}\u0000${item.subjectPersonId}\u0000${item.relatedPersonId}\u0000${item.relationKind ?? ""}`);
+  if (new Set(keys).size !== keys.length) context.addIssue({ code: "custom", message: "变更条目不能重复。" });
 });
 export const changeRequestVersionInput = z.object({ version: z.number().int().positive() });
 export const rejectChangeRequestInput = changeRequestVersionInput.extend({ reviewNote: z.string().trim().min(1, "请说明驳回理由。").max(1_000, "驳回理由过长。") });

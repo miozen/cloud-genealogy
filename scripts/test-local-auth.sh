@@ -26,6 +26,7 @@ clean_test_rows() {
     DELETE FROM lineage_succession_snapshot;
     DELETE FROM canonical_relation_snapshot;
     DELETE FROM branch_membership_snapshot;
+    DELETE FROM branch_structure_snapshot;
     UPDATE lineage_revision SET based_on_revision_id = NULL;
     DELETE FROM lineage_revision;
     DELETE FROM branch;
@@ -672,6 +673,11 @@ const membershipSnapshot = execFileSync("npx", ["wrangler", "d1", "execute", "DB
 ], { encoding: "utf8" });
 assert.match(membershipSnapshot, new RegExp(membershipBranchId));
 assert.match(membershipSnapshot, /migration/);
+const structureSnapshot = execFileSync("npx", ["wrangler", "d1", "execute", "DB", "--local", "--persist-to", ".wrangler/local-auth-integration", "--command",
+  `SELECT branch_id, name, branch_kind FROM branch_structure_snapshot WHERE revision_id = 'abababab-abab-4bab-8bab-abababababab';`,
+], { encoding: "utf8" });
+assert.match(structureSnapshot, new RegExp(membershipBranchId));
+assert.match(structureSnapshot, /本地成员测试房/);
 
 const passwordReset = await request(`/api/admin/accounts/${member.id}/reset-password`, {
   method: "POST",

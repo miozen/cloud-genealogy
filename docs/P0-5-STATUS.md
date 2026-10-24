@@ -31,6 +31,13 @@
 - `git diff --check`、`npm run lint`、`npm run check`（21 个测试文件、48 项测试）与 `npm run build` 均通过。
 - `npm run test:local-auth` 与 `npm run test:local-core-model` 均通过：使用隔离 local Worker/D1 状态，不使用 `--remote`。两项 Wrangler 本地测试需要回环端口绑定权限；这是执行环境限制，不涉及远程资源。
 
+## 已完成：房支结构快照基础设施（阶段 A）
+
+- `0011_branch_structure_snapshots.sql` 新增每个 published revision 的完整 `branch_structure_snapshot`，并在尚无历史结构写 API 的前提下以当前结构回填既有 revision。
+- 发布和回退生成的新 revision 会写入结构、成员、承谱与亲属关系完整快照；成员和关系提案在没有结构条目时只复制基准结构。
+- 未开放任何房支创建、改名、移动、合并、退休或删除接口；这些仍须走独立高风险提案切片。
+- `npm run lint`、`npm run check`（21 个测试文件、48 项测试）、`npm run build`、`npm run test:local-core-model` 与 `npm run test:local-auth` 均通过；后者实际断言已发布 revision 同时写入房支成员与结构快照。所有验证只使用 local D1/Worker。
+
 ## 未完成与风险
 
 - 房支成员的**增删提案后端**已经过本地完整验证，但尚没有前端编辑工作台。房支创建、调整、对象级审批人策略仍不在本切片范围；当前 `branch` 范围仍仅使用已存在的基准 revision 快照，不能通过关系提案隐式变更成员归属。
@@ -39,7 +46,7 @@
 
 ## 下一步
 
-1. 房支结构变更的待确认设计见 `P0-5-BRANCH-STRUCTURE-DESIGN-REVIEW.md`；确认前不创建结构迁移或写接口。
+1. 在已确认边界内实现房支结构写入首切片：创建、改名和严格退休；移动、合并、拆分、类型变更和删除继续排除在外。
 2. 设计对象级审批人映射、代理与失效规则；确认前继续由另一位管理员审核，不推断房支负责人。
 3. 单独确认前端编辑工作台的最小交互与权限展示；后端 API 已可供该切片使用。
 4. 在 P0-6 前保持所有迁移仅用于 local 验证；preview/production 迁移、Secrets 和部署仍须单独授权。

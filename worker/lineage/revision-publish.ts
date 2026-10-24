@@ -18,6 +18,7 @@ export interface PublishRevisionInput {
   proposedEdges: readonly SuccessionEdgeCandidate[];
   proposedRelations?: readonly CanonicalRelationCandidate[];
   proposedBranchMemberships?: readonly BranchMembershipSnapshotRow[];
+  proposedBranchStructures?: readonly BranchStructureSnapshotRow[];
   expectedPointerVersion: number;
   now: string;
   audit: RevisionAuditEntry;
@@ -25,6 +26,7 @@ export interface PublishRevisionInput {
 }
 export interface CanonicalRelationCandidate { subjectPersonId: string; relatedPersonId: string; relationKind: "biological_parent" | "adoptive_parent" | "successor_parent" | "spouse"; }
 export interface BranchMembershipSnapshotRow { branch_id: string; person_id: string; membership_kind: "blood_primary" | "migration" | "administrative"; }
+export interface BranchStructureSnapshotRow { branch_id: string; parent_branch_id: string | null; name: string; branch_kind: "agnatic" | "migration" | "administrative"; retired_at: string | null; }
 
 export type PublishRevisionResult =
   | { published: true; revisionId: string }
@@ -48,6 +50,17 @@ export async function publishSuccessionRevision(
     : input.basedOnRevisionId
     ? await database.prepare("SELECT branch_id, person_id, membership_kind FROM branch_membership_snapshot WHERE revision_id = ? ORDER BY branch_id, membership_kind, person_id, id").bind(input.basedOnRevisionId).all<BranchMembershipSnapshotRow>()
     : { results: [] as BranchMembershipSnapshotRow[] };
+  // A structural snapshot is copied with every revision.  The fallback for an
+  // empty legacy base is only for local/bootstrap histories created before
+  // structure snapshots existed; later structural proposals supply it exactly.
+  let branchStructures = input.proposedBranchStructures
+    ? { results: input.proposedBranchStructures }
+    : input.basedOnRevisionId
+    ? await database.prepare("SELECT branch_id, parent_branch_id, name, branch_kind, retired_at FROM branch_structure_snapshot WHERE revision_id = ? ORDER BY parent_branch_id, name, branch_id").bind(input.basedOnRevisionId).all<BranchStructureSnapshotRow>()
+    : await database.prepare("SELECT id AS branch_id, parent_branch_id, name, branch_kind, retired_at FROM branch WHERE lineage_id = ? ORDER BY parent_branch_id, name, id").bind(input.lineageId).all<BranchStructureSnapshotRow>();
+  if (input.basedOnRevisionId && branchStructures.results.length === 0 && !input.proposedBranchStructures) {
+    branchStructures = await database.prepare("SELECT id AS branch_id, parent_branch_id, name, branch_kind, retired_at FROM branch WHERE lineage_id = ? ORDER BY parent_branch_id, name, id").bind(input.lineageId).all<BranchStructureSnapshotRow>();
+  }
 
   const statements = [
     database.prepare(
@@ -65,6 +78,10 @@ export async function publishSuccessionRevision(
     ...branchMemberships.results.map((membership, index) =>
       database.prepare("INSERT INTO branch_membership_snapshot (id, revision_id, branch_id, person_id, membership_kind, created_at) VALUES (?, ?, ?, ?, ?, ?)")
         .bind(`${input.revisionId}:branch:${index}`, input.revisionId, membership.branch_id, membership.person_id, membership.membership_kind, input.now),
+    ),
+    ...branchStructures.results.map((branch, index) =>
+      database.prepare("INSERT INTO branch_structure_snapshot (id, revision_id, branch_id, parent_branch_id, name, branch_kind, retired_at, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)")
+        .bind(`${input.revisionId}:branch-structure:${index}`, input.revisionId, branch.branch_id, branch.parent_branch_id, branch.name, branch.branch_kind, branch.retired_at, input.now),
     ),
     database.prepare(
       "INSERT INTO lineage_published_pointer (lineage_id, revision_id, updated_at, version) VALUES (?, ?, ?, 1) ON CONFLICT(lineage_id) DO UPDATE SET revision_id = excluded.revision_id, updated_at = excluded.updated_at, version = lineage_published_pointer.version + 1 WHERE lineage_published_pointer.version = ?",

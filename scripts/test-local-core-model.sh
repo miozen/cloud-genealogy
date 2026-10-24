@@ -11,6 +11,7 @@ npx wrangler d1 migrations apply DB --local --persist-to "$state_dir" >/dev/null
 npx wrangler d1 execute DB --local --persist-to "$state_dir" --command "
   PRAGMA foreign_keys = ON;
   DELETE FROM branch_membership_snapshot;
+  DELETE FROM branch_structure_snapshot;
   DELETE FROM branch;
   DELETE FROM lineage_succession_snapshot;
   DELETE FROM canonical_relation_snapshot;

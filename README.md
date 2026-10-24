@@ -16,9 +16,10 @@
 11. `P0-5-DESIGN-REVIEW.md` 编修、审核与发布的已确认边界、最小增量与待确认事项
 12. `P0-5-STATUS.md` 编修提案首切片的实现、验证和未完成项
 13. `P0-5-BRANCH-MEMBERSHIP-DESIGN-REVIEW.md` 房支成员变更与对象级审批的待确认边界
-14. `DEVELOPMENT-HANDBOOK.md` 接力电脑的环境、Git、SSH、验证与部署流程
-15. `AGENTS.md` Codex 工作约束
-16. `CODEX_START.md` 首轮可复制提示词
+14. `P0-5-BRANCH-STRUCTURE-DESIGN-REVIEW.md` 房支结构变更的待确认边界
+15. `DEVELOPMENT-HANDBOOK.md` 接力电脑的环境、Git、SSH、验证与部署流程
+16. `AGENTS.md` Codex 工作约束
+17. `CODEX_START.md` 首轮可复制提示词
 
 ## 不可随意变更的已确认决策
 - 单一家族，多房支、多本谱书、多座云祠；不是 SaaS 多租户。

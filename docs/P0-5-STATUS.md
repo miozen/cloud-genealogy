@@ -34,6 +34,5 @@
 ## 下一步
 
 1. 管理员可由任一历史 published revision 生成回退提案；系统将当前与目标 snapshot 的承谱/亲属关系差异转换为显式 `change_item`，仍须提交、批准后才会发布新的 immutable revision。
-2. 为房支成员的创建、调整、来源依据与对象级审批人策略做独立设计审查。
-3. 为房支成员创建/调整和对象级审批人策略补充独立的恢复与审计设计。
-4. 在 P0-6 前保持所有迁移仅用于 local 验证；preview/production 迁移、Secrets 和部署仍须单独授权。
+2. 房支成员变更与对象级审批的待确认最小方案见 `P0-5-BRANCH-MEMBERSHIP-DESIGN-REVIEW.md`；确认前不实现迁移或业务接口。
+3. 在 P0-6 前保持所有迁移仅用于 local 验证；preview/production 迁移、Secrets 和部署仍须单独授权。

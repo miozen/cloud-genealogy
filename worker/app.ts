@@ -762,8 +762,9 @@ export function createApp() {
     if (!preview.valid) return context.json({ code: "revision_invalid", issues: preview.issues }, 400);
     const structurePreview = previewBranchStructureChange(toStructureCandidates(structures.results as StructureRow[]), toStructureChangeCandidates(structureItems.results as StructureChangeItemRow[]));
     if (!structurePreview.valid) return context.json({ code: "branch_structure_invalid", issues: structurePreview.issues }, 400);
-    if (!membershipItemsFitStructure(membershipItems.results as MembershipChangeItemRow[], structurePreview.branches) || !membershipsUseActiveStructures(preview.memberships, structurePreview.branches)) return context.json({ code: "membership_branch_not_active" }, 409);
+    if (!membershipItemsFitStructure(membershipItems.results as MembershipChangeItemRow[], structurePreview.branches)) return context.json({ code: "membership_branch_not_active" }, 409);
     if (!await structureRetirementsAreSafe(context.env.DB, preview.memberships, structurePreview.branches)) return context.json({ code: "branch_retirement_in_use" }, 409);
+    if (!membershipsUseActiveStructures(preview.memberships, structurePreview.branches)) return context.json({ code: "membership_branch_not_active" }, 409);
     await context.env.DB.batch([
       context.env.DB.prepare("UPDATE change_request SET state = 'approved', reviewed_at = ?, reviewed_by_account_id = ?, version = version + 1 WHERE id = ? AND state = 'pending_review' AND version = ?").bind(now(), auth.accountId, request.id, request.version),
       context.env.DB.prepare("INSERT INTO audit_log (id, actor_account_id, action, object_type, object_id, metadata_json, created_at) VALUES (?, ?, ?, ?, ?, ?, ?)").bind(crypto.randomUUID(), auth.accountId, "lineage.change_request_approved", "change_request", request.id, "{}", now()),
@@ -815,8 +816,9 @@ export function createApp() {
     if (!preview.valid) return context.json({ code: "revision_invalid", issues: preview.issues }, 400);
     const structurePreview = previewBranchStructureChange(toStructureCandidates(structures.results as StructureRow[]), toStructureChangeCandidates(structureItems.results as StructureChangeItemRow[]));
     if (!structurePreview.valid) return context.json({ code: "branch_structure_invalid", issues: structurePreview.issues }, 400);
-    if (!membershipItemsFitStructure(membershipItems.results as MembershipChangeItemRow[], structurePreview.branches) || !membershipsUseActiveStructures(preview.memberships, structurePreview.branches)) return context.json({ code: "membership_branch_not_active" }, 409);
+    if (!membershipItemsFitStructure(membershipItems.results as MembershipChangeItemRow[], structurePreview.branches)) return context.json({ code: "membership_branch_not_active" }, 409);
     if (!await structureRetirementsAreSafe(context.env.DB, preview.memberships, structurePreview.branches)) return context.json({ code: "branch_retirement_in_use" }, 409);
+    if (!membershipsUseActiveStructures(preview.memberships, structurePreview.branches)) return context.json({ code: "membership_branch_not_active" }, 409);
     const publishTime = now();
     const result = await publishSuccessionRevision(context.env.DB, {
       lineageId: request.lineage_id, revisionId: parsed.data.revisionId, basedOnRevisionId: request.base_revision_id ?? undefined,

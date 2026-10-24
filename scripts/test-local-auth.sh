@@ -704,6 +704,94 @@ const publishedStructure = execFileSync("npx", ["wrangler", "d1", "execute", "DB
 ], { encoding: "utf8" });
 assert.match(publishedStructure, /本地成员测试房（新名）/);
 
+const retirementWithMember = await request(`/api/admin/lineages/${lineageId}/change-requests`, {
+  method: "POST", cookie: adminCookie, csrf: adminCsrf,
+  body: { reason: "有成员的房支不得退休", structureItems: [{ operation: "retire", branchId: membershipBranchId }] },
+});
+expectStatus(retirementWithMember, 201);
+expectStatus(await request(`/api/admin/change-requests/${retirementWithMember.body.changeRequest.id}/submit`, {
+  method: "POST", cookie: adminCookie, csrf: adminCsrf, body: { version: 1 },
+}), 200);
+const memberRetirementApproval = await request(`/api/admin/change-requests/${retirementWithMember.body.changeRequest.id}/approve`, {
+  method: "POST", cookie: reviewerCookie, csrf: reviewerCsrf, body: { version: 2 },
+});
+expectStatus(memberRetirementApproval, 409);
+assert.equal(memberRetirementApproval.body.code, "branch_retirement_in_use");
+
+const branchScope = await request(`/api/admin/accounts/${member.id}/scopes`, {
+  method: "PUT", cookie: adminCookie, csrf: adminCsrf,
+  body: {
+    version: scopes.body.version,
+    scopes: [
+      { scopeType: "person", scopeId: secondPerson.body.person.id },
+      { scopeType: "person", scopeId: adoptiveParent.body.person.id },
+      { scopeType: "branch", scopeId: membershipBranchId },
+    ],
+  },
+});
+expectStatus(branchScope, 200);
+const retirementWithScope = await request(`/api/admin/lineages/${lineageId}/change-requests`, {
+  method: "POST", cookie: adminCookie, csrf: adminCsrf,
+  body: {
+    reason: "有账号范围引用的房支不得退休",
+    structureItems: [{ operation: "retire", branchId: membershipBranchId }],
+    membershipItems: [{ operation: "remove", branchId: membershipBranchId, personId: adoptiveParent.body.person.id, membershipKind: "migration" }],
+  },
+});
+expectStatus(retirementWithScope, 201);
+expectStatus(await request(`/api/admin/change-requests/${retirementWithScope.body.changeRequest.id}/submit`, {
+  method: "POST", cookie: adminCookie, csrf: adminCsrf, body: { version: 1 },
+}), 200);
+const scopeRetirementApproval = await request(`/api/admin/change-requests/${retirementWithScope.body.changeRequest.id}/approve`, {
+  method: "POST", cookie: reviewerCookie, csrf: reviewerCsrf, body: { version: 2 },
+});
+expectStatus(scopeRetirementApproval, 409);
+assert.equal(scopeRetirementApproval.body.code, "branch_retirement_in_use");
+
+const restoredScopes = await request(`/api/admin/accounts/${member.id}/scopes`, {
+  method: "PUT", cookie: adminCookie, csrf: adminCsrf,
+  body: {
+    version: branchScope.body.version,
+    scopes: [
+      { scopeType: "person", scopeId: secondPerson.body.person.id },
+      { scopeType: "person", scopeId: adoptiveParent.body.person.id },
+    ],
+  },
+});
+expectStatus(restoredScopes, 200);
+const retirement = await request(`/api/admin/lineages/${lineageId}/change-requests`, {
+  method: "POST", cookie: adminCookie, csrf: adminCsrf,
+  body: {
+    reason: "迁出成员并退休房支",
+    structureItems: [{ operation: "retire", branchId: membershipBranchId }],
+    membershipItems: [{ operation: "remove", branchId: membershipBranchId, personId: adoptiveParent.body.person.id, membershipKind: "migration" }],
+  },
+});
+expectStatus(retirement, 201);
+expectStatus(await request(`/api/admin/change-requests/${retirement.body.changeRequest.id}/submit`, {
+  method: "POST", cookie: adminCookie, csrf: adminCsrf, body: { version: 1 },
+}), 200);
+const retirementApproval = await request(`/api/admin/change-requests/${retirement.body.changeRequest.id}/approve`, {
+  method: "POST", cookie: reviewerCookie, csrf: reviewerCsrf, body: { version: 2 },
+});
+expectStatus(retirementApproval, 200);
+expectStatus(await request(`/api/admin/change-requests/${retirement.body.changeRequest.id}/publish`, {
+  method: "POST", cookie: reviewerCookie, csrf: reviewerCsrf,
+  body: { version: retirementApproval.body.version, revisionId: "dededede-dede-4ede-8ede-dededededede" },
+}), 201);
+const retiredBranch = execFileSync("npx", ["wrangler", "d1", "execute", "DB", "--local", "--persist-to", ".wrangler/local-auth-integration", "--command",
+  `SELECT retired_at FROM branch WHERE id = '${membershipBranchId}';`,
+], { encoding: "utf8" });
+assert.match(retiredBranch, /2026-/);
+const retirementSnapshot = execFileSync("npx", ["wrangler", "d1", "execute", "DB", "--local", "--persist-to", ".wrangler/local-auth-integration", "--command",
+  `SELECT retired_at FROM branch_structure_snapshot WHERE revision_id = 'dededede-dede-4ede-8ede-dededededede' AND branch_id = '${membershipBranchId}';`,
+], { encoding: "utf8" });
+assert.match(retirementSnapshot, /2026-/);
+const retiredMembership = execFileSync("npx", ["wrangler", "d1", "execute", "DB", "--local", "--persist-to", ".wrangler/local-auth-integration", "--command",
+  `SELECT COUNT(*) AS member_count FROM branch_membership_snapshot WHERE revision_id = 'dededede-dede-4ede-8ede-dededededede' AND branch_id = '${membershipBranchId}';`,
+], { encoding: "utf8" });
+assert.match(retiredMembership, /"member_count": 0/);
+
 const passwordReset = await request(`/api/admin/accounts/${member.id}/reset-password`, {
   method: "POST",
   cookie: adminCookie,

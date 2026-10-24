@@ -54,7 +54,7 @@
 - 批准与发布都会从基准结构快照重建结构候选；重复同级活跃名称、退休房的改名、无效父房及含活跃子房的退休均会被拒绝。
 - 退休还会拒绝候选成员快照仍含该房支，或任一 `account_scope` 仍引用该房支的提案；权限不会自动迁移或扩大。
 - 同一提案可创建房支并将成员加入该新房。为此 `0013` 将**提案层**成员条目的 `branch_id` 外键解除：草稿时新房尚不存在；批准/发布仍要求其在结构候选中存在且活跃，发布 batch 先创建 `branch` 再写成员 snapshot。迁移仅重建并逐行复制提案表，未修改既有 `branch`、revision 或 snapshot；若未来需要回退已应用的生产迁移，必须先处置这类组合草稿，再通过受控的前向迁移恢复外键，不能覆盖 D1 数据。
-- 已实际通过 `npm run check`（22 个 Vitest 文件、50 项测试）及 `npm run test:local-auth`。后者以第二名管理员审核并发布房支改名，并断言当前 `branch` 已更新；未执行 remote/preview/production 写入或部署。
+- 已实际通过 `npm run check`（22 个 Vitest 文件、50 项测试）及 `npm run test:local-auth`。后者以第二名管理员审核并发布房支改名、组合创建/成员变更及退休；退休在成员或账号范围依赖存在时返回 `branch_retirement_in_use`，依赖清除后才可发布。未执行 remote/preview/production 写入或部署。
 
 ## 需确认的业务决定
 

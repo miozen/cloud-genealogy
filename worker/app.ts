@@ -31,6 +31,7 @@ import {
   changeRequestVersionInput,
   rejectChangeRequestInput,
   publishChangeRequestInput,
+  rollbackChangeRequestInput,
   validationMessage,
 } from "./auth/validation";
 import { previewSuccessionRevision } from "./lineage/revision-preview";
@@ -39,7 +40,7 @@ import { buildPublishedHangingChart } from "./lineage/hanging-chart-service";
 import { projectHistoricalLineage } from "./lineage/historical-lineage-projection";
 import { compareHistoricalLineage } from "./lineage/historical-lineage-comparison";
 import { projectKinship } from "./lineage/kinship-projection";
-import { previewChangeRequest, type ChangeItemCandidate } from "./lineage/change-request-preview";
+import { buildSnapshotChangeItems, previewChangeRequest, type ChangeItemCandidate } from "./lineage/change-request-preview";
 import { allowsDirectRevisionWrite } from "./lineage/publish-policy";
 import { csrfProtection, requireAuthentication, sessionMiddleware } from "./middleware/authentication";
 import { securityHeaders } from "./middleware/security";
@@ -544,6 +545,36 @@ export function createApp() {
       context.env.DB.prepare("INSERT INTO audit_log (id, actor_account_id, action, object_type, object_id, metadata_json, created_at) VALUES (?, ?, ?, ?, ?, ?, ?)").bind(crypto.randomUUID(), auth.accountId, "lineage.change_request_created", "change_request", id, JSON.stringify({ lineageId, itemCount: parsed.data.items.length }), timestamp),
     ]);
     return context.json({ changeRequest: { id, lineageId, state: "draft", baseRevisionId: pointer?.revision_id ?? null, basePointerVersion: pointer?.version ?? 0, version: 1 } }, 201);
+  });
+
+  app.post("/api/admin/lineages/:lineageId/revisions/:revisionId/rollback-change-request", requireAuthentication, async (context) => {
+    const auth = context.get("auth")!;
+    if (!hasPermission(auth.roles, "system.manage")) return context.json({ code: "forbidden" }, 403);
+    const parsed = rollbackChangeRequestInput.safeParse(await context.req.json().catch(() => null));
+    if (!parsed.success) return context.json({ code: "validation_failed", message: validationMessage(parsed) }, 400);
+    const lineageId = context.req.param("lineageId"); const targetRevisionId = context.req.param("revisionId");
+    const pointer = await context.env.DB.prepare("SELECT revision_id, version FROM lineage_published_pointer WHERE lineage_id = ?").bind(lineageId).first<PublishedPointerRow>();
+    if (!pointer) return context.json({ code: "published_revision_not_found" }, 404);
+    const target = await context.env.DB.prepare("SELECT id FROM lineage_revision WHERE id = ? AND lineage_id = ? AND state = 'published'").bind(targetRevisionId, lineageId).first();
+    if (!target) return context.json({ code: "rollback_target_not_found" }, 404);
+    const [baseEdges, baseRelations, targetEdges, targetRelations] = await context.env.DB.batch([
+      context.env.DB.prepare("SELECT parent_person_id, child_person_id FROM lineage_succession_snapshot WHERE revision_id = ? ORDER BY order_key").bind(pointer.revision_id),
+      context.env.DB.prepare("SELECT subject_person_id, related_person_id, relation_kind FROM canonical_relation_snapshot WHERE revision_id = ? ORDER BY id").bind(pointer.revision_id),
+      context.env.DB.prepare("SELECT parent_person_id, child_person_id FROM lineage_succession_snapshot WHERE revision_id = ? ORDER BY order_key").bind(targetRevisionId),
+      context.env.DB.prepare("SELECT subject_person_id, related_person_id, relation_kind FROM canonical_relation_snapshot WHERE revision_id = ? ORDER BY id").bind(targetRevisionId),
+    ]);
+    if (!baseEdges || !baseRelations || !targetEdges || !targetRelations) throw new Error("rollback change request query did not return every result set");
+    const toEdges = (rows: D1Result<unknown>) => (rows.results as SuccessionRow[]).map((edge) => ({ parentPersonId: edge.parent_person_id, childPersonId: edge.child_person_id }));
+    const toRelations = (rows: D1Result<unknown>) => (rows.results as Array<{ subject_person_id: string; related_person_id: string; relation_kind: "biological_parent" | "adoptive_parent" | "successor_parent" | "spouse" }>).map((relation) => ({ subjectPersonId: relation.subject_person_id, relatedPersonId: relation.related_person_id, relationKind: relation.relation_kind }));
+    const items = buildSnapshotChangeItems(toEdges(baseEdges), toRelations(baseRelations), toEdges(targetEdges), toRelations(targetRelations));
+    if (items.length === 0) return context.json({ code: "rollback_not_needed" }, 409);
+    const id = crypto.randomUUID(); const timestamp = now();
+    await context.env.DB.batch([
+      context.env.DB.prepare("INSERT INTO change_request (id, lineage_id, state, base_revision_id, base_pointer_version, reason, created_by_account_id, created_at) VALUES (?, ?, 'draft', ?, ?, ?, ?, ?)").bind(id, lineageId, pointer.revision_id, pointer.version, parsed.data.reason, auth.accountId, timestamp),
+      ...items.map((item) => context.env.DB.prepare("INSERT INTO change_item (id, change_request_id, operation, subject_person_id, related_person_id, relation_kind, created_at) VALUES (?, ?, ?, ?, ?, ?, ?)").bind(crypto.randomUUID(), id, item.operation, item.subjectPersonId, item.relatedPersonId, "relationKind" in item ? item.relationKind : null, timestamp)),
+      context.env.DB.prepare("INSERT INTO audit_log (id, actor_account_id, action, object_type, object_id, metadata_json, created_at) VALUES (?, ?, ?, ?, ?, ?, ?)").bind(crypto.randomUUID(), auth.accountId, "lineage.rollback_change_request_created", "change_request", id, JSON.stringify({ lineageId, targetRevisionId }), timestamp),
+    ]);
+    return context.json({ changeRequest: { id, lineageId, targetRevisionId, state: "draft", baseRevisionId: pointer.revision_id, basePointerVersion: pointer.version, version: 1, itemCount: items.length } }, 201);
   });
 
   app.get("/api/admin/change-requests/:changeRequestId/preview", requireAuthentication, async (context) => {

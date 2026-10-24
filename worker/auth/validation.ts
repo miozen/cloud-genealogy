@@ -61,6 +61,7 @@ export const createChangeRequestInput = z.object({
 export const changeRequestVersionInput = z.object({ version: z.number().int().positive() });
 export const rejectChangeRequestInput = changeRequestVersionInput.extend({ reviewNote: z.string().trim().min(1, "请说明驳回理由。").max(1_000, "驳回理由过长。") });
 export const publishChangeRequestInput = changeRequestVersionInput.extend({ revisionId: z.string().uuid() });
+export const rollbackChangeRequestInput = z.object({ reason: z.string().trim().min(1, "请说明回退理由。").max(1_000, "回退理由过长。") });
 const sourceTitle = z.string().trim().min(1, "标题不能为空。").max(160, "标题最长 160 个字符。");
 export const lineageInput = z.object({ name: sourceTitle });
 export const genealogyInput = z.object({ title: sourceTitle });

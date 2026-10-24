@@ -15,7 +15,7 @@
 | 命令 | 结果 |
 |---|---|
 | `npm run lint` | 通过。 |
-| `npm run check` | 通过：21 个 Vitest 文件、40 项测试。 |
+| `npm run check` | 通过：21 个 Vitest 文件、41 项测试。 |
 | `npm run build` | 通过。 |
 | `npm run test:local-auth` | 通过：隔离 local Worker/D1，不使用 `--remote`。 |
 | `npm run test:local-core-model` | 通过：隔离 local D1，不使用 `--remote`。 |
@@ -23,11 +23,12 @@
 ## 未完成与风险
 
 - 编辑员提交、`account_scope` 房支范围授权、对象级审批人策略尚未启用；当前首切片仅允许管理员操作。
-- 管理员直接 revision 发布/回退 API 仅允许 `development` 环境，供现有 local fixture、千人回归和演示工具使用；preview 与 production 返回 `change_request_required`，不能绕过提案发布路径。生产回退的提案化流程仍待后续切片设计。
+- 管理员直接 revision 发布/回退 API 仅允许 `development` 环境，供现有 local fixture、千人回归和演示工具使用；preview 与 production 返回 `change_request_required`，不能绕过提案发布路径。生产回退通过历史 revision 自动生成的变更提案完成。
 - 人物合并、拆支、删除、媒体引用与来源纠错不在本切片范围，不能复用当前关系提案机制而省略各自的影响预览与恢复规则。
 
 ## 下一步
 
-1. 为生产回退设计受控的提案化流程，再为编辑员提案与 `account_scope` 进行独立授权设计审查。
-2. 为提案冲突、驳回、非法候选和审计原子性补充 local Worker/D1 回归。
+1. 管理员可由任一历史 published revision 生成回退提案；系统将当前与目标 snapshot 的承谱/亲属关系差异转换为显式 `change_item`，仍须提交、批准后才会发布新的 immutable revision。
+2. 为编辑员提案与 `account_scope` 进行独立授权设计审查。
+3. 为更多非法候选与审计原子性补充 local Worker/D1 回归。
 3. 在 P0-6 前保持所有迁移仅用于 local 验证；preview/production 迁移、Secrets 和部署仍须单独授权。

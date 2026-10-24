@@ -19,5 +19,19 @@ export function previewChangeRequest(baseEdges: readonly SuccessionEdgeCandidate
   return { ...succession, edges: [...edges.values()], relations: [...relations.values()] };
 }
 
+/** Produces an explicit proposal that changes one published snapshot into another. */
+export function buildSnapshotChangeItems(baseEdges: readonly SuccessionEdgeCandidate[], baseRelations: readonly CanonicalRelationCandidate[], targetEdges: readonly SuccessionEdgeCandidate[], targetRelations: readonly CanonicalRelationCandidate[]): ChangeItemCandidate[] {
+  const baseEdgeKeys = new Set(baseEdges.map((edge) => edgeKey(edge.parentPersonId, edge.childPersonId)));
+  const targetEdgeKeys = new Set(targetEdges.map((edge) => edgeKey(edge.parentPersonId, edge.childPersonId)));
+  const baseRelationKeys = new Set(baseRelations.map(relationKey));
+  const targetRelationKeys = new Set(targetRelations.map(relationKey));
+  return [
+    ...baseEdges.filter((edge) => !targetEdgeKeys.has(edgeKey(edge.parentPersonId, edge.childPersonId))).map((edge) => ({ operation: "succession_remove" as const, subjectPersonId: edge.parentPersonId, relatedPersonId: edge.childPersonId })),
+    ...targetEdges.filter((edge) => !baseEdgeKeys.has(edgeKey(edge.parentPersonId, edge.childPersonId))).map((edge) => ({ operation: "succession_add" as const, subjectPersonId: edge.parentPersonId, relatedPersonId: edge.childPersonId })),
+    ...baseRelations.filter((relation) => !targetRelationKeys.has(relationKey(relation))).map((relation) => ({ operation: "relation_remove" as const, ...relation })),
+    ...targetRelations.filter((relation) => !baseRelationKeys.has(relationKey(relation))).map((relation) => ({ operation: "relation_add" as const, ...relation })),
+  ];
+}
+
 function edgeKey(parentPersonId: string, childPersonId: string) { return `${parentPersonId}\u0000${childPersonId}`; }
 function relationKey(relation: CanonicalRelationCandidate) { return `${relation.subjectPersonId}\u0000${relation.relatedPersonId}\u0000${relation.relationKind}`; }

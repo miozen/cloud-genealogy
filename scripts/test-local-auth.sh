@@ -480,6 +480,28 @@ const rejection = await request(`/api/admin/change-requests/${rejectedChangeRequ
 });
 expectStatus(rejection, 200);
 assert.equal(rejection.body.state, "rejected");
+const rollbackChangeRequest = await request(`/api/admin/lineages/${lineageId}/revisions/44444444-4444-4444-8444-444444444444/rollback-change-request`, {
+  method: "POST", cookie: adminCookie, csrf: adminCsrf,
+  body: { reason: "恢复已审核的亲属关系快照" },
+});
+expectStatus(rollbackChangeRequest, 201);
+assert.equal(rollbackChangeRequest.body.changeRequest.itemCount, 3);
+expectStatus(await request(`/api/admin/change-requests/${rollbackChangeRequest.body.changeRequest.id}/submit`, {
+  method: "POST", cookie: adminCookie, csrf: adminCsrf, body: { version: 1 },
+}), 200);
+const rollbackChangeApproval = await request(`/api/admin/change-requests/${rollbackChangeRequest.body.changeRequest.id}/approve`, {
+  method: "POST", cookie: adminCookie, csrf: adminCsrf, body: { version: 2 },
+});
+expectStatus(rollbackChangeApproval, 200);
+const rollbackChangePublish = await request(`/api/admin/change-requests/${rollbackChangeRequest.body.changeRequest.id}/publish`, {
+  method: "POST", cookie: adminCookie, csrf: adminCsrf,
+  body: { version: rollbackChangeApproval.body.version, revisionId: "88888888-8888-4888-8888-888888888888" },
+});
+expectStatus(rollbackChangePublish, 201);
+const kinshipAfterRollbackChangeRequest = await request(`/api/admin/lineages/${lineageId}/kinship?personId=${secondPerson.body.person.id}`, { cookie: adminCookie });
+expectStatus(kinshipAfterRollbackChangeRequest, 200);
+const relationKey = (relation) => `${relation.subjectPersonId}\u0000${relation.relatedPersonId}\u0000${relation.relationKind}`;
+assert.deepEqual(kinshipAfterRollbackChangeRequest.body.relations.toSorted((left, right) => relationKey(left).localeCompare(relationKey(right))), kinship.body.relations.toSorted((left, right) => relationKey(left).localeCompare(relationKey(right))));
 
 const approval = await request(`/api/admin/accounts/${member.id}/approve`, {
   method: "POST",

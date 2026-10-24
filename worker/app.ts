@@ -519,6 +519,7 @@ export function createApp() {
       lineageId, revisionId: parsed.data.revisionId, basedOnRevisionId: parsed.data.basedOnRevisionId,
       baseEdges: base.results.map((row) => ({ parentPersonId: row.parent_person_id, childPersonId: row.child_person_id })),
       proposedEdges: parsed.data.edges, expectedPointerVersion: parsed.data.expectedPointerVersion, now: now(),
+      proposedRelations: parsed.data.relations,
       audit: {
         id: crypto.randomUUID(), actorAccountId: auth.accountId, action: "lineage.revision_published",
         objectType: "lineage_revision", objectId: parsed.data.revisionId, metadataJson: JSON.stringify({ lineageId }),

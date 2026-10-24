@@ -37,6 +37,7 @@ export const publishRevisionInput = successionEdgesInput.extend({
   revisionId: z.string().uuid(),
   basedOnRevisionId: z.string().uuid().optional(),
   expectedPointerVersion: z.number().int().nonnegative(),
+  relations: z.array(z.object({ subjectPersonId: z.string().uuid(), relatedPersonId: z.string().uuid(), relationKind: z.enum(["biological_parent", "adoptive_parent", "successor_parent", "spouse"]) }).refine((value) => value.subjectPersonId !== value.relatedPersonId, "亲属关系两端不能是同一人物。")).max(2000).default([]),
 });
 export const rollbackRevisionInput = z.object({
   targetRevisionId: z.string().uuid(),

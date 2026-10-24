@@ -16,10 +16,12 @@ export interface PublishRevisionInput {
   basedOnRevisionId?: string;
   baseEdges: readonly SuccessionEdgeCandidate[];
   proposedEdges: readonly SuccessionEdgeCandidate[];
+  proposedRelations?: readonly CanonicalRelationCandidate[];
   expectedPointerVersion: number;
   now: string;
   audit: RevisionAuditEntry;
 }
+export interface CanonicalRelationCandidate { subjectPersonId: string; relatedPersonId: string; relationKind: "biological_parent" | "adoptive_parent" | "successor_parent" | "spouse"; }
 
 export type PublishRevisionResult =
   | { published: true; revisionId: string }
@@ -44,6 +46,10 @@ export async function publishSuccessionRevision(
       database.prepare(
         "INSERT INTO lineage_succession_snapshot (id, revision_id, parent_person_id, child_person_id, order_key, created_at) VALUES (?, ?, ?, ?, ?, ?)",
       ).bind(`${input.revisionId}:succession:${index}`, input.revisionId, edge.parentPersonId, edge.childPersonId, String(index).padStart(8, "0"), input.now),
+    ),
+    ...(input.proposedRelations ?? []).map((relation, index) =>
+      database.prepare("INSERT INTO canonical_relation_snapshot (id, revision_id, subject_person_id, related_person_id, relation_kind, created_at) VALUES (?, ?, ?, ?, ?, ?)")
+        .bind(`${input.revisionId}:relation:${index}`, input.revisionId, relation.subjectPersonId, relation.relatedPersonId, relation.relationKind, input.now),
     ),
     database.prepare(
       "INSERT INTO lineage_published_pointer (lineage_id, revision_id, updated_at, version) VALUES (?, ?, ?, 1) ON CONFLICT(lineage_id) DO UPDATE SET revision_id = excluded.revision_id, updated_at = excluded.updated_at, version = lineage_published_pointer.version + 1 WHERE lineage_published_pointer.version = ?",
@@ -71,6 +77,10 @@ export async function buildRollbackEdges(database: D1Database, revisionId: strin
     "SELECT parent_person_id, child_person_id FROM lineage_succession_snapshot WHERE revision_id = ? ORDER BY order_key",
   ).bind(revisionId).all<{ parent_person_id: string; child_person_id: string }>();
   return rows.results.map((row) => ({ parentPersonId: row.parent_person_id, childPersonId: row.child_person_id }));
+}
+export async function buildRollbackRelations(database: D1Database, revisionId: string): Promise<CanonicalRelationCandidate[]> {
+  const rows = await database.prepare("SELECT subject_person_id, related_person_id, relation_kind FROM canonical_relation_snapshot WHERE revision_id = ? ORDER BY id").bind(revisionId).all<{ subject_person_id: string; related_person_id: string; relation_kind: CanonicalRelationCandidate["relationKind"] }>();
+  return rows.results.map((row) => ({ subjectPersonId: row.subject_person_id, relatedPersonId: row.related_person_id, relationKind: row.relation_kind }));
 }
 
 export interface RollbackRevisionInput {
@@ -103,6 +113,7 @@ export async function rollbackSuccessionRevision(
     basedOnRevisionId: input.targetRevisionId,
     baseEdges: await buildRollbackEdges(database, current.revision_id),
     proposedEdges: await buildRollbackEdges(database, input.targetRevisionId),
+    proposedRelations: await buildRollbackRelations(database, input.targetRevisionId),
     expectedPointerVersion: input.expectedPointerVersion,
     now: input.now,
     audit: input.audit,

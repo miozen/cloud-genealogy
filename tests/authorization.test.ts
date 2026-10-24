@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { canReadVisibility, hasPermission } from "../worker/auth/authorization";
+import { canProposeForPeople, canReadVisibility, hasPermission } from "../worker/auth/authorization";
 
 describe("authorization", () => {
   it("grants review permission to an admin", () => {
@@ -16,5 +16,12 @@ describe("authorization", () => {
     expect(canReadVisibility(["member"], "MEMBER")).toBe(true);
     expect(canReadVisibility(["editor"], "ADMIN")).toBe(false);
     expect(canReadVisibility(["admin"], "ADMIN")).toBe(true);
+  });
+
+  it("requires explicit global or person scope for an editor proposal", () => {
+    expect(canProposeForPeople(["editor"], [{ scopeType: "person", scopeId: "person-a" }], ["person-a"])).toBe(true);
+    expect(canProposeForPeople(["editor"], [{ scopeType: "person", scopeId: "person-a" }], ["person-a", "person-b"])).toBe(false);
+    expect(canProposeForPeople(["editor"], [{ scopeType: "branch", scopeId: "branch-a" }], ["person-a"])).toBe(false);
+    expect(canProposeForPeople(["editor"], [{ scopeType: "global", scopeId: null }], ["person-a", "person-b"])).toBe(true);
   });
 });

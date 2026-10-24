@@ -27,6 +27,17 @@ export const approvalInput = z.object({
   role: z.enum(["member", "editor", "admin"]).default("member"),
   version: z.number().int().positive(),
 });
+export const accountScopesInput = z.object({
+  version: z.number().int().positive(),
+  scopes: z.array(z.discriminatedUnion("scopeType", [
+    z.object({ scopeType: z.literal("global") }),
+    z.object({ scopeType: z.literal("person"), scopeId: z.string().uuid() }),
+  ])).max(200),
+}).superRefine((value, context) => {
+  const keys = value.scopes.map((scope) => `${scope.scopeType}:${"scopeId" in scope ? scope.scopeId : ""}`);
+  if (new Set(keys).size !== keys.length) context.addIssue({ code: "custom", message: "授权范围不能重复。" });
+  if (value.scopes.filter((scope) => scope.scopeType === "global").length > 1) context.addIssue({ code: "custom", message: "全局范围最多一项。" });
+});
 
 export const rejectionInput = z.object({ version: z.number().int().positive() });
 export const resetPasswordInput = z.object({ password });

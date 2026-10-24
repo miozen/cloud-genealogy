@@ -142,6 +142,12 @@ const registration = await request("/api/auth/register", {
 expectStatus(registration, 201);
 assert.equal(registration.body.status, "pending");
 
+const reviewerRegistration = await request("/api/auth/register", {
+  method: "POST",
+  body: { username: "local.reviewer", password, genealogyName: "本地复核管理员" },
+});
+expectStatus(reviewerRegistration, 201);
+
 const pendingLogin = await request("/api/auth/login", {
   method: "POST",
   body: { username: "local.member", password },
@@ -162,6 +168,8 @@ const pending = await request("/api/admin/accounts/pending", { cookie: adminCook
 expectStatus(pending, 200);
 const member = pending.body.accounts.find((account) => account.username === "local.member");
 assert.ok(member, "待审核账号必须可由管理员读取");
+const reviewer = pending.body.accounts.find((account) => account.username === "local.reviewer");
+assert.ok(reviewer, "复核管理员账号必须可由管理员读取");
 
 const rejectedForMissingCsrf = await request("/api/admin/persons", {
   method: "POST",
@@ -419,6 +427,22 @@ const adoptiveParent = await request("/api/admin/persons", {
   body: { displayName: "本地养父", visibility: "MEMBER" },
 });
 expectStatus(adoptiveParent, 201);
+const reviewerPerson = await request("/api/admin/persons", {
+  method: "POST", cookie: adminCookie, csrf: adminCsrf,
+  body: { displayName: "本地复核管理员人物", visibility: "MEMBER" },
+});
+expectStatus(reviewerPerson, 201);
+expectStatus(await request(`/api/admin/accounts/${reviewer.id}/approve`, {
+  method: "POST", cookie: adminCookie, csrf: adminCsrf,
+  body: { personId: reviewerPerson.body.person.id, role: "admin", version: reviewer.version },
+}), 200);
+const reviewerLogin = await request("/api/auth/login", {
+  method: "POST",
+  body: { username: "local.reviewer", password },
+});
+expectStatus(reviewerLogin, 200);
+const reviewerCookie = sessionCookie(reviewerLogin);
+const reviewerCsrf = reviewerLogin.body.csrfToken;
 const changeRequest = await request(`/api/admin/lineages/${lineageId}/change-requests`, {
   method: "POST", cookie: adminCookie, csrf: adminCsrf,
   body: {
@@ -434,12 +458,17 @@ assert.equal(changePreview.body.preview.relations.length, 4);
 expectStatus(await request(`/api/admin/change-requests/${changeRequest.body.changeRequest.id}/submit`, {
   method: "POST", cookie: adminCookie, csrf: adminCsrf, body: { version: 1 },
 }), 200);
-const changeApproval = await request(`/api/admin/change-requests/${changeRequest.body.changeRequest.id}/approve`, {
+const selfApproval = await request(`/api/admin/change-requests/${changeRequest.body.changeRequest.id}/approve`, {
   method: "POST", cookie: adminCookie, csrf: adminCsrf, body: { version: 2 },
+});
+expectStatus(selfApproval, 403);
+assert.equal(selfApproval.body.code, "self_review_forbidden");
+const changeApproval = await request(`/api/admin/change-requests/${changeRequest.body.changeRequest.id}/approve`, {
+  method: "POST", cookie: reviewerCookie, csrf: reviewerCsrf, body: { version: 2 },
 });
 expectStatus(changeApproval, 200);
 const changePublish = await request(`/api/admin/change-requests/${changeRequest.body.changeRequest.id}/publish`, {
-  method: "POST", cookie: adminCookie, csrf: adminCsrf,
+  method: "POST", cookie: reviewerCookie, csrf: reviewerCsrf,
   body: { version: changeApproval.body.version, revisionId: "66666666-6666-4666-8666-666666666666" },
 });
 expectStatus(changePublish, 201);
@@ -460,7 +489,7 @@ const localOnlyPublish = await request(`/api/admin/lineages/${lineageId}/revisio
 });
 expectStatus(localOnlyPublish, 201);
 const staleApproval = await request(`/api/admin/change-requests/${staleChangeRequest.body.changeRequest.id}/approve`, {
-  method: "POST", cookie: adminCookie, csrf: adminCsrf, body: { version: 2 },
+  method: "POST", cookie: reviewerCookie, csrf: reviewerCsrf, body: { version: 2 },
 });
 expectStatus(staleApproval, 409);
 assert.equal(staleApproval.body.code, "change_request_conflicted");
@@ -476,7 +505,7 @@ expectStatus(await request(`/api/admin/change-requests/${rejectedChangeRequest.b
   method: "POST", cookie: adminCookie, csrf: adminCsrf, body: { version: 1 },
 }), 200);
 const rejection = await request(`/api/admin/change-requests/${rejectedChangeRequest.body.changeRequest.id}/reject`, {
-  method: "POST", cookie: adminCookie, csrf: adminCsrf, body: { version: 2, reviewNote: "证据不足，暂不发布。" },
+  method: "POST", cookie: reviewerCookie, csrf: reviewerCsrf, body: { version: 2, reviewNote: "证据不足，暂不发布。" },
 });
 expectStatus(rejection, 200);
 assert.equal(rejection.body.state, "rejected");
@@ -490,11 +519,11 @@ expectStatus(await request(`/api/admin/change-requests/${rollbackChangeRequest.b
   method: "POST", cookie: adminCookie, csrf: adminCsrf, body: { version: 1 },
 }), 200);
 const rollbackChangeApproval = await request(`/api/admin/change-requests/${rollbackChangeRequest.body.changeRequest.id}/approve`, {
-  method: "POST", cookie: adminCookie, csrf: adminCsrf, body: { version: 2 },
+  method: "POST", cookie: reviewerCookie, csrf: reviewerCsrf, body: { version: 2 },
 });
 expectStatus(rollbackChangeApproval, 200);
 const rollbackChangePublish = await request(`/api/admin/change-requests/${rollbackChangeRequest.body.changeRequest.id}/publish`, {
-  method: "POST", cookie: adminCookie, csrf: adminCsrf,
+  method: "POST", cookie: reviewerCookie, csrf: reviewerCsrf,
   body: { version: rollbackChangeApproval.body.version, revisionId: "88888888-8888-4888-8888-888888888888" },
 });
 expectStatus(rollbackChangePublish, 201);
@@ -522,6 +551,44 @@ const memberCsrf = memberLogin.body.csrfToken;
 const identity = await request("/api/me", { cookie: memberCookie });
 expectStatus(identity, 200);
 assert.deepEqual(identity.body.account.roles.sort(), ["editor", "member"]);
+
+const outOfScopeEditorProposal = await request(`/api/admin/lineages/${lineageId}/change-requests`, {
+  method: "POST", cookie: memberCookie, csrf: memberCsrf,
+  body: { reason: "范围外提案必须被拒绝", items: [{ operation: "relation_add", subjectPersonId: secondPerson.body.person.id, relatedPersonId: adoptiveParent.body.person.id, relationKind: "adoptive_parent" }] },
+});
+expectStatus(outOfScopeEditorProposal, 403);
+assert.equal(outOfScopeEditorProposal.body.code, "scope_forbidden");
+
+const scopes = await request(`/api/admin/accounts/${member.id}/scopes`, {
+  method: "PUT", cookie: adminCookie, csrf: adminCsrf,
+  body: {
+    version: member.version + 1,
+    scopes: [
+      { scopeType: "person", scopeId: secondPerson.body.person.id },
+      { scopeType: "person", scopeId: adoptiveParent.body.person.id },
+    ],
+  },
+});
+expectStatus(scopes, 200);
+assert.equal(scopes.body.version, member.version + 2);
+
+const editorChangeRequest = await request(`/api/admin/lineages/${lineageId}/change-requests`, {
+  method: "POST", cookie: memberCookie, csrf: memberCsrf,
+  body: { reason: "编辑员在获授人物范围内补充养父关系", items: [{ operation: "relation_add", subjectPersonId: secondPerson.body.person.id, relatedPersonId: adoptiveParent.body.person.id, relationKind: "adoptive_parent" }] },
+});
+expectStatus(editorChangeRequest, 201);
+expectStatus(await request(`/api/admin/change-requests/${editorChangeRequest.body.changeRequest.id}/preview`, { cookie: memberCookie }), 200);
+expectStatus(await request(`/api/admin/change-requests/${editorChangeRequest.body.changeRequest.id}/submit`, {
+  method: "POST", cookie: memberCookie, csrf: memberCsrf, body: { version: 1 },
+}), 200);
+const editorApproval = await request(`/api/admin/change-requests/${editorChangeRequest.body.changeRequest.id}/approve`, {
+  method: "POST", cookie: reviewerCookie, csrf: reviewerCsrf, body: { version: 2 },
+});
+expectStatus(editorApproval, 200);
+expectStatus(await request(`/api/admin/change-requests/${editorChangeRequest.body.changeRequest.id}/publish`, {
+  method: "POST", cookie: reviewerCookie, csrf: reviewerCsrf,
+  body: { version: editorApproval.body.version, revisionId: "99999999-9999-4999-8999-999999999999" },
+}), 201);
 
 const passwordReset = await request(`/api/admin/accounts/${member.id}/reset-password`, {
   method: "POST",

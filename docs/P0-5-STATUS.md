@@ -85,7 +85,7 @@
 - 新增仅管理员可读的 `GET /api/admin/lineages/:lineageId/branch-workbench`，严格以当前 published revision 的结构和成员 snapshot 为准，返回房支树、成员显示名及聚合成员数。
 - 房支账号范围只以每房支的引用**计数**返回，不暴露任何账号身份；该端点无写入能力。
 - 变更提案 preview 新增 `retirementDependencies`：使用最终候选成员快照和当前账号范围引用重新聚合依赖。存在依赖时 preview 明确无效，但审核和发布仍保留独立的实时重校验。
-- `npm run check` 已通过；后续将以 local Worker/D1 验证只读模型、依赖计数和现有退休拦截的一致性，不使用 `--remote`。
+- `npm run check`（22 个测试文件、50 项测试）、`npm run lint`、`npm run build`、`npm run test:local-auth` 与 `npm run test:local-core-model` 均已实际通过；两套本地回归验证只读模型、依赖计数和现有退休拦截一致，且不使用 `--remote`。
 
 ## 未完成与风险
 

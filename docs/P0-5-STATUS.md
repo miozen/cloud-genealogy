@@ -56,6 +56,12 @@
 - 发布在既有单个 D1 batch 内更新当前 `branch`，并同时写入新 revision 的结构/成员/关系快照、published pointer、提案终态和审计。失败不会留下部分结构写入。
 - `npm run check`（22 个 Vitest 文件、50 项测试）及 `npm run test:local-auth` 已实际通过。后者覆盖管理员结构改名草稿 → 第二管理员批准/发布 → 当前 `branch` 更新；仅使用隔离 local Worker/D1。
 
+## 已完成：新房与成员组合提案
+
+- 管理员可在同一 `change_request` 创建房支并添加其首位成员；审核、发布和最终 snapshot 均基于同一结构候选，仍要求最终成员只归属活跃房支。
+- `0013_allow_membership_items_for_new_branches.sql` 仅移除**提案条目**到当前 `branch` 的外键并重建复制该表，避免草稿阶段阻止尚未发布的新房；`person` 与 `change_request` 外键、唯一约束及索引均保留。
+- 发布 batch 的顺序保持先创建当前 `branch`、再写成员/结构 snapshot；任何失败都会回滚整个 batch。`npm run test:local-auth` 已实际覆盖并通过此路径，且只使用隔离 local D1。
+
 ## 未完成与风险
 
 - 房支成员的**增删提案后端**已经过本地完整验证，但尚没有前端编辑工作台。房支创建、调整、对象级审批人策略仍不在本切片范围；当前 `branch` 范围仍仅使用已存在的基准 revision 快照，不能通过关系提案隐式变更成员归属。
@@ -64,7 +70,7 @@
 
 ## 下一步
 
-1. 补充结构 `create` 与 `retire` 的 local Worker/D1 端到端用例，特别是成员/账号范围依赖拦截和 batch 失败原子性。
+1. 补充结构 `retire` 的 local Worker/D1 端到端用例，特别是成员/账号范围依赖拦截和 batch 失败原子性。
 2. 设计对象级审批人映射、代理与失效规则；确认前继续由另一位管理员审核，不推断房支负责人。
 3. 单独确认前端编辑工作台的最小交互与权限展示；后端 API 已可供该切片使用。
 4. 在 P0-6 前保持所有迁移仅用于 local 验证；preview/production 迁移、Secrets 和部署仍须单独授权。

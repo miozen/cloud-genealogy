@@ -646,15 +646,13 @@ expectStatus(duplicateRevisionPublish, 409);
 assert.equal(duplicateRevisionPublish.body.code, "change_request_conflicted");
 
 const membershipBranchId = "aaaaaaaa-1111-4111-8111-aaaaaaaaaaaa";
-execFileSync("npx", ["wrangler", "d1", "execute", "DB", "--local", "--persist-to", ".wrangler/local-auth-integration", "--command",
-  `INSERT INTO branch (id, lineage_id, name, branch_kind, created_at) VALUES ('${membershipBranchId}', '${lineageId}', '本地成员测试房', 'agnatic', '2026-10-24T00:00:00.000Z');
-   INSERT INTO branch_structure_snapshot (id, revision_id, branch_id, parent_branch_id, name, branch_kind, retired_at, created_at)
-   SELECT 'local-membership-branch-snapshot', revision_id, '${membershipBranchId}', NULL, '本地成员测试房', 'agnatic', NULL, '2026-10-24T00:00:00.000Z'
-   FROM lineage_published_pointer WHERE lineage_id = '${lineageId}';`,
-], { stdio: "pipe" });
 const membershipChangeRequest = await request(`/api/admin/lineages/${lineageId}/change-requests`, {
   method: "POST", cookie: adminCookie, csrf: adminCsrf,
-  body: { reason: "补充已审核房支成员", membershipItems: [{ operation: "add", branchId: membershipBranchId, personId: adoptiveParent.body.person.id, membershipKind: "migration" }] },
+  body: {
+    reason: "创建房支并补充已审核成员",
+    structureItems: [{ operation: "create", branchId: membershipBranchId, parentBranchId: null, name: "本地成员测试房", branchKind: "agnatic" }],
+    membershipItems: [{ operation: "add", branchId: membershipBranchId, personId: adoptiveParent.body.person.id, membershipKind: "migration" }],
+  },
 });
 expectStatus(membershipChangeRequest, 201);
 const membershipPreview = await request(`/api/admin/change-requests/${membershipChangeRequest.body.changeRequest.id}/preview`, { cookie: adminCookie });

@@ -114,11 +114,23 @@ function toMembershipChangeCandidates(rows: readonly MembershipChangeItemRow[]):
 function toStructureCandidates(rows: readonly StructureRow[]): BranchStructureCandidate[] { return rows.map((row) => ({ branchId: row.branch_id, parentBranchId: row.parent_branch_id, name: row.name, branchKind: row.branch_kind, retiredAt: row.retired_at })); }
 function toStructureChangeCandidates(rows: readonly StructureChangeItemRow[]): BranchStructureChangeItemCandidate[] { return rows.map((row) => row.operation === "create" ? { operation: "create", branchId: row.branch_id, parentBranchId: row.parent_branch_id, name: row.name, branchKind: row.branch_kind! } : row.operation === "rename" ? { operation: "rename", branchId: row.branch_id, name: row.name } : { operation: "retire", branchId: row.branch_id }); }
 
-async function membershipBranchesAreActive(database: D1Database, lineageId: string, items: readonly MembershipChangeItemRow[]): Promise<boolean> {
-  const branchIds = [...new Set(items.map((item) => item.branch_id))];
-  if (branchIds.length === 0) return true;
-  const rows = await database.prepare(`SELECT id FROM branch WHERE lineage_id = ? AND retired_at IS NULL AND id IN (${branchIds.map(() => "?").join(",")})`).bind(lineageId, ...branchIds).all<{ id: string }>();
-  return rows.results.length === branchIds.length;
+function membershipItemsFitStructure(
+  items: readonly Pick<MembershipChangeItemRow, "operation" | "branch_id">[],
+  structures: ReturnType<typeof previewBranchStructureChange>["branches"],
+): boolean {
+  const branches = new Map(structures.map((branch) => [branch.branchId, branch]));
+  return items.every((item) => {
+    const branch = branches.get(item.branch_id);
+    return branch && (item.operation === "remove" || branch.retiredAt === null);
+  });
+}
+
+function membershipsUseActiveStructures(
+  memberships: readonly BranchMembershipCandidate[],
+  structures: ReturnType<typeof previewBranchStructureChange>["branches"],
+): boolean {
+  const branches = new Map(structures.map((branch) => [branch.branchId, branch]));
+  return memberships.every((membership) => branches.get(membership.branchId)?.retiredAt === null);
 }
 
 async function structureRetirementsAreSafe(
@@ -599,17 +611,23 @@ export function createApp() {
     const personIds = [...new Set([...changeItemPersonIds(scopeItems), ...parsed.data.membershipItems.map((item) => item.personId)])];
     const people = await context.env.DB.prepare(`SELECT id FROM person WHERE id IN (${personIds.map(() => "?").join(",")})`).bind(...personIds).all<{ id: string }>();
     if (people.results.length !== personIds.length) return context.json({ code: "change_person_not_found" }, 404);
-    if (parsed.data.membershipItems.length > 0) {
-      const branchIds = [...new Set(parsed.data.membershipItems.map((item) => item.branchId))];
-      const branches = await context.env.DB.prepare(`SELECT id FROM branch WHERE lineage_id = ? AND retired_at IS NULL AND id IN (${branchIds.map(() => "?").join(",")})`).bind(lineageId, ...branchIds).all<{ id: string }>();
-      if (branches.results.length !== branchIds.length) return context.json({ code: "change_branch_not_found_or_retired" }, 404);
-    }
+    let structurePreview: ReturnType<typeof previewBranchStructureChange> | undefined;
     if (parsed.data.structureItems.length > 0) {
       const structures = pointer?.revision_id
         ? await context.env.DB.prepare("SELECT branch_id, parent_branch_id, name, branch_kind, retired_at FROM branch_structure_snapshot WHERE revision_id = ?").bind(pointer.revision_id).all<StructureRow>()
         : await context.env.DB.prepare("SELECT id AS branch_id, parent_branch_id, name, branch_kind, retired_at FROM branch WHERE lineage_id = ?").bind(lineageId).all<StructureRow>();
-      const preview = previewBranchStructureChange(toStructureCandidates(structures.results), parsed.data.structureItems);
-      if (!preview.valid) return context.json({ code: "branch_structure_invalid", issues: preview.issues }, 400);
+      structurePreview = previewBranchStructureChange(toStructureCandidates(structures.results), parsed.data.structureItems);
+      if (!structurePreview.valid) return context.json({ code: "branch_structure_invalid", issues: structurePreview.issues }, 400);
+    }
+    if (parsed.data.membershipItems.length > 0) {
+      const membershipItems = parsed.data.membershipItems.map((item) => ({ operation: item.operation, branch_id: item.branchId }));
+      if (structurePreview) {
+        if (!membershipItemsFitStructure(membershipItems, structurePreview.branches)) return context.json({ code: "change_branch_not_found_or_retired" }, 404);
+      } else {
+        const branchIds = [...new Set(parsed.data.membershipItems.map((item) => item.branchId))];
+        const branches = await context.env.DB.prepare(`SELECT id FROM branch WHERE lineage_id = ? AND retired_at IS NULL AND id IN (${branchIds.map(() => "?").join(",")})`).bind(lineageId, ...branchIds).all<{ id: string }>();
+        if (branches.results.length !== branchIds.length) return context.json({ code: "change_branch_not_found_or_retired" }, 404);
+      }
     }
     if (!await canProposeChangeForPeople(context.env.DB, auth, personIds, pointer?.revision_id ?? null)) return context.json({ code: "scope_forbidden" }, 403);
     const id = crypto.randomUUID(); const timestamp = now();
@@ -735,7 +753,6 @@ export function createApp() {
     if (!edges || !relations || !items || !memberships || !membershipItems || !structures || !structureItems) throw new Error("change request approval query did not return every result set");
     if (membershipItems.results.length > 0 && !hasPermission(auth.roles, "system.manage")) return context.json({ code: "membership_change_requires_admin" }, 403);
     if (structureItems.results.length > 0 && !hasPermission(auth.roles, "system.manage")) return context.json({ code: "structure_change_requires_admin" }, 403);
-    if (!await membershipBranchesAreActive(context.env.DB, request.lineage_id, membershipItems.results as MembershipChangeItemRow[])) return context.json({ code: "membership_branch_not_active" }, 409);
     const preview = previewChangeRequest(
       (edges.results as SuccessionRow[]).map((edge) => ({ parentPersonId: edge.parent_person_id, childPersonId: edge.child_person_id })),
       (relations.results as Array<{ subject_person_id: string; related_person_id: string; relation_kind: "biological_parent" | "adoptive_parent" | "successor_parent" | "spouse" }>).map((relation) => ({ subjectPersonId: relation.subject_person_id, relatedPersonId: relation.related_person_id, relationKind: relation.relation_kind })),
@@ -745,6 +762,7 @@ export function createApp() {
     if (!preview.valid) return context.json({ code: "revision_invalid", issues: preview.issues }, 400);
     const structurePreview = previewBranchStructureChange(toStructureCandidates(structures.results as StructureRow[]), toStructureChangeCandidates(structureItems.results as StructureChangeItemRow[]));
     if (!structurePreview.valid) return context.json({ code: "branch_structure_invalid", issues: structurePreview.issues }, 400);
+    if (!membershipItemsFitStructure(membershipItems.results as MembershipChangeItemRow[], structurePreview.branches) || !membershipsUseActiveStructures(preview.memberships, structurePreview.branches)) return context.json({ code: "membership_branch_not_active" }, 409);
     if (!await structureRetirementsAreSafe(context.env.DB, preview.memberships, structurePreview.branches)) return context.json({ code: "branch_retirement_in_use" }, 409);
     await context.env.DB.batch([
       context.env.DB.prepare("UPDATE change_request SET state = 'approved', reviewed_at = ?, reviewed_by_account_id = ?, version = version + 1 WHERE id = ? AND state = 'pending_review' AND version = ?").bind(now(), auth.accountId, request.id, request.version),
@@ -788,7 +806,6 @@ export function createApp() {
     if (!edges || !relations || !items || !memberships || !membershipItems || !structures || !structureItems) throw new Error("change request publish query did not return every result set");
     if (membershipItems.results.length > 0 && !hasPermission(auth.roles, "system.manage")) return context.json({ code: "membership_change_requires_admin" }, 403);
     if (structureItems.results.length > 0 && !hasPermission(auth.roles, "system.manage")) return context.json({ code: "structure_change_requires_admin" }, 403);
-    if (!await membershipBranchesAreActive(context.env.DB, request.lineage_id, membershipItems.results as MembershipChangeItemRow[])) return context.json({ code: "membership_branch_not_active" }, 409);
     const preview = previewChangeRequest(
       (edges.results as SuccessionRow[]).map((edge) => ({ parentPersonId: edge.parent_person_id, childPersonId: edge.child_person_id })),
       (relations.results as Array<{ subject_person_id: string; related_person_id: string; relation_kind: "biological_parent" | "adoptive_parent" | "successor_parent" | "spouse" }>).map((relation) => ({ subjectPersonId: relation.subject_person_id, relatedPersonId: relation.related_person_id, relationKind: relation.relation_kind })),
@@ -798,6 +815,7 @@ export function createApp() {
     if (!preview.valid) return context.json({ code: "revision_invalid", issues: preview.issues }, 400);
     const structurePreview = previewBranchStructureChange(toStructureCandidates(structures.results as StructureRow[]), toStructureChangeCandidates(structureItems.results as StructureChangeItemRow[]));
     if (!structurePreview.valid) return context.json({ code: "branch_structure_invalid", issues: structurePreview.issues }, 400);
+    if (!membershipItemsFitStructure(membershipItems.results as MembershipChangeItemRow[], structurePreview.branches) || !membershipsUseActiveStructures(preview.memberships, structurePreview.branches)) return context.json({ code: "membership_branch_not_active" }, 409);
     if (!await structureRetirementsAreSafe(context.env.DB, preview.memberships, structurePreview.branches)) return context.json({ code: "branch_retirement_in_use" }, 409);
     const publishTime = now();
     const result = await publishSuccessionRevision(context.env.DB, {

@@ -720,7 +720,7 @@ export function createApp() {
       changeRequest: { id: request.id, version: request.version },
       audit: { id: crypto.randomUUID(), actorAccountId: auth.accountId, action: "lineage.change_request_published", objectType: "change_request", objectId: request.id, metadataJson: JSON.stringify({ lineageId: request.lineage_id, revisionId: parsed.data.revisionId }) },
     }).catch((error: unknown) => {
-      if (error instanceof Error && /(lineage publish conflict|change request publish conflict)/.test(error.message)) return null;
+      if (error instanceof Error && /(lineage publish conflict|change request publish conflict|UNIQUE constraint failed: lineage_revision.id)/.test(error.message)) return null;
       throw error;
     });
     if (!result) return context.json({ code: "change_request_conflicted" }, 409);

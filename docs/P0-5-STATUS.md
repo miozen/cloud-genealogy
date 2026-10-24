@@ -13,6 +13,7 @@
 - 创建者不能批准、驳回或发布自己的提案；本地集成回归使用第二位管理员验证该分离职责。
 - 发布新 revision 时原样复制基准的 `branch_membership_snapshot`，关系提案不会隐式改变房支成员归属。
 - 创建提案会在写入前拒绝未知人物和重复条目；审核会重新构建候选快照并拒绝成环或其他非法候选，提案继续保留为可驳回的 `pending_review` 状态。
+- 本地 D1 集成回归会复用 revision ID 触发发布 batch 失败，并确认指针不变、提案仍为 `approved`、同一 revision 的发布审计没有重复写入。
 
 ## 实际验证
 
@@ -34,5 +35,5 @@
 
 1. 管理员可由任一历史 published revision 生成回退提案；系统将当前与目标 snapshot 的承谱/亲属关系差异转换为显式 `change_item`，仍须提交、批准后才会发布新的 immutable revision。
 2. 为房支成员的创建、调整、来源依据与对象级审批人策略做独立设计审查。
-3. 为 D1 batch 故障路径、审计原子性补充 local Worker/D1 回归。
+3. 为房支成员创建/调整和对象级审批人策略补充独立的恢复与审计设计。
 4. 在 P0-6 前保持所有迁移仅用于 local 验证；preview/production 迁移、Secrets 和部署仍须单独授权。

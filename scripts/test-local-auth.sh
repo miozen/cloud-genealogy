@@ -624,6 +624,24 @@ expectStatus(await request(`/api/admin/change-requests/${editorChangeRequest.bod
   method: "POST", cookie: reviewerCookie, csrf: reviewerCsrf,
   body: { version: editorApproval.body.version, revisionId: "99999999-9999-4999-8999-999999999999" },
 }), 201);
+const duplicateRevisionRequest = await request(`/api/admin/lineages/${lineageId}/change-requests`, {
+  method: "POST", cookie: adminCookie, csrf: adminCsrf,
+  body: { reason: "重复 revision ID 的批次必须完整回滚", items: [{ operation: "relation_remove", subjectPersonId: secondPerson.body.person.id, relatedPersonId: adoptiveParent.body.person.id, relationKind: "adoptive_parent" }] },
+});
+expectStatus(duplicateRevisionRequest, 201);
+expectStatus(await request(`/api/admin/change-requests/${duplicateRevisionRequest.body.changeRequest.id}/submit`, {
+  method: "POST", cookie: adminCookie, csrf: adminCsrf, body: { version: 1 },
+}), 200);
+const duplicateRevisionApproval = await request(`/api/admin/change-requests/${duplicateRevisionRequest.body.changeRequest.id}/approve`, {
+  method: "POST", cookie: reviewerCookie, csrf: reviewerCsrf, body: { version: 2 },
+});
+expectStatus(duplicateRevisionApproval, 200);
+const duplicateRevisionPublish = await request(`/api/admin/change-requests/${duplicateRevisionRequest.body.changeRequest.id}/publish`, {
+  method: "POST", cookie: reviewerCookie, csrf: reviewerCsrf,
+  body: { version: duplicateRevisionApproval.body.version, revisionId: "99999999-9999-4999-8999-999999999999" },
+});
+expectStatus(duplicateRevisionPublish, 409);
+assert.equal(duplicateRevisionPublish.body.code, "change_request_conflicted");
 
 const passwordReset = await request(`/api/admin/accounts/${member.id}/reset-password`, {
   method: "POST",
@@ -654,3 +672,14 @@ expectStatus(await request("/api/me", { cookie: refreshedCookie }), 401);
 
 console.log("本地认证集成流程通过。");
 NODE
+
+# The failed publish reuses an existing revision ID. D1 batch semantics must
+# leave the pointer, approved request, and audit trail unchanged together.
+npx wrangler d1 execute DB --local --persist-to "$state_dir" --command "
+  SELECT (SELECT revision_id FROM lineage_published_pointer LIMIT 1) AS revision_id,
+         (SELECT state FROM change_request WHERE reason = '重复 revision ID 的批次必须完整回滚') AS request_state,
+         (SELECT COUNT(*) FROM audit_log WHERE action = 'lineage.change_request_published' AND metadata_json LIKE '%99999999-9999-4999-8999-999999999999%') AS publish_audits;
+" > "$state_dir/publish-batch-result.json"
+rg -q '"revision_id":\s*"99999999-9999-4999-8999-999999999999"' "$state_dir/publish-batch-result.json"
+rg -q '"request_state":\s*"approved"' "$state_dir/publish-batch-result.json"
+rg -q '"publish_audits":\s*1' "$state_dir/publish-batch-result.json"

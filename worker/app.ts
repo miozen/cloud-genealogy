@@ -84,6 +84,8 @@ interface MembershipRow { branch_id: string; person_id: string; membership_kind:
 interface MembershipChangeItemRow extends MembershipRow { operation: BranchMembershipChangeItemCandidate["operation"]; }
 interface StructureRow { branch_id: string; parent_branch_id: string | null; name: string; branch_kind: BranchStructureCandidate["branchKind"]; retired_at: string | null; }
 interface StructureChangeItemRow { operation: BranchStructureChangeItemCandidate["operation"]; branch_id: string; parent_branch_id: string | null; name: string; branch_kind: BranchStructureCandidate["branchKind"] | null; }
+interface BranchMembershipSnapshotRow extends MembershipRow { display_name: string; }
+interface BranchScopeCountRow { branch_id: string; account_scope_count: number; }
 
 function now(): string {
   return new Date().toISOString();
@@ -146,6 +148,34 @@ async function structureRetirementsAreSafe(
   if (memberships.some((membership) => retiredBranchIds.includes(membership.branchId))) return false;
   const scopes = await database.prepare(`SELECT scope_id FROM account_scope WHERE scope_type = 'branch' AND scope_id IN (${retiredBranchIds.map(() => "?").join(",")})`).bind(...retiredBranchIds).all<{ scope_id: string }>();
   return scopes.results.length === 0;
+}
+
+async function branchRetirementDependencies(
+  database: D1Database,
+  memberships: readonly BranchMembershipCandidate[],
+  structures: ReturnType<typeof previewBranchStructureChange>["branches"],
+) {
+  const retiredBranchIds = structures.filter((branch) => branch.retiredAt === "__PROPOSED_RETIREMENT__").map((branch) => branch.branchId);
+  if (retiredBranchIds.length === 0) return [];
+  const scopeCounts = await database.prepare(
+    `SELECT scope_id AS branch_id, COUNT(*) AS account_scope_count
+     FROM account_scope WHERE scope_type = 'branch' AND scope_id IN (${retiredBranchIds.map(() => "?").join(",")})
+     GROUP BY scope_id`,
+  ).bind(...retiredBranchIds).all<BranchScopeCountRow>();
+  const membershipCounts = new Map<string, number>();
+  for (const membership of memberships) membershipCounts.set(membership.branchId, (membershipCounts.get(membership.branchId) ?? 0) + 1);
+  const accountScopeCounts = new Map(scopeCounts.results.map((row) => [row.branch_id, row.account_scope_count]));
+  return retiredBranchIds.map((branchId) => {
+    const membershipCount = membershipCounts.get(branchId) ?? 0;
+    const accountScopeCount = accountScopeCounts.get(branchId) ?? 0;
+    return {
+      branchId, membershipCount, accountScopeCount,
+      blockingCodes: [
+        ...(membershipCount > 0 ? ["branch_membership_in_use"] : []),
+        ...(accountScopeCount > 0 ? ["branch_account_scope_in_use"] : []),
+      ],
+    };
+  });
 }
 
 async function effectiveReviewerAssignments(database: D1Database, lineageId: string, timestamp: string, excludedAccountId: string): Promise<ReviewerAssignmentRow[]> {
@@ -414,6 +444,33 @@ export function createApp() {
        LIMIT 100`,
     ).all();
     return context.json({ lineages: lineages.results });
+  });
+
+  app.get("/api/admin/lineages/:lineageId/branch-workbench", requireAuthentication, async (context) => {
+    const auth = context.get("auth")!;
+    if (!hasPermission(auth.roles, "system.manage")) return context.json({ code: "forbidden" }, 403);
+    const lineageId = context.req.param("lineageId");
+    const pointer = await context.env.DB.prepare("SELECT revision_id, version FROM lineage_published_pointer WHERE lineage_id = ?").bind(lineageId).first<PublishedPointerRow>();
+    if (!pointer) return context.json({ code: "published_revision_not_found" }, 404);
+    const scopeCounts = await context.env.DB.prepare("SELECT scope_id AS branch_id, COUNT(*) AS account_scope_count FROM account_scope WHERE scope_type = 'branch' AND scope_id IS NOT NULL GROUP BY scope_id").all<BranchScopeCountRow>();
+    const [structures, memberships] = await context.env.DB.batch([
+      context.env.DB.prepare("SELECT branch_id, parent_branch_id, name, branch_kind, retired_at FROM branch_structure_snapshot WHERE revision_id = ? ORDER BY parent_branch_id, name, branch_id").bind(pointer.revision_id),
+      context.env.DB.prepare("SELECT membership.branch_id, membership.person_id, membership.membership_kind, person.display_name FROM branch_membership_snapshot AS membership INNER JOIN person ON person.id = membership.person_id WHERE membership.revision_id = ? ORDER BY membership.branch_id, membership.membership_kind, person.display_name, membership.person_id").bind(pointer.revision_id),
+    ]);
+    if (!structures || !memberships) throw new Error("branch workbench query did not return every result set");
+    const membershipRows = memberships.results as BranchMembershipSnapshotRow[];
+    const membershipCounts = new Map<string, number>();
+    for (const membership of membershipRows) membershipCounts.set(membership.branch_id, (membershipCounts.get(membership.branch_id) ?? 0) + 1);
+    const accountScopeCounts = new Map((scopeCounts.results as BranchScopeCountRow[]).map((row) => [row.branch_id, row.account_scope_count]));
+    return context.json({
+      lineageId, revisionId: pointer.revision_id, pointerVersion: pointer.version,
+      branches: (structures.results as StructureRow[]).map((branch) => ({
+        branchId: branch.branch_id, parentBranchId: branch.parent_branch_id, name: branch.name, branchKind: branch.branch_kind, retiredAt: branch.retired_at,
+        membershipCount: membershipCounts.get(branch.branch_id) ?? 0,
+        accountScopeCount: accountScopeCounts.get(branch.branch_id) ?? 0,
+      })),
+      memberships: membershipRows.map((membership) => ({ branchId: membership.branch_id, personId: membership.person_id, personDisplayName: membership.display_name, membershipKind: membership.membership_kind })),
+    });
   });
 
   app.get("/api/admin/genealogy-editions", requireAuthentication, async (context) => {
@@ -734,7 +791,9 @@ export function createApp() {
       toMembershipCandidates(memberships.results as MembershipRow[]), toMembershipChangeCandidates(membershipItems.results as MembershipChangeItemRow[]),
     );
     const structurePreview = previewBranchStructureChange(toStructureCandidates(structures.results as StructureRow[]), toStructureChangeCandidates(structureItems.results as StructureChangeItemRow[]));
-    return context.json({ changeRequest: request, preview: { ...preview, valid: preview.valid && structurePreview.valid, issues: [...preview.issues, ...structurePreview.issues], branchStructure: structurePreview } });
+    const retirementDependencies = await branchRetirementDependencies(context.env.DB, preview.memberships, structurePreview.branches);
+    const retirementIssues = retirementDependencies.filter((dependency) => dependency.blockingCodes.length > 0).map((dependency) => ({ code: "branch_retirement_in_use", branchIds: [dependency.branchId], blockingCodes: dependency.blockingCodes }));
+    return context.json({ changeRequest: request, preview: { ...preview, valid: preview.valid && structurePreview.valid && retirementIssues.length === 0, issues: [...preview.issues, ...structurePreview.issues, ...retirementIssues], branchStructure: structurePreview, retirementDependencies } });
   });
 
   app.post("/api/admin/change-requests/:changeRequestId/submit", requireAuthentication, async (context) => {

@@ -698,6 +698,11 @@ const structureSnapshot = execFileSync("npx", ["wrangler", "d1", "execute", "DB"
 ], { encoding: "utf8" });
 assert.match(structureSnapshot, new RegExp(membershipBranchId));
 assert.match(structureSnapshot, /本地成员测试房/);
+const branchWorkbench = await request(`/api/admin/lineages/${lineageId}/branch-workbench`, { cookie: adminCookie });
+expectStatus(branchWorkbench, 200);
+assert.equal(branchWorkbench.body.revisionId, "abababab-abab-4bab-8bab-abababababab");
+assert.equal(branchWorkbench.body.branches.some((branch) => branch.branchId === membershipBranchId && branch.membershipCount === 1 && branch.accountScopeCount === 0), true);
+assert.equal(branchWorkbench.body.memberships.some((membership) => membership.branchId === membershipBranchId && membership.personId === adoptiveParent.body.person.id && membership.personDisplayName === adoptiveParent.body.person.displayName), true);
 const structureDraft = await request(`/api/admin/lineages/${lineageId}/change-requests`, {
   method: "POST", cookie: adminCookie, csrf: adminCsrf,
   body: { reason: "预览房支改名草稿", structureItems: [{ operation: "rename", branchId: membershipBranchId, name: "本地成员测试房（新名）" }] },
@@ -728,6 +733,10 @@ const retirementWithMember = await request(`/api/admin/lineages/${lineageId}/cha
   body: { reason: "有成员的房支不得退休", structureItems: [{ operation: "retire", branchId: membershipBranchId }] },
 });
 expectStatus(retirementWithMember, 201);
+const memberRetirementPreview = await request(`/api/admin/change-requests/${retirementWithMember.body.changeRequest.id}/preview`, { cookie: adminCookie });
+expectStatus(memberRetirementPreview, 200);
+assert.equal(memberRetirementPreview.body.preview.valid, false);
+assert.deepEqual(memberRetirementPreview.body.preview.retirementDependencies, [{ branchId: membershipBranchId, membershipCount: 1, accountScopeCount: 0, blockingCodes: ["branch_membership_in_use"] }]);
 expectStatus(await request(`/api/admin/change-requests/${retirementWithMember.body.changeRequest.id}/submit`, {
   method: "POST", cookie: adminCookie, csrf: adminCsrf, body: { version: 1 },
 }), 200);
@@ -758,6 +767,10 @@ const retirementWithScope = await request(`/api/admin/lineages/${lineageId}/chan
   },
 });
 expectStatus(retirementWithScope, 201);
+const scopeRetirementPreview = await request(`/api/admin/change-requests/${retirementWithScope.body.changeRequest.id}/preview`, { cookie: adminCookie });
+expectStatus(scopeRetirementPreview, 200);
+assert.equal(scopeRetirementPreview.body.preview.valid, false);
+assert.deepEqual(scopeRetirementPreview.body.preview.retirementDependencies, [{ branchId: membershipBranchId, membershipCount: 0, accountScopeCount: 1, blockingCodes: ["branch_account_scope_in_use"] }]);
 expectStatus(await request(`/api/admin/change-requests/${retirementWithScope.body.changeRequest.id}/submit`, {
   method: "POST", cookie: adminCookie, csrf: adminCsrf, body: { version: 1 },
 }), 200);
@@ -787,6 +800,10 @@ const retirement = await request(`/api/admin/lineages/${lineageId}/change-reques
   },
 });
 expectStatus(retirement, 201);
+const retirementPreview = await request(`/api/admin/change-requests/${retirement.body.changeRequest.id}/preview`, { cookie: adminCookie });
+expectStatus(retirementPreview, 200);
+assert.equal(retirementPreview.body.preview.valid, true);
+assert.deepEqual(retirementPreview.body.preview.retirementDependencies, [{ branchId: membershipBranchId, membershipCount: 0, accountScopeCount: 0, blockingCodes: [] }]);
 expectStatus(await request(`/api/admin/change-requests/${retirement.body.changeRequest.id}/submit`, {
   method: "POST", cookie: adminCookie, csrf: adminCsrf, body: { version: 1 },
 }), 200);

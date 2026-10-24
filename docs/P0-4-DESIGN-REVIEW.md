@@ -1,6 +1,6 @@
 # P0-4 历史双视图与完整亲属图：设计审查
 
-状态：切片 A 已按“未知关系一律待解释”实施；完整亲属图及前端双视图仍待后续切片。最后更新：2026-10-23。
+状态：切片 A、B 与 C 的最小只读实现已完成；完整亲属图的受限展开与更多交互仍待后续切片。最后更新：2026-10-24。
 
 ## 目标与既有事实
 
@@ -10,13 +10,13 @@ P0-4 要提供两种严格分层的阅读视图：
 - **指定谱书版本历史世系**：只读该 `genealogy_edition` 中未撤销的 `source_person_record` 与 `source_relation_claim`；来源人物尚未映射为统一人物时仍必须显示，不能用统一世系补齐。
 - **完整亲属图**：以一个统一人物为中心，展示生父母、嗣父母、养父母、配偶及子女；它不是把所有关系压进传统承谱树，布局也不能复用吊线图规则。
 
-前两层已分别有只读端点：`GET /api/admin/lineages/:lineageId/hanging-chart` 与 `GET /api/admin/genealogy-editions/:editionId/historical-projection`（见 `worker/app.ts`）。后者目前只返回原始关系主张列表，尚不是可布局的图谱。
+统一吊线图、历史关系投影与历史/统一差异分别由 `GET /api/admin/lineages/:lineageId/hanging-chart`、`GET /api/admin/genealogy-editions/:editionId/historical-projection`、`GET /api/admin/lineages/:lineageId/historical-comparison` 提供；后台以前端独立的来源记录网格绘制已解释的历史父子边。人物中心亲属图由 `GET /api/admin/lineages/:lineageId/kinship?personId=...` 提供，仅读取当前发布 revision 的 `canonical_relation_snapshot`。
 
 ## 已确认约束
 
 1. `source_relation_claim.relation_kind` 是自由文本，且 `related_record_id` 可为空（见 `migrations/0004_core_genealogy_model.sql`、`worker/auth/validation.ts`）。源码没有把“父记子”“子记父”“嗣父”“配偶”等原文关系转换为方向化语义的规则。
 2. `source_person_record` 可以没有 `source_person_link`。历史图的节点主键必须是来源记录 ID，不能强制使用统一 `person.id`。
-3. `canonical_relation_snapshot` 已能表达 `biological_parent`、`adoptive_parent`、`successor_parent`、`spouse`，但当前发布接口只写入 `lineage_succession_snapshot`；仓库中没有写入或读取已发布亲属快照的业务流程（见 `migrations/0004_core_genealogy_model.sql`、`worker/app.ts`）。
+3. `canonical_relation_snapshot` 可表达 `biological_parent`、`adoptive_parent`、`successor_parent`、`spouse`。发布和回退会以 revision snapshot 写入/重建这些关系；亲属图只读取当前发布 revision，不能写回统一或来源层（见 `worker/lineage/revision-publish.ts`、`worker/app.ts`）。
 4. 差异比对只能基于**已确认的来源人物映射**和**已确认的关系语义**。未映射来源记录不是“统一世系中不存在”，而应标记为“仅来源记录，无法比对”。
 5. 所有 P0-4 读取仍须经过服务端鉴权；历史原文、来源人物和统一关系不得互相覆盖或回写。
 
@@ -30,11 +30,13 @@ P0-4 要提供两种严格分层的阅读视图：
 
 ### 切片 B：历史/统一差异 API 与只读切换
 
-已实现受权的 `comparison` API；比较结果只包含 `same`、`canonical_only`、`historical_only`、`uncomparable` 四类，且不把 `uncomparable` 当作差异或缺失。前端只读切换仍待实现；历史图只应显示能被字典安全解释的父子关系，原始文本和待解释主张在侧栏呈现。
+已实现受权的 `comparison` API；比较结果只包含 `same`、`canonical_only`、`historical_only`、`uncomparable` 四类，且不把 `uncomparable` 当作差异或缺失。后台已提供只读差异摘要和来源记录网格；历史图只显示能被字典安全解释的父子关系，原始文本和待解释主张在侧栏呈现。
 
 ### 切片 C：完整亲属图读模型
 
-先补齐经过 revision 发布的 `canonical_relation_snapshot` 写入和回退语义，再建立独立的以人为中心亲属投影。它返回关系类型与方向，限制初始半径/节点数，并提供“继续展开”读取接口。布局采用独立策略，不改动 P0-3 的世代横列规则。
+已补齐 revision 发布与回退的 `canonical_relation_snapshot` 写入，并建立独立的人物中心亲属投影及浏览器布局。当前首版只返回中心人物的一跳关系，保留关系类型与原始端点方向；它不复用 P0-3 的世代横列规则，也不写入任何权威数据。
+
+后续若要支持更大亲属网络，需先设计并确认初始半径/节点数上限、分页或“继续展开”契约及隐私过滤规则；不得将未授权人物或关系一次性扩展到浏览器。
 
 ## 需要确认的业务语义
 

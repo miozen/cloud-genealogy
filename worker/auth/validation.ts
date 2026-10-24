@@ -44,6 +44,23 @@ export const rollbackRevisionInput = z.object({
   newRevisionId: z.string().uuid(),
   expectedPointerVersion: z.number().int().positive(),
 });
+const changeOperation = z.enum(["succession_add", "succession_remove", "relation_add", "relation_remove"]);
+export const createChangeRequestInput = z.object({
+  reason: z.string().trim().min(1, "请说明变更理由。").max(1_000, "变更理由过长。"),
+  items: z.array(z.object({
+    operation: changeOperation,
+    subjectPersonId: z.string().uuid(),
+    relatedPersonId: z.string().uuid(),
+    relationKind: z.enum(["biological_parent", "adoptive_parent", "successor_parent", "spouse"]).optional(),
+  }).superRefine((item, context) => {
+    if (item.subjectPersonId === item.relatedPersonId) context.addIssue({ code: "custom", message: "关系两端不能是同一人物。" });
+    const needsRelation = item.operation === "relation_add" || item.operation === "relation_remove";
+    if (needsRelation !== Boolean(item.relationKind)) context.addIssue({ code: "custom", message: needsRelation ? "亲属关系变更必须指定关系类型。" : "承谱变更不能指定亲属关系类型。" });
+  })).min(1).max(2_000),
+});
+export const changeRequestVersionInput = z.object({ version: z.number().int().positive() });
+export const rejectChangeRequestInput = changeRequestVersionInput.extend({ reviewNote: z.string().trim().min(1, "请说明驳回理由。").max(1_000, "驳回理由过长。") });
+export const publishChangeRequestInput = changeRequestVersionInput.extend({ revisionId: z.string().uuid() });
 const sourceTitle = z.string().trim().min(1, "标题不能为空。").max(160, "标题最长 160 个字符。");
 export const lineageInput = z.object({ name: sourceTitle });
 export const genealogyInput = z.object({ title: sourceTitle });

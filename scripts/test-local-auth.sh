@@ -222,6 +222,16 @@ const secondPerson = await request("/api/admin/persons", {
   body: { displayName: "本地承谱父", visibility: "MEMBER" },
 });
 expectStatus(secondPerson, 201);
+const successorParent = await request("/api/admin/persons", {
+  method: "POST", cookie: adminCookie, csrf: adminCsrf,
+  body: { displayName: "本地嗣父", visibility: "MEMBER" },
+});
+expectStatus(successorParent, 201);
+const spouse = await request("/api/admin/persons", {
+  method: "POST", cookie: adminCookie, csrf: adminCsrf,
+  body: { displayName: "本地配偶", visibility: "MEMBER" },
+});
+expectStatus(spouse, 201);
 
 const genealogy = await request("/api/admin/genealogies", {
   method: "POST", cookie: adminCookie, csrf: adminCsrf, body: { title: "本地测试谱书" },
@@ -335,6 +345,11 @@ const validPublish = await request(`/api/admin/lineages/${lineageId}/revisions/p
     revisionId: "33333333-3333-4333-8333-333333333333",
     expectedPointerVersion: 0,
     edges: [{ parentPersonId: personResult.body.person.id, childPersonId: secondPerson.body.person.id }],
+    relations: [
+      { subjectPersonId: secondPerson.body.person.id, relatedPersonId: personResult.body.person.id, relationKind: "biological_parent" },
+      { subjectPersonId: secondPerson.body.person.id, relatedPersonId: successorParent.body.person.id, relationKind: "successor_parent" },
+      { subjectPersonId: secondPerson.body.person.id, relatedPersonId: spouse.body.person.id, relationKind: "spouse" },
+    ],
   },
 });
 expectStatus(validPublish, 201);
@@ -364,6 +379,14 @@ assert.equal(hangingChart.body.view, "canonical");
 assert.equal(hangingChart.body.revisionId, validPublish.body.revisionId);
 assert.deepEqual(hangingChart.body.projection.nodes.map((node) => node.personId), [personResult.body.person.id, secondPerson.body.person.id]);
 assert.equal(hangingChart.body.layout.connectors.length, 1);
+const kinship = await request(`/api/admin/lineages/${lineageId}/kinship?personId=${secondPerson.body.person.id}`, { cookie: adminCookie });
+expectStatus(kinship, 200);
+assert.equal(kinship.body.view, "kinship");
+assert.deepEqual(kinship.body.relations, [
+  { subjectPersonId: secondPerson.body.person.id, relatedPersonId: personResult.body.person.id, relationKind: "biological_parent" },
+  { subjectPersonId: secondPerson.body.person.id, relatedPersonId: successorParent.body.person.id, relationKind: "successor_parent" },
+  { subjectPersonId: secondPerson.body.person.id, relatedPersonId: spouse.body.person.id, relationKind: "spouse" },
+]);
 const rollback = await request(`/api/admin/lineages/${lineageId}/revisions/rollback`, {
   method: "POST",
   cookie: adminCookie,
@@ -376,6 +399,9 @@ const rollback = await request(`/api/admin/lineages/${lineageId}/revisions/rollb
 });
 expectStatus(rollback, 201);
 assert.equal(rollback.body.revisionId, "44444444-4444-4444-8444-444444444444");
+const kinshipAfterRollback = await request(`/api/admin/lineages/${lineageId}/kinship?personId=${secondPerson.body.person.id}`, { cookie: adminCookie });
+expectStatus(kinshipAfterRollback, 200);
+assert.deepEqual(kinshipAfterRollback.body.relations, kinship.body.relations);
 const stalePublish = await request(`/api/admin/lineages/${lineageId}/revisions/publish`, {
   method: "POST",
   cookie: adminCookie,
@@ -388,6 +414,72 @@ const stalePublish = await request(`/api/admin/lineages/${lineageId}/revisions/p
 });
 expectStatus(stalePublish, 409);
 assert.equal(stalePublish.body.code, "revision_conflict");
+const adoptiveParent = await request("/api/admin/persons", {
+  method: "POST", cookie: adminCookie, csrf: adminCsrf,
+  body: { displayName: "本地养父", visibility: "MEMBER" },
+});
+expectStatus(adoptiveParent, 201);
+const changeRequest = await request(`/api/admin/lineages/${lineageId}/change-requests`, {
+  method: "POST", cookie: adminCookie, csrf: adminCsrf,
+  body: {
+    reason: "补充已核验的养父关系",
+    items: [{ operation: "relation_add", subjectPersonId: secondPerson.body.person.id, relatedPersonId: adoptiveParent.body.person.id, relationKind: "adoptive_parent" }],
+  },
+});
+expectStatus(changeRequest, 201);
+const changePreview = await request(`/api/admin/change-requests/${changeRequest.body.changeRequest.id}/preview`, { cookie: adminCookie });
+expectStatus(changePreview, 200);
+assert.equal(changePreview.body.preview.valid, true);
+assert.equal(changePreview.body.preview.relations.length, 4);
+expectStatus(await request(`/api/admin/change-requests/${changeRequest.body.changeRequest.id}/submit`, {
+  method: "POST", cookie: adminCookie, csrf: adminCsrf, body: { version: 1 },
+}), 200);
+const changeApproval = await request(`/api/admin/change-requests/${changeRequest.body.changeRequest.id}/approve`, {
+  method: "POST", cookie: adminCookie, csrf: adminCsrf, body: { version: 2 },
+});
+expectStatus(changeApproval, 200);
+const changePublish = await request(`/api/admin/change-requests/${changeRequest.body.changeRequest.id}/publish`, {
+  method: "POST", cookie: adminCookie, csrf: adminCsrf,
+  body: { version: changeApproval.body.version, revisionId: "66666666-6666-4666-8666-666666666666" },
+});
+expectStatus(changePublish, 201);
+const kinshipAfterChangeRequest = await request(`/api/admin/lineages/${lineageId}/kinship?personId=${secondPerson.body.person.id}`, { cookie: adminCookie });
+expectStatus(kinshipAfterChangeRequest, 200);
+assert.equal(kinshipAfterChangeRequest.body.relations.some((relation) => relation.relatedPersonId === adoptiveParent.body.person.id && relation.relationKind === "adoptive_parent"), true);
+const staleChangeRequest = await request(`/api/admin/lineages/${lineageId}/change-requests`, {
+  method: "POST", cookie: adminCookie, csrf: adminCsrf,
+  body: { reason: "用于验证陈旧基准冲突", items: [{ operation: "relation_remove", subjectPersonId: secondPerson.body.person.id, relatedPersonId: adoptiveParent.body.person.id, relationKind: "adoptive_parent" }] },
+});
+expectStatus(staleChangeRequest, 201);
+expectStatus(await request(`/api/admin/change-requests/${staleChangeRequest.body.changeRequest.id}/submit`, {
+  method: "POST", cookie: adminCookie, csrf: adminCsrf, body: { version: 1 },
+}), 200);
+const localOnlyPublish = await request(`/api/admin/lineages/${lineageId}/revisions/publish`, {
+  method: "POST", cookie: adminCookie, csrf: adminCsrf,
+  body: { revisionId: "77777777-7777-4777-8777-777777777777", expectedPointerVersion: 3, edges: [{ parentPersonId: personResult.body.person.id, childPersonId: secondPerson.body.person.id }] },
+});
+expectStatus(localOnlyPublish, 201);
+const staleApproval = await request(`/api/admin/change-requests/${staleChangeRequest.body.changeRequest.id}/approve`, {
+  method: "POST", cookie: adminCookie, csrf: adminCsrf, body: { version: 2 },
+});
+expectStatus(staleApproval, 409);
+assert.equal(staleApproval.body.code, "change_request_conflicted");
+const conflictedPreview = await request(`/api/admin/change-requests/${staleChangeRequest.body.changeRequest.id}/preview`, { cookie: adminCookie });
+expectStatus(conflictedPreview, 200);
+assert.equal(conflictedPreview.body.changeRequest.state, "conflicted");
+const rejectedChangeRequest = await request(`/api/admin/lineages/${lineageId}/change-requests`, {
+  method: "POST", cookie: adminCookie, csrf: adminCsrf,
+  body: { reason: "用于验证驳回", items: [{ operation: "relation_add", subjectPersonId: secondPerson.body.person.id, relatedPersonId: adoptiveParent.body.person.id, relationKind: "adoptive_parent" }] },
+});
+expectStatus(rejectedChangeRequest, 201);
+expectStatus(await request(`/api/admin/change-requests/${rejectedChangeRequest.body.changeRequest.id}/submit`, {
+  method: "POST", cookie: adminCookie, csrf: adminCsrf, body: { version: 1 },
+}), 200);
+const rejection = await request(`/api/admin/change-requests/${rejectedChangeRequest.body.changeRequest.id}/reject`, {
+  method: "POST", cookie: adminCookie, csrf: adminCsrf, body: { version: 2, reviewNote: "证据不足，暂不发布。" },
+});
+expectStatus(rejection, 200);
+assert.equal(rejection.body.state, "rejected");
 
 const approval = await request(`/api/admin/accounts/${member.id}/approve`, {
   method: "POST",

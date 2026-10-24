@@ -20,6 +20,7 @@ export interface PublishRevisionInput {
   expectedPointerVersion: number;
   now: string;
   audit: RevisionAuditEntry;
+  changeRequest?: { id: string; version: number };
 }
 export interface CanonicalRelationCandidate { subjectPersonId: string; relatedPersonId: string; relationKind: "biological_parent" | "adoptive_parent" | "successor_parent" | "spouse"; }
 
@@ -40,8 +41,8 @@ export async function publishSuccessionRevision(
 
   const statements = [
     database.prepare(
-      "INSERT INTO lineage_revision (id, lineage_id, state, based_on_revision_id, expected_pointer_version, created_at, published_at) VALUES (?, ?, 'published', ?, ?, ?, ?)",
-    ).bind(input.revisionId, input.lineageId, input.basedOnRevisionId ?? null, input.expectedPointerVersion, input.now, input.now),
+      "INSERT INTO lineage_revision (id, lineage_id, state, based_on_revision_id, expected_pointer_version, change_request_id, change_request_version, created_at, published_at) VALUES (?, ?, 'published', ?, ?, ?, ?, ?, ?)",
+    ).bind(input.revisionId, input.lineageId, input.basedOnRevisionId ?? null, input.expectedPointerVersion, input.changeRequest?.id ?? null, input.changeRequest?.version ?? null, input.now, input.now),
     ...input.proposedEdges.map((edge, index) =>
       database.prepare(
         "INSERT INTO lineage_succession_snapshot (id, revision_id, parent_person_id, child_person_id, order_key, created_at) VALUES (?, ?, ?, ?, ?, ?)",
@@ -54,6 +55,10 @@ export async function publishSuccessionRevision(
     database.prepare(
       "INSERT INTO lineage_published_pointer (lineage_id, revision_id, updated_at, version) VALUES (?, ?, ?, 1) ON CONFLICT(lineage_id) DO UPDATE SET revision_id = excluded.revision_id, updated_at = excluded.updated_at, version = lineage_published_pointer.version + 1 WHERE lineage_published_pointer.version = ?",
     ).bind(input.lineageId, input.revisionId, input.now, input.expectedPointerVersion),
+    ...(input.changeRequest ? [
+      database.prepare("UPDATE change_request SET state = 'published', published_at = ?, version = version + 1 WHERE id = ? AND state = 'approved' AND version = ?")
+        .bind(input.now, input.changeRequest.id, input.changeRequest.version),
+    ] : []),
     ...[
       database.prepare(
         "INSERT INTO audit_log (id, actor_account_id, action, object_type, object_id, metadata_json, created_at) VALUES (?, ?, ?, ?, ?, ?, ?)",

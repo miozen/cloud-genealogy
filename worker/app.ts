@@ -1,6 +1,6 @@
 import { Hono, type Context } from "hono";
 import { deleteCookie, getCookie, setCookie } from "hono/cookie";
-import { canProposeForPeople, hasPermission, type AccountScope } from "./auth/authorization";
+import { canProposeForPeopleWithBranchMembership, hasPermission, type AccountScope } from "./auth/authorization";
 import { consumeLoginRateLimit } from "./auth/login-rate-limit-store";
 import { createOpaqueToken, hashOpaqueToken } from "./auth/opaque-token";
 import { hashPassword, verifyPassword } from "./auth/password";
@@ -99,10 +99,20 @@ function changeItemPersonIds(items: readonly Pick<ChangeItemRow, "subject_person
   return [...new Set(items.flatMap((item) => [item.subject_person_id, item.related_person_id]))];
 }
 
-async function canProposeChangeForPeople(database: D1Database, auth: NonNullable<AppEnv["Variables"]["auth"]>, personIds: readonly string[]): Promise<boolean> {
+async function canProposeChangeForPeople(database: D1Database, auth: NonNullable<AppEnv["Variables"]["auth"]>, personIds: readonly string[], baseRevisionId: string | null): Promise<boolean> {
   if (hasPermission(auth.roles, "system.manage")) return true;
   const scopes = await database.prepare("SELECT scope_type, scope_id FROM account_scope WHERE account_id = ? ORDER BY scope_type, scope_id").bind(auth.accountId).all<{ scope_type: AccountScope["scopeType"]; scope_id: string | null }>();
-  return canProposeForPeople(auth.roles, scopes.results.map((scope) => ({ scopeType: scope.scope_type, scopeId: scope.scope_id })), personIds);
+  const normalizedScopes = scopes.results.map((scope) => ({ scopeType: scope.scope_type, scopeId: scope.scope_id }));
+  const branchIds = normalizedScopes.filter((scope) => scope.scopeType === "branch" && scope.scopeId).map((scope) => scope.scopeId!);
+  const memberships = baseRevisionId && branchIds.length > 0
+    ? await database.prepare(`SELECT branch_id, person_id, membership_kind FROM branch_membership_snapshot WHERE revision_id = ? AND membership_kind = 'blood_primary' AND branch_id IN (${branchIds.map(() => "?").join(",")})`).bind(baseRevisionId, ...branchIds).all<{ branch_id: string; person_id: string; membership_kind: "blood_primary" | "migration" | "administrative" }>()
+    : { results: [] as Array<{ branch_id: string; person_id: string; membership_kind: "blood_primary" | "migration" | "administrative" }> };
+  return canProposeForPeopleWithBranchMembership(
+    auth.roles,
+    normalizedScopes,
+    personIds,
+    memberships.results.map((membership) => ({ branchId: membership.branch_id, personId: membership.person_id, membershipKind: membership.membership_kind })),
+  );
 }
 
 function secretsMatch(actual: string | undefined, expected: string | undefined): boolean {
@@ -545,12 +555,12 @@ export function createApp() {
     const auth = context.get("auth")!;
     const parsed = createChangeRequestInput.safeParse(await context.req.json().catch(() => null));
     if (!parsed.success) return context.json({ code: "validation_failed", message: validationMessage(parsed) }, 400);
-    const scopeItems = parsed.data.items.map((item) => ({ subject_person_id: item.subjectPersonId, related_person_id: item.relatedPersonId }));
-    if (!await canProposeChangeForPeople(context.env.DB, auth, changeItemPersonIds(scopeItems))) return context.json({ code: "scope_forbidden" }, 403);
     const lineageId = context.req.param("lineageId");
     const lineage = await context.env.DB.prepare("SELECT id FROM lineage WHERE id = ? AND retired_at IS NULL").bind(lineageId).first();
     if (!lineage) return context.json({ code: "lineage_not_found" }, 404);
     const pointer = await context.env.DB.prepare("SELECT revision_id, version FROM lineage_published_pointer WHERE lineage_id = ?").bind(lineageId).first<PublishedPointerRow>();
+    const scopeItems = parsed.data.items.map((item) => ({ subject_person_id: item.subjectPersonId, related_person_id: item.relatedPersonId }));
+    if (!await canProposeChangeForPeople(context.env.DB, auth, changeItemPersonIds(scopeItems), pointer?.revision_id ?? null)) return context.json({ code: "scope_forbidden" }, 403);
     const id = crypto.randomUUID(); const timestamp = now();
     await context.env.DB.batch([
       context.env.DB.prepare("INSERT INTO change_request (id, lineage_id, state, base_revision_id, base_pointer_version, reason, created_by_account_id, created_at) VALUES (?, ?, 'draft', ?, ?, ?, ?, ?)").bind(id, lineageId, pointer?.revision_id ?? null, pointer?.version ?? 0, parsed.data.reason, auth.accountId, timestamp),
@@ -602,7 +612,7 @@ export function createApp() {
     ]);
     if (!edges || !relations || !items) throw new Error("change request preview query did not return every result set");
     const changeItems = items.results as ChangeItemRow[];
-    if (!hasPermission(auth.roles, "system.manage") && !await canProposeChangeForPeople(context.env.DB, auth, changeItemPersonIds(changeItems))) return context.json({ code: "scope_forbidden" }, 403);
+    if (!hasPermission(auth.roles, "system.manage") && !await canProposeChangeForPeople(context.env.DB, auth, changeItemPersonIds(changeItems), request.base_revision_id)) return context.json({ code: "scope_forbidden" }, 403);
     const preview = previewChangeRequest(
       (edges.results as SuccessionRow[]).map((edge) => ({ parentPersonId: edge.parent_person_id, childPersonId: edge.child_person_id })),
       (relations.results as Array<{ subject_person_id: string; related_person_id: string; relation_kind: "biological_parent" | "adoptive_parent" | "successor_parent" | "spouse" }>).map((relation) => ({ subjectPersonId: relation.subject_person_id, relatedPersonId: relation.related_person_id, relationKind: relation.relation_kind })),
@@ -621,7 +631,7 @@ export function createApp() {
     if (!hasPermission(auth.roles, "system.manage") && request.created_by_account_id !== auth.accountId) return context.json({ code: "forbidden" }, 403);
     if (!hasPermission(auth.roles, "system.manage")) {
       const items = await context.env.DB.prepare("SELECT operation, subject_person_id, related_person_id, relation_kind FROM change_item WHERE change_request_id = ? ORDER BY id").bind(request.id).all<ChangeItemRow>();
-      if (!await canProposeChangeForPeople(context.env.DB, auth, changeItemPersonIds(items.results))) return context.json({ code: "scope_forbidden" }, 403);
+      if (!await canProposeChangeForPeople(context.env.DB, auth, changeItemPersonIds(items.results), request.base_revision_id)) return context.json({ code: "scope_forbidden" }, 403);
     }
     const result = await context.env.DB.prepare("UPDATE change_request SET state = 'pending_review', submitted_at = ?, version = version + 1 WHERE id = ? AND state = 'draft' AND version = ?").bind(timestamp, id, parsed.data.version).run();
     if (result.meta.changes !== 1) return context.json({ code: "change_request_conflict" }, 409);
@@ -1113,10 +1123,15 @@ export function createApp() {
     if (!parsed.success) return context.json({ code: "validation_failed", message: validationMessage(parsed) }, 400);
     const input = parsed.data;
     const accountId = context.req.param("accountId");
-    const personScopeIds = [...new Set(input.scopes.flatMap((scope) => "scopeId" in scope ? [scope.scopeId] : []))];
+    const personScopeIds = [...new Set(input.scopes.flatMap((scope) => scope.scopeType === "person" ? [scope.scopeId] : []))];
     if (personScopeIds.length > 0) {
       const people = await context.env.DB.prepare(`SELECT id FROM person WHERE id IN (${personScopeIds.map(() => "?").join(",")})`).bind(...personScopeIds).all<{ id: string }>();
       if (people.results.length !== personScopeIds.length) return context.json({ code: "scope_person_not_found" }, 404);
+    }
+    const branchScopeIds = [...new Set(input.scopes.flatMap((scope) => scope.scopeType === "branch" ? [scope.scopeId] : []))];
+    if (branchScopeIds.length > 0) {
+      const branches = await context.env.DB.prepare(`SELECT id FROM branch WHERE id IN (${branchScopeIds.map(() => "?").join(",")}) AND retired_at IS NULL`).bind(...branchScopeIds).all<{ id: string }>();
+      if (branches.results.length !== branchScopeIds.length) return context.json({ code: "scope_branch_not_found" }, 404);
     }
     const timestamp = now();
     const scopeGuard = "id = ? AND status = 'active' AND version = ? AND updated_at = ?";

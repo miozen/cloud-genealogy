@@ -23,6 +23,7 @@ export interface PublishRevisionInput {
   changeRequest?: { id: string; version: number };
 }
 export interface CanonicalRelationCandidate { subjectPersonId: string; relatedPersonId: string; relationKind: "biological_parent" | "adoptive_parent" | "successor_parent" | "spouse"; }
+interface BranchMembershipSnapshotRow { branch_id: string; person_id: string; membership_kind: "blood_primary" | "migration" | "administrative"; }
 
 export type PublishRevisionResult =
   | { published: true; revisionId: string }
@@ -38,6 +39,12 @@ export async function publishSuccessionRevision(
 
   const lineage = await database.prepare("SELECT id FROM lineage WHERE id = ?").bind(input.lineageId).first<{ id: string }>();
   if (!lineage) throw new Error("Lineage does not exist.");
+  // Branch membership is an independent administrative snapshot. A relation
+  // proposal does not infer it, so a new revision carries its base snapshot
+  // forward unchanged.
+  const branchMemberships = input.basedOnRevisionId
+    ? await database.prepare("SELECT branch_id, person_id, membership_kind FROM branch_membership_snapshot WHERE revision_id = ? ORDER BY branch_id, membership_kind, person_id, id").bind(input.basedOnRevisionId).all<BranchMembershipSnapshotRow>()
+    : { results: [] as BranchMembershipSnapshotRow[] };
 
   const statements = [
     database.prepare(
@@ -51,6 +58,10 @@ export async function publishSuccessionRevision(
     ...(input.proposedRelations ?? []).map((relation, index) =>
       database.prepare("INSERT INTO canonical_relation_snapshot (id, revision_id, subject_person_id, related_person_id, relation_kind, created_at) VALUES (?, ?, ?, ?, ?, ?)")
         .bind(`${input.revisionId}:relation:${index}`, input.revisionId, relation.subjectPersonId, relation.relatedPersonId, relation.relationKind, input.now),
+    ),
+    ...branchMemberships.results.map((membership, index) =>
+      database.prepare("INSERT INTO branch_membership_snapshot (id, revision_id, branch_id, person_id, membership_kind, created_at) VALUES (?, ?, ?, ?, ?, ?)")
+        .bind(`${input.revisionId}:branch:${index}`, input.revisionId, membership.branch_id, membership.person_id, membership.membership_kind, input.now),
     ),
     database.prepare(
       "INSERT INTO lineage_published_pointer (lineage_id, revision_id, updated_at, version) VALUES (?, ?, ?, 1) ON CONFLICT(lineage_id) DO UPDATE SET revision_id = excluded.revision_id, updated_at = excluded.updated_at, version = lineage_published_pointer.version + 1 WHERE lineage_published_pointer.version = ?",

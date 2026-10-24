@@ -31,6 +31,7 @@ export const accountScopesInput = z.object({
   version: z.number().int().positive(),
   scopes: z.array(z.discriminatedUnion("scopeType", [
     z.object({ scopeType: z.literal("global") }),
+    z.object({ scopeType: z.literal("branch"), scopeId: z.string().uuid() }),
     z.object({ scopeType: z.literal("person"), scopeId: z.string().uuid() }),
   ])).max(200),
 }).superRefine((value, context) => {

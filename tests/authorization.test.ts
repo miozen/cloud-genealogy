@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { canProposeForPeople, canReadVisibility, hasPermission } from "../worker/auth/authorization";
+import { canProposeForPeople, canProposeForPeopleWithBranchMembership, canReadVisibility, hasPermission } from "../worker/auth/authorization";
 
 describe("authorization", () => {
   it("grants review permission to an admin", () => {
@@ -23,5 +23,17 @@ describe("authorization", () => {
     expect(canProposeForPeople(["editor"], [{ scopeType: "person", scopeId: "person-a" }], ["person-a", "person-b"])).toBe(false);
     expect(canProposeForPeople(["editor"], [{ scopeType: "branch", scopeId: "branch-a" }], ["person-a"])).toBe(false);
     expect(canProposeForPeople(["editor"], [{ scopeType: "global", scopeId: null }], ["person-a", "person-b"])).toBe(true);
+  });
+
+  it("uses only exact primary-blood branch membership for branch-scoped proposals", () => {
+    const scopes = [{ scopeType: "branch" as const, scopeId: "branch-a" }];
+    const memberships = [
+      { branchId: "branch-a", personId: "person-a", membershipKind: "blood_primary" as const },
+      { branchId: "branch-a", personId: "person-b", membershipKind: "migration" as const },
+      { branchId: "branch-child", personId: "person-c", membershipKind: "blood_primary" as const },
+    ];
+    expect(canProposeForPeopleWithBranchMembership(["editor"], scopes, ["person-a"], memberships)).toBe(true);
+    expect(canProposeForPeopleWithBranchMembership(["editor"], scopes, ["person-a", "person-b"], memberships)).toBe(false);
+    expect(canProposeForPeopleWithBranchMembership(["editor"], scopes, ["person-c"], memberships)).toBe(false);
   });
 });

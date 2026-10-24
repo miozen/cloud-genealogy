@@ -2,6 +2,7 @@ import type { PermissionName, RoleName } from "../types";
 
 export type Visibility = "PUBLIC" | "MEMBER" | "ADMIN";
 export type AccountScope = { scopeType: "global" | "branch" | "person"; scopeId: string | null };
+export type BranchMembership = { branchId: string; personId: string; membershipKind: "blood_primary" | "migration" | "administrative" };
 
 const rolePermissions: Readonly<Record<RoleName, readonly PermissionName[]>> = {
   admin: ["system.manage", "lineage.review", "lineage.propose", "person.read_member", "person.read_admin"],
@@ -32,9 +33,23 @@ export function canProposeForPeople(
   scopes: readonly AccountScope[],
   personIds: readonly string[],
 ): boolean {
+  return canProposeForPeopleWithBranchMembership(roles, scopes, personIds, []);
+}
+
+/** A branch scope covers only exact, primary-blood members in the proposal's base revision. */
+export function canProposeForPeopleWithBranchMembership(
+  roles: readonly RoleName[],
+  scopes: readonly AccountScope[],
+  personIds: readonly string[],
+  memberships: readonly BranchMembership[],
+): boolean {
   if (!hasPermission(roles, "lineage.propose")) return false;
   if (hasPermission(roles, "system.manage")) return true;
   if (scopes.some((scope) => scope.scopeType === "global")) return true;
   const permittedPeople = new Set(scopes.filter((scope) => scope.scopeType === "person" && scope.scopeId).map((scope) => scope.scopeId));
+  const permittedBranches = new Set(scopes.filter((scope) => scope.scopeType === "branch" && scope.scopeId).map((scope) => scope.scopeId));
+  for (const membership of memberships) {
+    if (membership.membershipKind === "blood_primary" && permittedBranches.has(membership.branchId)) permittedPeople.add(membership.personId);
+  }
   return personIds.every((personId) => permittedPeople.has(personId));
 }

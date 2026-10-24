@@ -678,6 +678,19 @@ const structureSnapshot = execFileSync("npx", ["wrangler", "d1", "execute", "DB"
 ], { encoding: "utf8" });
 assert.match(structureSnapshot, new RegExp(membershipBranchId));
 assert.match(structureSnapshot, /本地成员测试房/);
+const structureDraft = await request(`/api/admin/lineages/${lineageId}/change-requests`, {
+  method: "POST", cookie: adminCookie, csrf: adminCsrf,
+  body: { reason: "预览房支改名草稿", structureItems: [{ operation: "rename", branchId: membershipBranchId, name: "本地成员测试房（新名）" }] },
+});
+expectStatus(structureDraft, 201);
+const structureDraftPreview = await request(`/api/admin/change-requests/${structureDraft.body.changeRequest.id}/preview`, { cookie: adminCookie });
+expectStatus(structureDraftPreview, 200);
+assert.equal(structureDraftPreview.body.preview.branchStructure.branches.some((branch) => branch.branchId === membershipBranchId && branch.name === "本地成员测试房（新名）"), true);
+const structureSubmit = await request(`/api/admin/change-requests/${structureDraft.body.changeRequest.id}/submit`, {
+  method: "POST", cookie: adminCookie, csrf: adminCsrf, body: { version: 1 },
+});
+expectStatus(structureSubmit, 409);
+assert.equal(structureSubmit.body.code, "structure_publish_not_ready");
 
 const passwordReset = await request(`/api/admin/accounts/${member.id}/reset-password`, {
   method: "POST",

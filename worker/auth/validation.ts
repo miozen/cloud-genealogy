@@ -58,6 +58,7 @@ export const rollbackRevisionInput = z.object({
 });
 const changeOperation = z.enum(["succession_add", "succession_remove", "relation_add", "relation_remove"]);
 const membershipOperation = z.enum(["add", "remove"]);
+const branchKind = z.enum(["agnatic", "migration", "administrative"]);
 export const createChangeRequestInput = z.object({
   reason: z.string().trim().min(1, "请说明变更理由。").max(1_000, "变更理由过长。"),
   items: z.array(z.object({
@@ -76,12 +77,19 @@ export const createChangeRequestInput = z.object({
     personId: z.string().uuid(),
     membershipKind: z.enum(["blood_primary", "migration", "administrative"]),
   })).max(2_000).default([]),
+  structureItems: z.array(z.discriminatedUnion("operation", [
+    z.object({ operation: z.literal("create"), branchId: z.string().uuid(), parentBranchId: z.string().uuid().nullable(), name: z.string().trim().min(1).max(80), branchKind }),
+    z.object({ operation: z.literal("rename"), branchId: z.string().uuid(), name: z.string().trim().min(1).max(80) }),
+    z.object({ operation: z.literal("retire"), branchId: z.string().uuid() }),
+  ])).max(200).default([]),
 }).superRefine((value, context) => {
-  if (value.items.length + value.membershipItems.length === 0) context.addIssue({ code: "custom", message: "至少需要一条变更条目。" });
+  if (value.items.length + value.membershipItems.length + value.structureItems.length === 0) context.addIssue({ code: "custom", message: "至少需要一条变更条目。" });
   const keys = value.items.map((item) => `${item.operation}\u0000${item.subjectPersonId}\u0000${item.relatedPersonId}\u0000${item.relationKind ?? ""}`);
   if (new Set(keys).size !== keys.length) context.addIssue({ code: "custom", message: "变更条目不能重复。" });
   const membershipKeys = value.membershipItems.map((item) => `${item.operation}\u0000${item.branchId}\u0000${item.personId}\u0000${item.membershipKind}`);
   if (new Set(membershipKeys).size !== membershipKeys.length) context.addIssue({ code: "custom", message: "房支成员变更条目不能重复。" });
+  const structureKeys = value.structureItems.map((item) => `${item.operation}\u0000${item.branchId}`);
+  if (new Set(structureKeys).size !== structureKeys.length) context.addIssue({ code: "custom", message: "房支结构变更条目不能重复。" });
 });
 export const changeRequestVersionInput = z.object({ version: z.number().int().positive() });
 export const rejectChangeRequestInput = changeRequestVersionInput.extend({ reviewNote: z.string().trim().min(1, "请说明驳回理由。").max(1_000, "驳回理由过长。") });

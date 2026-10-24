@@ -1,6 +1,7 @@
 <script setup lang="ts">
 import { computed, onMounted, ref } from "vue";
 import { chartViewBox, createChartViewport, panChartViewport } from "./chart-viewport";
+import { layoutHistoricalRecords } from "./historical-record-layout";
 
 type Account = { id: string; username: string; displayName: string; roles: string[] };
 type PendingAccount = { id: string; username: string; display_name: string; registration_branch_name: string | null; registration_ancestor_name: string | null; version: number };
@@ -12,7 +13,7 @@ type HangingChart = { revisionId: string; projection: { nodes: ChartNode[] }; la
 type PersonDetail = { person: { id: string; displayName: string; visibility: string }; names: Array<{ id: string; name_text: string; name_kind: string; is_primary: number }>; facts: Array<{ id: string; fact_kind: string; value_text: string | null; date_text: string | null; place_name: string | null }> };
 type Lineage = { id: string; name: string; succession_rule: string; published_revision_id: string | null; pointer_version: number | null };
 type Edition = { id: string; title: string; edition_label: string | null; genealogy_title: string };
-type HistoricalComparison = { projection: { annotations: Array<{ claimId: string; status: string; relationKind: string; rawText: string }> }; comparison: { canonicalEdges: Array<{ status: string }>; historicalEdges: Array<{ status: string }> } };
+type HistoricalComparison = { projection: { nodes: Array<{ sourceRecordId: string; displayName: string | null }>; parentChildEdges: Array<{ claimId: string; parentRecordId: string; childRecordId: string }>; annotations: Array<{ claimId: string; status: string; relationKind: string; rawText: string }> }; comparison: { canonicalEdges: Array<{ status: string }>; historicalEdges: Array<{ claimId: string; status: string }> } };
 const status = ref("正在检查 API…"), notice = ref(""), account = ref<Account | null>(null), csrfToken = ref("");
 const registerForm = ref({ username: "", password: "", genealogyName: "", branchName: "", ancestorName: "" });
 const loginForm = ref({ username: "", password: "" });
@@ -41,6 +42,8 @@ const chartViewport = computed(() => {
   return panChartViewport(chartBounds.value, base, chartPan.value.x, chartPan.value.y);
 });
 const chartViewBoxValue = computed(() => chartViewBox(chartViewport.value));
+const historicalLayout = computed(() => comparison.value ? layoutHistoricalRecords(comparison.value.projection.nodes, comparison.value.projection.parentChildEdges) : null);
+const historicalStatus = computed(() => new Map(comparison.value?.comparison.historicalEdges.map((edge) => [edge.claimId, edge.status])));
 
 async function request(path: string, options: RequestInit = {}) {
   const headers = new Headers(options.headers);
@@ -195,7 +198,7 @@ onMounted(async () => { try { const response = await request("/api/health"); sta
         <h2>传统吊线图</h2><p>仅读取当前已发布世系；输入世系 ID 后载入，选择人物不会修改关系。</p>
         <form class="chart-controls" @submit.prevent="loadHangingChart"><label>世系<select v-model="lineageId" required><option value="" disabled>请选择世系</option><option v-for="lineage in lineages" :key="lineage.id" :value="lineage.id">{{ lineage.name }}{{ lineage.published_revision_id ? "（已发布）" : "（未发布）" }}</option></select></label><label>根人物 ID（可选）<input v-model.trim="rootPersonId" placeholder="仅展示该支后代" /></label><button>载入吊线图</button></form>
         <form class="chart-controls" @submit.prevent="loadHistoricalComparison"><label>历史谱书版本<select v-model="editionId"><option value="" disabled>请选择谱书版本</option><option v-for="edition in editions" :key="edition.id" :value="edition.id">{{ edition.genealogy_title }} · {{ edition.title }}</option></select></label><p>仅比较已确认映射和已解释的关系。</p><button>读取历史差异</button></form>
-        <section v-if="comparison" class="pending"><h3>历史差异（只读）</h3><p>统一边：{{ comparison.comparison.canonicalEdges.filter((edge) => edge.status === "same").length }} 一致，{{ comparison.comparison.canonicalEdges.filter((edge) => edge.status === "canonical_only").length }} 仅统一。</p><p>历史边：{{ comparison.comparison.historicalEdges.filter((edge) => edge.status === "same").length }} 一致，{{ comparison.comparison.historicalEdges.filter((edge) => edge.status === "historical_only").length }} 仅历史，{{ comparison.comparison.historicalEdges.filter((edge) => edge.status === "uncomparable").length }} 无法比较。</p><p v-for="item in comparison.projection.annotations" :key="item.claimId">{{ item.status }}：{{ item.relationKind }}（{{ item.rawText }}）</p></section>
+        <section v-if="comparison" class="pending"><h3>历史差异（只读）</h3><p>统一边：{{ comparison.comparison.canonicalEdges.filter((edge) => edge.status === "same").length }} 一致，{{ comparison.comparison.canonicalEdges.filter((edge) => edge.status === "canonical_only").length }} 仅统一。</p><p>历史边：{{ comparison.comparison.historicalEdges.filter((edge) => edge.status === "same").length }} 一致，{{ comparison.comparison.historicalEdges.filter((edge) => edge.status === "historical_only").length }} 仅历史，{{ comparison.comparison.historicalEdges.filter((edge) => edge.status === "uncomparable").length }} 无法比较。</p><div v-if="historicalLayout" class="chart-canvas"><svg :viewBox="`0 0 ${Math.max(640, historicalLayout.nodes.length * 110)} ${Math.max(240, Math.ceil(historicalLayout.nodes.length / Math.ceil(Math.sqrt(historicalLayout.nodes.length || 1))) * 104 + 70)}`" aria-label="历史谱书来源关系图"><line v-for="edge in historicalLayout.connectors" :key="edge.claimId" :class="`historical-${historicalStatus.get(edge.claimId)}`" :x1="edge.x1" :y1="edge.y1" :x2="edge.x2" :y2="edge.y2" /><g v-for="node in historicalLayout.nodes" :key="node.sourceRecordId" :transform="`translate(${node.x} ${node.y})`"><rect width="170" height="48" rx="4" /><text x="12" y="29">{{ node.displayName || node.sourceRecordId }}</text></g></svg></div><p v-for="item in comparison.projection.annotations" :key="item.claimId">{{ item.status }}：{{ item.relationKind }}（{{ item.rawText }}）</p></section>
         <form class="new-lineage" @submit.prevent="createLineage"><label>新建世系名称<input v-model.trim="newLineageName" maxlength="160" required /></label><button type="submit" class="secondary">建立空世系</button></form>
         <div v-if="chart" class="chart-tools"><label>姓名定位<input v-model.trim="chartSearch" placeholder="输入姓名" /></label><div class="actions"><button type="button" class="secondary" @click="zoomChart(-1)">缩小</button><button type="button" class="secondary" @click="resetChartViewport">重置视图</button><button type="button" class="secondary" @click="zoomChart(1)">放大</button><button type="button" @click="exportChartSvg">导出 SVG</button></div></div>
         <div v-if="chartMatches.length" class="chart-matches"><button v-for="node in chartMatches" :key="node.personId" type="button" @click="selectChartPerson(node.personId)">{{ node.displayName }}</button></div>

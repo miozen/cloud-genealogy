@@ -647,7 +647,10 @@ assert.equal(duplicateRevisionPublish.body.code, "change_request_conflicted");
 
 const membershipBranchId = "aaaaaaaa-1111-4111-8111-aaaaaaaaaaaa";
 execFileSync("npx", ["wrangler", "d1", "execute", "DB", "--local", "--persist-to", ".wrangler/local-auth-integration", "--command",
-  `INSERT INTO branch (id, lineage_id, name, branch_kind, created_at) VALUES ('${membershipBranchId}', '${lineageId}', '本地成员测试房', 'agnatic', '2026-10-24T00:00:00.000Z');`,
+  `INSERT INTO branch (id, lineage_id, name, branch_kind, created_at) VALUES ('${membershipBranchId}', '${lineageId}', '本地成员测试房', 'agnatic', '2026-10-24T00:00:00.000Z');
+   INSERT INTO branch_structure_snapshot (id, revision_id, branch_id, parent_branch_id, name, branch_kind, retired_at, created_at)
+   SELECT 'local-membership-branch-snapshot', revision_id, '${membershipBranchId}', NULL, '本地成员测试房', 'agnatic', NULL, '2026-10-24T00:00:00.000Z'
+   FROM lineage_published_pointer WHERE lineage_id = '${lineageId}';`,
 ], { stdio: "pipe" });
 const membershipChangeRequest = await request(`/api/admin/lineages/${lineageId}/change-requests`, {
   method: "POST", cookie: adminCookie, csrf: adminCsrf,
@@ -689,8 +692,19 @@ assert.equal(structureDraftPreview.body.preview.branchStructure.branches.some((b
 const structureSubmit = await request(`/api/admin/change-requests/${structureDraft.body.changeRequest.id}/submit`, {
   method: "POST", cookie: adminCookie, csrf: adminCsrf, body: { version: 1 },
 });
-expectStatus(structureSubmit, 409);
-assert.equal(structureSubmit.body.code, "structure_publish_not_ready");
+expectStatus(structureSubmit, 200);
+const structureApproval = await request(`/api/admin/change-requests/${structureDraft.body.changeRequest.id}/approve`, {
+  method: "POST", cookie: reviewerCookie, csrf: reviewerCsrf, body: { version: 2 },
+});
+expectStatus(structureApproval, 200);
+expectStatus(await request(`/api/admin/change-requests/${structureDraft.body.changeRequest.id}/publish`, {
+  method: "POST", cookie: reviewerCookie, csrf: reviewerCsrf,
+  body: { version: structureApproval.body.version, revisionId: "cdcdcdcd-cdcd-4dcd-8dcd-cdcdcdcdcdcd" },
+}), 201);
+const publishedStructure = execFileSync("npx", ["wrangler", "d1", "execute", "DB", "--local", "--persist-to", ".wrangler/local-auth-integration", "--command",
+  `SELECT name FROM branch WHERE id = '${membershipBranchId}';`,
+], { encoding: "utf8" });
+assert.match(publishedStructure, /本地成员测试房（新名）/);
 
 const passwordReset = await request(`/api/admin/accounts/${member.id}/reset-password`, {
   method: "POST",

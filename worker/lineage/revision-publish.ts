@@ -19,6 +19,7 @@ export interface PublishRevisionInput {
   proposedRelations?: readonly CanonicalRelationCandidate[];
   proposedBranchMemberships?: readonly BranchMembershipSnapshotRow[];
   proposedBranchStructures?: readonly BranchStructureSnapshotRow[];
+  branchStructureMutations?: readonly BranchStructureMutation[];
   expectedPointerVersion: number;
   now: string;
   audit: RevisionAuditEntry;
@@ -27,6 +28,10 @@ export interface PublishRevisionInput {
 export interface CanonicalRelationCandidate { subjectPersonId: string; relatedPersonId: string; relationKind: "biological_parent" | "adoptive_parent" | "successor_parent" | "spouse"; }
 export interface BranchMembershipSnapshotRow { branch_id: string; person_id: string; membership_kind: "blood_primary" | "migration" | "administrative"; }
 export interface BranchStructureSnapshotRow { branch_id: string; parent_branch_id: string | null; name: string; branch_kind: "agnatic" | "migration" | "administrative"; retired_at: string | null; }
+export type BranchStructureMutation =
+  | { operation: "create"; branchId: string; parentBranchId: string | null; name: string; branchKind: BranchStructureSnapshotRow["branch_kind"] }
+  | { operation: "rename"; branchId: string; name: string }
+  | { operation: "retire"; branchId: string };
 
 export type PublishRevisionResult =
   | { published: true; revisionId: string }
@@ -66,6 +71,12 @@ export async function publishSuccessionRevision(
     database.prepare(
       "INSERT INTO lineage_revision (id, lineage_id, state, based_on_revision_id, expected_pointer_version, change_request_id, change_request_version, created_at, published_at) VALUES (?, ?, 'published', ?, ?, ?, ?, ?, ?)",
     ).bind(input.revisionId, input.lineageId, input.basedOnRevisionId ?? null, input.expectedPointerVersion, input.changeRequest?.id ?? null, input.changeRequest?.version ?? null, input.now, input.now),
+    ...(input.branchStructureMutations ?? []).map((item) => item.operation === "create"
+      ? database.prepare("INSERT INTO branch (id, lineage_id, parent_branch_id, name, branch_kind, created_at) VALUES (?, ?, ?, ?, ?, ?)").bind(item.branchId, input.lineageId, item.parentBranchId, item.name, item.branchKind, input.now)
+      : item.operation === "rename"
+      ? database.prepare("UPDATE branch SET name = ? WHERE id = ? AND lineage_id = ? AND retired_at IS NULL").bind(item.name, item.branchId, input.lineageId)
+      : database.prepare("UPDATE branch SET retired_at = ? WHERE id = ? AND lineage_id = ? AND retired_at IS NULL").bind(input.now, item.branchId, input.lineageId),
+    ),
     ...input.proposedEdges.map((edge, index) =>
       database.prepare(
         "INSERT INTO lineage_succession_snapshot (id, revision_id, parent_person_id, child_person_id, order_key, created_at) VALUES (?, ?, ?, ?, ?, ?)",

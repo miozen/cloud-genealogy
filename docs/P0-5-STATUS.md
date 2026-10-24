@@ -47,8 +47,14 @@
 ## 已完成：房支结构草稿 API（阶段 B-2）
 
 - 管理员可在统一 `change_request` 中保存和预览 `create`、`rename`、`retire` 结构条目；非管理员被拒绝。
-- 结构草稿当前返回预览但被 `structure_publish_not_ready` 明确阻止提交，因此不会意外进入审核或修改当前 `branch`。
-- `npm run lint`、`npm run check`、`npm run build` 和 `npm run test:local-auth` 均通过；集成回归覆盖结构草稿创建、预览和安全提交阻止。
+- 该安全阻止已由下一阶段的完整原子发布链路取代；本节保留为草稿 API 的历史状态。
+
+## 已完成：房支结构审批与发布（阶段 B-3）
+
+- 仅管理员可以提交、审核及发布含结构条目的提案；创建者仍不能审核或发布自己的提案。
+- 批准与发布都会重新从基准 `branch_structure_snapshot` 投影结构，拒绝无效结构；退休还会拒绝候选成员快照仍在该房支、或任何账号范围仍引用该房支的情形。
+- 发布在既有单个 D1 batch 内更新当前 `branch`，并同时写入新 revision 的结构/成员/关系快照、published pointer、提案终态和审计。失败不会留下部分结构写入。
+- `npm run check`（22 个 Vitest 文件、50 项测试）及 `npm run test:local-auth` 已实际通过。后者覆盖管理员结构改名草稿 → 第二管理员批准/发布 → 当前 `branch` 更新；仅使用隔离 local Worker/D1。
 
 ## 未完成与风险
 
@@ -58,7 +64,7 @@
 
 ## 下一步
 
-1. 将结构条目接入批准与发布；发布时原子更新当前 `branch`、结构快照、pointer、提案状态与审计，并补充成员/账号范围依赖的退休拦截。
+1. 补充结构 `create` 与 `retire` 的 local Worker/D1 端到端用例，特别是成员/账号范围依赖拦截和 batch 失败原子性。
 2. 设计对象级审批人映射、代理与失效规则；确认前继续由另一位管理员审核，不推断房支负责人。
 3. 单独确认前端编辑工作台的最小交互与权限展示；后端 API 已可供该切片使用。
 4. 在 P0-6 前保持所有迁移仅用于 local 验证；preview/production 迁移、Secrets 和部署仍须单独授权。

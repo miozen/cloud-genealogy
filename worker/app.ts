@@ -121,6 +121,18 @@ async function membershipBranchesAreActive(database: D1Database, lineageId: stri
   return rows.results.length === branchIds.length;
 }
 
+async function structureRetirementsAreSafe(
+  database: D1Database,
+  memberships: readonly BranchMembershipCandidate[],
+  structures: ReturnType<typeof previewBranchStructureChange>["branches"],
+): Promise<boolean> {
+  const retiredBranchIds = structures.filter((branch) => branch.retiredAt === "__PROPOSED_RETIREMENT__").map((branch) => branch.branchId);
+  if (retiredBranchIds.length === 0) return true;
+  if (memberships.some((membership) => retiredBranchIds.includes(membership.branchId))) return false;
+  const scopes = await database.prepare(`SELECT scope_id FROM account_scope WHERE scope_type = 'branch' AND scope_id IN (${retiredBranchIds.map(() => "?").join(",")})`).bind(...retiredBranchIds).all<{ scope_id: string }>();
+  return scopes.results.length === 0;
+}
+
 async function canProposeChangeForPeople(database: D1Database, auth: NonNullable<AppEnv["Variables"]["auth"]>, personIds: readonly string[], baseRevisionId: string | null): Promise<boolean> {
   if (hasPermission(auth.roles, "system.manage")) return true;
   const scopes = await database.prepare("SELECT scope_type, scope_id FROM account_scope WHERE account_id = ? ORDER BY scope_type, scope_id").bind(auth.accountId).all<{ scope_type: AccountScope["scopeType"]; scope_id: string | null }>();
@@ -683,7 +695,7 @@ export function createApp() {
     const membershipItem = await context.env.DB.prepare("SELECT id FROM branch_membership_change_item WHERE change_request_id = ? LIMIT 1").bind(request.id).first();
     if (membershipItem && !hasPermission(auth.roles, "system.manage")) return context.json({ code: "membership_change_requires_admin" }, 403);
     const structureItem = await context.env.DB.prepare("SELECT id FROM branch_structure_change_item WHERE change_request_id = ? LIMIT 1").bind(request.id).first();
-    if (structureItem) return context.json({ code: "structure_publish_not_ready", message: "房支结构提案尚未接入原子发布流程。" }, 409);
+    if (structureItem && !hasPermission(auth.roles, "system.manage")) return context.json({ code: "structure_change_requires_admin" }, 403);
     if (!hasPermission(auth.roles, "system.manage")) {
       const items = await context.env.DB.prepare("SELECT operation, subject_person_id, related_person_id, relation_kind FROM change_item WHERE change_request_id = ? ORDER BY id").bind(request.id).all<ChangeItemRow>();
       if (!await canProposeChangeForPeople(context.env.DB, auth, changeItemPersonIds(items.results), request.base_revision_id)) return context.json({ code: "scope_forbidden" }, 403);
@@ -711,15 +723,18 @@ export function createApp() {
       ]);
       return context.json({ code: "change_request_conflicted" }, 409);
     }
-    const [edges, relations, items, memberships, membershipItems] = await context.env.DB.batch([
+    const [edges, relations, items, memberships, membershipItems, structures, structureItems] = await context.env.DB.batch([
       context.env.DB.prepare("SELECT parent_person_id, child_person_id FROM lineage_succession_snapshot WHERE revision_id = ? ORDER BY order_key").bind(request.base_revision_id),
       context.env.DB.prepare("SELECT subject_person_id, related_person_id, relation_kind FROM canonical_relation_snapshot WHERE revision_id = ? ORDER BY id").bind(request.base_revision_id),
       context.env.DB.prepare("SELECT operation, subject_person_id, related_person_id, relation_kind FROM change_item WHERE change_request_id = ? ORDER BY id").bind(request.id),
       context.env.DB.prepare("SELECT branch_id, person_id, membership_kind FROM branch_membership_snapshot WHERE revision_id = ? ORDER BY branch_id, membership_kind, person_id, id").bind(request.base_revision_id),
       context.env.DB.prepare("SELECT operation, branch_id, person_id, membership_kind FROM branch_membership_change_item WHERE change_request_id = ? ORDER BY id").bind(request.id),
+      context.env.DB.prepare("SELECT branch_id, parent_branch_id, name, branch_kind, retired_at FROM branch_structure_snapshot WHERE revision_id = ? ORDER BY branch_id").bind(request.base_revision_id),
+      context.env.DB.prepare("SELECT operation, branch_id, parent_branch_id, name, branch_kind FROM branch_structure_change_item WHERE change_request_id = ? ORDER BY id").bind(request.id),
     ]);
-    if (!edges || !relations || !items || !memberships || !membershipItems) throw new Error("change request approval query did not return every result set");
+    if (!edges || !relations || !items || !memberships || !membershipItems || !structures || !structureItems) throw new Error("change request approval query did not return every result set");
     if (membershipItems.results.length > 0 && !hasPermission(auth.roles, "system.manage")) return context.json({ code: "membership_change_requires_admin" }, 403);
+    if (structureItems.results.length > 0 && !hasPermission(auth.roles, "system.manage")) return context.json({ code: "structure_change_requires_admin" }, 403);
     if (!await membershipBranchesAreActive(context.env.DB, request.lineage_id, membershipItems.results as MembershipChangeItemRow[])) return context.json({ code: "membership_branch_not_active" }, 409);
     const preview = previewChangeRequest(
       (edges.results as SuccessionRow[]).map((edge) => ({ parentPersonId: edge.parent_person_id, childPersonId: edge.child_person_id })),
@@ -728,6 +743,9 @@ export function createApp() {
       toMembershipCandidates(memberships.results as MembershipRow[]), toMembershipChangeCandidates(membershipItems.results as MembershipChangeItemRow[]),
     );
     if (!preview.valid) return context.json({ code: "revision_invalid", issues: preview.issues }, 400);
+    const structurePreview = previewBranchStructureChange(toStructureCandidates(structures.results as StructureRow[]), toStructureChangeCandidates(structureItems.results as StructureChangeItemRow[]));
+    if (!structurePreview.valid) return context.json({ code: "branch_structure_invalid", issues: structurePreview.issues }, 400);
+    if (!await structureRetirementsAreSafe(context.env.DB, preview.memberships, structurePreview.branches)) return context.json({ code: "branch_retirement_in_use" }, 409);
     await context.env.DB.batch([
       context.env.DB.prepare("UPDATE change_request SET state = 'approved', reviewed_at = ?, reviewed_by_account_id = ?, version = version + 1 WHERE id = ? AND state = 'pending_review' AND version = ?").bind(now(), auth.accountId, request.id, request.version),
       context.env.DB.prepare("INSERT INTO audit_log (id, actor_account_id, action, object_type, object_id, metadata_json, created_at) VALUES (?, ?, ?, ?, ?, ?, ?)").bind(crypto.randomUUID(), auth.accountId, "lineage.change_request_approved", "change_request", request.id, "{}", now()),
@@ -758,15 +776,18 @@ export function createApp() {
     const request = await context.env.DB.prepare("SELECT id, lineage_id, state, base_revision_id, base_pointer_version, created_by_account_id, version FROM change_request WHERE id = ?").bind(context.req.param("changeRequestId")).first<ChangeRequestRow>();
     if (!request || request.state !== "approved" || request.version !== parsed.data.version) return context.json({ code: "change_request_conflict" }, 409);
     if (request.created_by_account_id === auth.accountId) return context.json({ code: "self_review_forbidden" }, 403);
-    const [edges, relations, items, memberships, membershipItems] = await context.env.DB.batch([
+    const [edges, relations, items, memberships, membershipItems, structures, structureItems] = await context.env.DB.batch([
       context.env.DB.prepare("SELECT parent_person_id, child_person_id FROM lineage_succession_snapshot WHERE revision_id = ? ORDER BY order_key").bind(request.base_revision_id),
       context.env.DB.prepare("SELECT subject_person_id, related_person_id, relation_kind FROM canonical_relation_snapshot WHERE revision_id = ? ORDER BY id").bind(request.base_revision_id),
       context.env.DB.prepare("SELECT operation, subject_person_id, related_person_id, relation_kind FROM change_item WHERE change_request_id = ? ORDER BY id").bind(request.id),
       context.env.DB.prepare("SELECT branch_id, person_id, membership_kind FROM branch_membership_snapshot WHERE revision_id = ? ORDER BY branch_id, membership_kind, person_id, id").bind(request.base_revision_id),
       context.env.DB.prepare("SELECT operation, branch_id, person_id, membership_kind FROM branch_membership_change_item WHERE change_request_id = ? ORDER BY id").bind(request.id),
+      context.env.DB.prepare("SELECT branch_id, parent_branch_id, name, branch_kind, retired_at FROM branch_structure_snapshot WHERE revision_id = ? ORDER BY branch_id").bind(request.base_revision_id),
+      context.env.DB.prepare("SELECT operation, branch_id, parent_branch_id, name, branch_kind FROM branch_structure_change_item WHERE change_request_id = ? ORDER BY id").bind(request.id),
     ]);
-    if (!edges || !relations || !items || !memberships || !membershipItems) throw new Error("change request publish query did not return every result set");
+    if (!edges || !relations || !items || !memberships || !membershipItems || !structures || !structureItems) throw new Error("change request publish query did not return every result set");
     if (membershipItems.results.length > 0 && !hasPermission(auth.roles, "system.manage")) return context.json({ code: "membership_change_requires_admin" }, 403);
+    if (structureItems.results.length > 0 && !hasPermission(auth.roles, "system.manage")) return context.json({ code: "structure_change_requires_admin" }, 403);
     if (!await membershipBranchesAreActive(context.env.DB, request.lineage_id, membershipItems.results as MembershipChangeItemRow[])) return context.json({ code: "membership_branch_not_active" }, 409);
     const preview = previewChangeRequest(
       (edges.results as SuccessionRow[]).map((edge) => ({ parentPersonId: edge.parent_person_id, childPersonId: edge.child_person_id })),
@@ -775,10 +796,14 @@ export function createApp() {
       toMembershipCandidates(memberships.results as MembershipRow[]), toMembershipChangeCandidates(membershipItems.results as MembershipChangeItemRow[]),
     );
     if (!preview.valid) return context.json({ code: "revision_invalid", issues: preview.issues }, 400);
+    const structurePreview = previewBranchStructureChange(toStructureCandidates(structures.results as StructureRow[]), toStructureChangeCandidates(structureItems.results as StructureChangeItemRow[]));
+    if (!structurePreview.valid) return context.json({ code: "branch_structure_invalid", issues: structurePreview.issues }, 400);
+    if (!await structureRetirementsAreSafe(context.env.DB, preview.memberships, structurePreview.branches)) return context.json({ code: "branch_retirement_in_use" }, 409);
+    const publishTime = now();
     const result = await publishSuccessionRevision(context.env.DB, {
       lineageId: request.lineage_id, revisionId: parsed.data.revisionId, basedOnRevisionId: request.base_revision_id ?? undefined,
       baseEdges: (edges.results as SuccessionRow[]).map((edge) => ({ parentPersonId: edge.parent_person_id, childPersonId: edge.child_person_id })),
-      proposedEdges: preview.edges, proposedRelations: preview.relations, proposedBranchMemberships: preview.memberships.map((membership) => ({ branch_id: membership.branchId, person_id: membership.personId, membership_kind: membership.membershipKind })), expectedPointerVersion: request.base_pointer_version, now: now(),
+      proposedEdges: preview.edges, proposedRelations: preview.relations, proposedBranchMemberships: preview.memberships.map((membership) => ({ branch_id: membership.branchId, person_id: membership.personId, membership_kind: membership.membershipKind })), proposedBranchStructures: structurePreview.branches.map((branch) => ({ branch_id: branch.branchId, parent_branch_id: branch.parentBranchId, name: branch.name, branch_kind: branch.branchKind, retired_at: branch.retiredAt === "__PROPOSED_RETIREMENT__" ? publishTime : branch.retiredAt })), branchStructureMutations: toStructureChangeCandidates(structureItems.results as StructureChangeItemRow[]), expectedPointerVersion: request.base_pointer_version, now: publishTime,
       changeRequest: { id: request.id, version: request.version },
       audit: { id: crypto.randomUUID(), actorAccountId: auth.accountId, action: "lineage.change_request_published", objectType: "change_request", objectId: request.id, metadataJson: JSON.stringify({ lineageId: request.lineage_id, revisionId: parsed.data.revisionId }) },
     }).catch((error: unknown) => {

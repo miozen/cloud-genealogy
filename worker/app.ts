@@ -9,6 +9,8 @@ import { CSRF_COOKIE_NAME, SESSION_COOKIE_NAME } from "./auth/session";
 import {
   approvalInput,
   accountScopesInput,
+  reviewerAssignmentInput,
+  revokeReviewerAssignmentInput,
   bootstrapInput,
   loginInput,
   genealogyEditionInput,
@@ -76,6 +78,7 @@ interface PersonAnchorRow {
 interface SuccessionRow { parent_person_id: string; child_person_id: string; }
 interface PublishedPointerRow { revision_id: string; version: number; }
 interface ChangeRequestRow { id: string; lineage_id: string; state: "draft" | "pending_review" | "approved" | "rejected" | "published" | "conflicted"; base_revision_id: string | null; base_pointer_version: number; created_by_account_id: string; version: number; }
+interface ReviewerAssignmentRow { id: string; reviewer_account_id: string; }
 interface ChangeItemRow { operation: ChangeItemCandidate["operation"]; subject_person_id: string; related_person_id: string; relation_kind: "biological_parent" | "adoptive_parent" | "successor_parent" | "spouse" | null; }
 interface MembershipRow { branch_id: string; person_id: string; membership_kind: BranchMembershipCandidate["membershipKind"]; }
 interface MembershipChangeItemRow extends MembershipRow { operation: BranchMembershipChangeItemCandidate["operation"]; }
@@ -143,6 +146,38 @@ async function structureRetirementsAreSafe(
   if (memberships.some((membership) => retiredBranchIds.includes(membership.branchId))) return false;
   const scopes = await database.prepare(`SELECT scope_id FROM account_scope WHERE scope_type = 'branch' AND scope_id IN (${retiredBranchIds.map(() => "?").join(",")})`).bind(...retiredBranchIds).all<{ scope_id: string }>();
   return scopes.results.length === 0;
+}
+
+async function effectiveReviewerAssignments(database: D1Database, lineageId: string, timestamp: string, excludedAccountId: string): Promise<ReviewerAssignmentRow[]> {
+  const rows = await database.prepare(
+    `SELECT DISTINCT assignment.id, assignment.reviewer_account_id
+     FROM lineage_reviewer_assignment assignment
+     INNER JOIN account reviewer ON reviewer.id = assignment.reviewer_account_id AND reviewer.status = 'active'
+     INNER JOIN account_role reviewer_role ON reviewer_role.account_id = reviewer.id
+     INNER JOIN role ON role.id = reviewer_role.role_id AND role.name = 'admin'
+     WHERE assignment.lineage_id = ? AND assignment.valid_from <= ? AND assignment.valid_until > ?
+       AND assignment.revoked_at IS NULL AND assignment.reviewer_account_id <> ?`,
+  ).bind(lineageId, timestamp, timestamp, excludedAccountId).all<ReviewerAssignmentRow>();
+  return rows.results;
+}
+
+async function reviewerAssignmentAllows(database: D1Database, changeRequestId: string, reviewerAccountId: string, timestamp: string): Promise<boolean> {
+  const snapshots = await database.prepare("SELECT reviewer_assignment_id FROM change_request_reviewer_assignment WHERE change_request_id = ?").bind(changeRequestId).all<{ reviewer_assignment_id: string }>();
+  // Requests created before reviewer-assignment support have no snapshot and
+  // retain the existing second-admin policy rather than being stranded.
+  if (snapshots.results.length === 0) return true;
+  const active = await database.prepare(
+    `SELECT assignment.id
+     FROM change_request_reviewer_assignment snapshot
+     INNER JOIN lineage_reviewer_assignment assignment ON assignment.id = snapshot.reviewer_assignment_id
+     INNER JOIN account reviewer ON reviewer.id = assignment.reviewer_account_id AND reviewer.status = 'active'
+     INNER JOIN account_role reviewer_role ON reviewer_role.account_id = reviewer.id
+     INNER JOIN role ON role.id = reviewer_role.role_id AND role.name = 'admin'
+     WHERE snapshot.change_request_id = ? AND snapshot.reviewer_account_id = ?
+       AND assignment.valid_from <= ? AND assignment.valid_until > ? AND assignment.revoked_at IS NULL
+     LIMIT 1`,
+  ).bind(changeRequestId, reviewerAccountId, timestamp, timestamp).first<{ id: string }>();
+  return Boolean(active);
 }
 
 async function canProposeChangeForPeople(database: D1Database, auth: NonNullable<AppEnv["Variables"]["auth"]>, personIds: readonly string[], baseRevisionId: string | null): Promise<boolean> {
@@ -718,9 +753,14 @@ export function createApp() {
       const items = await context.env.DB.prepare("SELECT operation, subject_person_id, related_person_id, relation_kind FROM change_item WHERE change_request_id = ? ORDER BY id").bind(request.id).all<ChangeItemRow>();
       if (!await canProposeChangeForPeople(context.env.DB, auth, changeItemPersonIds(items.results), request.base_revision_id)) return context.json({ code: "scope_forbidden" }, 403);
     }
-    const result = await context.env.DB.prepare("UPDATE change_request SET state = 'pending_review', submitted_at = ?, version = version + 1 WHERE id = ? AND state = 'draft' AND version = ?").bind(timestamp, id, parsed.data.version).run();
-    if (result.meta.changes !== 1) return context.json({ code: "change_request_conflict" }, 409);
-    await writeAudit(context.env.DB, auth.accountId, "lineage.change_request_submitted", "change_request", id, {});
+    const reviewers = await effectiveReviewerAssignments(context.env.DB, request.lineage_id, timestamp, request.created_by_account_id);
+    if (reviewers.length === 0) return context.json({ code: "reviewer_assignment_required", message: "该世系没有有效的非创建者审核人指派。" }, 409);
+    const results = await context.env.DB.batch([
+      context.env.DB.prepare("UPDATE change_request SET state = 'pending_review', submitted_at = ?, version = version + 1 WHERE id = ? AND state = 'draft' AND version = ?").bind(timestamp, id, parsed.data.version),
+      ...reviewers.map((reviewer) => context.env.DB.prepare("INSERT INTO change_request_reviewer_assignment (change_request_id, reviewer_assignment_id, reviewer_account_id, captured_at) VALUES (?, ?, ?, ?)").bind(id, reviewer.id, reviewer.reviewer_account_id, timestamp)),
+      context.env.DB.prepare("INSERT INTO audit_log (id, actor_account_id, action, object_type, object_id, metadata_json, created_at) VALUES (?, ?, ?, ?, ?, ?, ?)").bind(crypto.randomUUID(), auth.accountId, "lineage.change_request_submitted", "change_request", id, JSON.stringify({ reviewerAssignmentIds: reviewers.map((reviewer) => reviewer.id) }), timestamp),
+    ]);
+    if (results[0]?.meta.changes !== 1) return context.json({ code: "change_request_conflict" }, 409);
     return context.json({ state: "pending_review" });
   });
 
@@ -732,6 +772,7 @@ export function createApp() {
     const request = await context.env.DB.prepare("SELECT id, lineage_id, state, base_revision_id, base_pointer_version, created_by_account_id, version FROM change_request WHERE id = ?").bind(context.req.param("changeRequestId")).first<ChangeRequestRow>();
     if (!request || request.state !== "pending_review" || request.version !== parsed.data.version) return context.json({ code: "change_request_conflict" }, 409);
     if (request.created_by_account_id === auth.accountId) return context.json({ code: "self_review_forbidden" }, 403);
+    if (!await reviewerAssignmentAllows(context.env.DB, request.id, auth.accountId, now())) return context.json({ code: "reviewer_assignment_required" }, 403);
     const pointer = await context.env.DB.prepare("SELECT revision_id, version FROM lineage_published_pointer WHERE lineage_id = ?").bind(request.lineage_id).first<PublishedPointerRow>();
     if ((pointer?.revision_id ?? null) !== request.base_revision_id || (pointer?.version ?? 0) !== request.base_pointer_version) {
       const timestamp = now();
@@ -795,6 +836,7 @@ export function createApp() {
     const request = await context.env.DB.prepare("SELECT id, lineage_id, state, base_revision_id, base_pointer_version, created_by_account_id, version FROM change_request WHERE id = ?").bind(context.req.param("changeRequestId")).first<ChangeRequestRow>();
     if (!request || request.state !== "approved" || request.version !== parsed.data.version) return context.json({ code: "change_request_conflict" }, 409);
     if (request.created_by_account_id === auth.accountId) return context.json({ code: "self_review_forbidden" }, 403);
+    if (!await reviewerAssignmentAllows(context.env.DB, request.id, auth.accountId, now())) return context.json({ code: "reviewer_assignment_required" }, 403);
     const [edges, relations, items, memberships, membershipItems, structures, structureItems] = await context.env.DB.batch([
       context.env.DB.prepare("SELECT parent_person_id, child_person_id FROM lineage_succession_snapshot WHERE revision_id = ? ORDER BY order_key").bind(request.base_revision_id),
       context.env.DB.prepare("SELECT subject_person_id, related_person_id, relation_kind FROM canonical_relation_snapshot WHERE revision_id = ? ORDER BY id").bind(request.base_revision_id),
@@ -1271,6 +1313,54 @@ export function createApp() {
     ]);
     if (results[0]?.meta.changes !== 1) return context.json({ code: "account_scope_conflict", message: "账号或授权范围已变化，请刷新后重试。" }, 409);
     return context.json({ version: input.version + 1, scopes: input.scopes });
+  });
+
+  app.get("/api/admin/lineages/:lineageId/reviewer-assignments", requireAuthentication, async (context) => {
+    const auth = context.get("auth")!;
+    if (!hasPermission(auth.roles, "system.manage")) return context.json({ code: "forbidden" }, 403);
+    const assignments = await context.env.DB.prepare(
+      "SELECT id, reviewer_account_id, valid_from, valid_until, reason, granted_by_account_id, created_at, revoked_at, revoked_by_account_id, revoke_reason, version FROM lineage_reviewer_assignment WHERE lineage_id = ? ORDER BY valid_from DESC, id",
+    ).bind(context.req.param("lineageId")).all();
+    return context.json({ assignments: assignments.results });
+  });
+
+  app.post("/api/admin/lineages/:lineageId/reviewer-assignments", requireAuthentication, async (context) => {
+    const auth = context.get("auth")!;
+    if (!hasPermission(auth.roles, "system.manage")) return context.json({ code: "forbidden" }, 403);
+    const parsed = reviewerAssignmentInput.safeParse(await context.req.json().catch(() => null));
+    if (!parsed.success) return context.json({ code: "validation_failed", message: validationMessage(parsed) }, 400);
+    const lineageId = context.req.param("lineageId"); const input = parsed.data; const timestamp = now();
+    const lineage = await context.env.DB.prepare("SELECT id FROM lineage WHERE id = ? AND retired_at IS NULL").bind(lineageId).first<{ id: string }>();
+    if (!lineage) return context.json({ code: "lineage_not_found" }, 404);
+    const reviewer = await context.env.DB.prepare(
+      `SELECT account.id FROM account
+       INNER JOIN account_role ON account_role.account_id = account.id
+       INNER JOIN role ON role.id = account_role.role_id AND role.name = 'admin'
+       WHERE account.id = ? AND account.status = 'active'`,
+    ).bind(input.reviewerAccountId).first<{ id: string }>();
+    if (!reviewer) return context.json({ code: "reviewer_not_eligible" }, 409);
+    const overlap = await context.env.DB.prepare(
+      "SELECT id FROM lineage_reviewer_assignment WHERE lineage_id = ? AND reviewer_account_id = ? AND revoked_at IS NULL AND valid_from < ? AND valid_until > ? LIMIT 1",
+    ).bind(lineageId, input.reviewerAccountId, input.validUntil, input.validFrom).first<{ id: string }>();
+    if (overlap) return context.json({ code: "reviewer_assignment_overlap" }, 409);
+    const id = crypto.randomUUID();
+    await context.env.DB.batch([
+      context.env.DB.prepare("INSERT INTO lineage_reviewer_assignment (id, lineage_id, reviewer_account_id, valid_from, valid_until, reason, granted_by_account_id, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)").bind(id, lineageId, input.reviewerAccountId, input.validFrom, input.validUntil, input.reason, auth.accountId, timestamp),
+      context.env.DB.prepare("INSERT INTO audit_log (id, actor_account_id, action, object_type, object_id, metadata_json, created_at) VALUES (?, ?, ?, ?, ?, ?, ?)").bind(crypto.randomUUID(), auth.accountId, "lineage.reviewer_assigned", "lineage_reviewer_assignment", id, JSON.stringify({ lineageId, reviewerAccountId: input.reviewerAccountId, validFrom: input.validFrom, validUntil: input.validUntil }), timestamp),
+    ]);
+    return context.json({ assignment: { id, lineageId, reviewerAccountId: input.reviewerAccountId, validFrom: input.validFrom, validUntil: input.validUntil, reason: input.reason, version: 1 } }, 201);
+  });
+
+  app.post("/api/admin/reviewer-assignments/:assignmentId/revoke", requireAuthentication, async (context) => {
+    const auth = context.get("auth")!;
+    if (!hasPermission(auth.roles, "system.manage")) return context.json({ code: "forbidden" }, 403);
+    const parsed = revokeReviewerAssignmentInput.safeParse(await context.req.json().catch(() => null));
+    if (!parsed.success) return context.json({ code: "validation_failed", message: validationMessage(parsed) }, 400);
+    const timestamp = now(); const id = context.req.param("assignmentId");
+    const result = await context.env.DB.prepare("UPDATE lineage_reviewer_assignment SET revoked_at = ?, revoked_by_account_id = ?, revoke_reason = ?, version = version + 1 WHERE id = ? AND revoked_at IS NULL AND version = ?").bind(timestamp, auth.accountId, parsed.data.reason, id, parsed.data.version).run();
+    if (result.meta.changes !== 1) return context.json({ code: "reviewer_assignment_conflict" }, 409);
+    await writeAudit(context.env.DB, auth.accountId, "lineage.reviewer_assignment_revoked", "lineage_reviewer_assignment", id, {});
+    return context.json({ status: "revoked", version: parsed.data.version + 1 });
   });
 
   app.post("/api/admin/accounts/:accountId/reject", requireAuthentication, async (context) => {

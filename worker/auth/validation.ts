@@ -39,6 +39,21 @@ export const accountScopesInput = z.object({
   if (new Set(keys).size !== keys.length) context.addIssue({ code: "custom", message: "授权范围不能重复。" });
   if (value.scopes.filter((scope) => scope.scopeType === "global").length > 1) context.addIssue({ code: "custom", message: "全局范围最多一项。" });
 });
+const reviewerAssignmentBase = z.object({
+  reviewerAccountId: z.string().uuid(),
+  validFrom: z.string().datetime({ offset: true }),
+  validUntil: z.string().datetime({ offset: true }),
+  reason: z.string().trim().min(1, "请说明指派理由。").max(1_000, "指派理由过长。"),
+});
+export const reviewerAssignmentInput = reviewerAssignmentBase.superRefine((value, context) => {
+  const validFrom = Date.parse(value.validFrom); const validUntil = Date.parse(value.validUntil);
+  if (validUntil <= validFrom) context.addIssue({ code: "custom", message: "失效时间必须晚于生效时间。" });
+  if (validUntil - validFrom > 90 * 24 * 60 * 60 * 1000) context.addIssue({ code: "custom", message: "审核人指派最长 90 天。" });
+});
+export const revokeReviewerAssignmentInput = z.object({
+  version: z.number().int().positive(),
+  reason: z.string().trim().min(1, "请说明撤销理由。").max(1_000, "撤销理由过长。"),
+});
 
 export const rejectionInput = z.object({ version: z.number().int().positive() });
 export const resetPasswordInput = z.object({ password });

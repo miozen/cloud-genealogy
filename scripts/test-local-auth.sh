@@ -445,6 +445,16 @@ const reviewerLogin = await request("/api/auth/login", {
 expectStatus(reviewerLogin, 200);
 const reviewerCookie = sessionCookie(reviewerLogin);
 const reviewerCsrf = reviewerLogin.body.csrfToken;
+const reviewerAssignment = await request(`/api/admin/lineages/${lineageId}/reviewer-assignments`, {
+  method: "POST", cookie: adminCookie, csrf: adminCsrf,
+  body: {
+    reviewerAccountId: reviewer.id,
+    validFrom: "2026-10-01T00:00:00.000Z",
+    validUntil: "2026-12-29T00:00:00.000Z",
+    reason: "本地审核人指派验证",
+  },
+});
+expectStatus(reviewerAssignment, 201);
 const unknownPersonProposal = await request(`/api/admin/lineages/${lineageId}/change-requests`, {
   method: "POST", cookie: adminCookie, csrf: adminCsrf,
   body: { reason: "未知人物必须明确拒绝", items: [{ operation: "succession_add", subjectPersonId: personResult.body.person.id, relatedPersonId: "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa" }] },
@@ -791,6 +801,21 @@ const retiredMembership = execFileSync("npx", ["wrangler", "d1", "execute", "DB"
   `SELECT COUNT(*) AS member_count FROM branch_membership_snapshot WHERE revision_id = 'dededede-dede-4ede-8ede-dededededede' AND branch_id = '${membershipBranchId}';`,
 ], { encoding: "utf8" });
 assert.match(retiredMembership, /"member_count": 0/);
+
+expectStatus(await request(`/api/admin/reviewer-assignments/${reviewerAssignment.body.assignment.id}/revoke`, {
+  method: "POST", cookie: adminCookie, csrf: adminCsrf,
+  body: { version: reviewerAssignment.body.assignment.version, reason: "本地撤销审核人指派验证" },
+}), 200);
+const noReviewerProposal = await request(`/api/admin/lineages/${lineageId}/change-requests`, {
+  method: "POST", cookie: adminCookie, csrf: adminCsrf,
+  body: { reason: "没有有效审核人时不得提交", items: [{ operation: "relation_remove", subjectPersonId: secondPerson.body.person.id, relatedPersonId: adoptiveParent.body.person.id, relationKind: "adoptive_parent" }] },
+});
+expectStatus(noReviewerProposal, 201);
+const noReviewerSubmit = await request(`/api/admin/change-requests/${noReviewerProposal.body.changeRequest.id}/submit`, {
+  method: "POST", cookie: adminCookie, csrf: adminCsrf, body: { version: 1 },
+});
+expectStatus(noReviewerSubmit, 409);
+assert.equal(noReviewerSubmit.body.code, "reviewer_assignment_required");
 
 const passwordReset = await request(`/api/admin/accounts/${member.id}/reset-password`, {
   method: "POST",

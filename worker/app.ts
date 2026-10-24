@@ -933,6 +933,16 @@ export function createApp() {
     }
   });
 
+  app.get("/api/admin/change-requests", requireAuthentication, async (context) => {
+    const auth = context.get("auth")!;
+    if (!hasPermission(auth.roles, "system.manage")) return context.json({ code: "forbidden" }, 403);
+    const lineageId = context.req.query("lineageId")?.trim();
+    const rows = lineageId
+      ? await context.env.DB.prepare("SELECT id, lineage_id, state, base_revision_id, base_pointer_version, reason, created_by_account_id, reviewed_by_account_id, review_note, version, created_at, submitted_at, reviewed_at, published_at FROM change_request WHERE lineage_id = ? ORDER BY created_at DESC, id DESC LIMIT 100").bind(lineageId).all()
+      : await context.env.DB.prepare("SELECT id, lineage_id, state, base_revision_id, base_pointer_version, reason, created_by_account_id, reviewed_by_account_id, review_note, version, created_at, submitted_at, reviewed_at, published_at FROM change_request ORDER BY created_at DESC, id DESC LIMIT 100").all();
+    return context.json({ changeRequests: rows.results });
+  });
+
   app.get("/api/admin/accounts/pending", requireAuthentication, async (context) => {
     const auth = context.get("auth")!;
     if (!hasPermission(auth.roles, "system.manage")) return context.json({ code: "forbidden" }, 403);
@@ -942,6 +952,19 @@ export function createApp() {
          FROM account WHERE status = 'pending' ORDER BY created_at ASC LIMIT 100`,
       )
       .all<PendingAccountRow>();
+    return context.json({ accounts: rows.results });
+  });
+
+  app.get("/api/admin/accounts/reviewers", requireAuthentication, async (context) => {
+    const auth = context.get("auth")!;
+    if (!hasPermission(auth.roles, "system.manage")) return context.json({ code: "forbidden" }, 403);
+    const rows = await context.env.DB.prepare(
+      `SELECT DISTINCT account.id, account.username, account.display_name
+       FROM account INNER JOIN account_role ON account_role.account_id = account.id
+       INNER JOIN role ON role.id = account_role.role_id
+       WHERE account.status = 'active' AND role.name = 'admin'
+       ORDER BY account.display_name, account.username, account.id LIMIT 100`,
+    ).all();
     return context.json({ accounts: rows.results });
   });
 

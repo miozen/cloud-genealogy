@@ -455,6 +455,12 @@ const reviewerAssignment = await request(`/api/admin/lineages/${lineageId}/revie
   },
 });
 expectStatus(reviewerAssignment, 201);
+const reviewerCandidates = await request("/api/admin/accounts/reviewers", { cookie: adminCookie });
+expectStatus(reviewerCandidates, 200);
+assert.equal(reviewerCandidates.body.accounts.some((candidate) => candidate.id === reviewer.id), true);
+const reviewerAssignments = await request(`/api/admin/lineages/${lineageId}/reviewer-assignments`, { cookie: adminCookie });
+expectStatus(reviewerAssignments, 200);
+assert.equal(reviewerAssignments.body.assignments.some((assignment) => assignment.id === reviewerAssignment.body.assignment.id), true);
 const unknownPersonProposal = await request(`/api/admin/lineages/${lineageId}/change-requests`, {
   method: "POST", cookie: adminCookie, csrf: adminCsrf,
   body: { reason: "未知人物必须明确拒绝", items: [{ operation: "succession_add", subjectPersonId: personResult.body.person.id, relatedPersonId: "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa" }] },
@@ -481,6 +487,9 @@ const changeRequest = await request(`/api/admin/lineages/${lineageId}/change-req
   },
 });
 expectStatus(changeRequest, 201);
+const changeRequestQueue = await request(`/api/admin/change-requests?lineageId=${lineageId}`, { cookie: adminCookie });
+expectStatus(changeRequestQueue, 200);
+assert.equal(changeRequestQueue.body.changeRequests.some((item) => item.id === changeRequest.body.changeRequest.id && item.state === "draft"), true);
 const changePreview = await request(`/api/admin/change-requests/${changeRequest.body.changeRequest.id}/preview`, { cookie: adminCookie });
 expectStatus(changePreview, 200);
 assert.equal(changePreview.body.preview.valid, true);

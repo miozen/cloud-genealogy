@@ -16,6 +16,10 @@ type Lineage = { id: string; name: string; succession_rule: string; published_re
 type Edition = { id: string; title: string; edition_label: string | null; genealogy_title: string };
 type HistoricalComparison = { projection: { nodes: Array<{ sourceRecordId: string; displayName: string | null }>; parentChildEdges: Array<{ claimId: string; parentRecordId: string; childRecordId: string }>; annotations: Array<{ claimId: string; status: string; relationKind: string; rawText: string }> }; comparison: { canonicalEdges: Array<{ status: string }>; historicalEdges: Array<{ claimId: string; status: string }> } };
 type Kinship = { centerPersonId: string; nodes: Array<{ id: string; displayName: string }>; relations: Array<{ subjectPersonId: string; relatedPersonId: string; relationKind: string }> };
+type ChangeRequest = { id: string; lineage_id: string; state: "draft" | "pending_review" | "approved" | "rejected" | "published" | "conflicted"; reason: string; created_by_account_id: string; reviewed_by_account_id: string | null; review_note: string | null; version: number; created_at: string };
+type Reviewer = { id: string; username: string; display_name: string };
+type ReviewerAssignment = { id: string; reviewer_account_id: string; valid_from: string; valid_until: string; reason: string; revoked_at: string | null; version: number };
+type ChangePreview = { changeRequest: ChangeRequest; preview: { valid: boolean; issues: Array<{ code: string }>; edges: unknown[]; relations: unknown[]; memberships: unknown[]; branchStructure: { branches: unknown[] } } };
 const status = ref("正在检查 API…"), notice = ref(""), account = ref<Account | null>(null), csrfToken = ref("");
 const registerForm = ref({ username: "", password: "", genealogyName: "", branchName: "", ancestorName: "" });
 const loginForm = ref({ username: "", password: "" });
@@ -26,6 +30,10 @@ const lineageId = ref(""), rootPersonId = ref(""), chart = ref<HangingChart | nu
 const chartZoom = ref(1), centeredPersonId = ref<string | null>(null), chartPersonId = ref<string | null>(null), chartPerson = ref<PersonDetail | null>(null);
 const lineages = ref<Lineage[]>([]), editions = ref<Edition[]>([]), editionId = ref(""), comparison = ref<HistoricalComparison | null>(null), newLineageName = ref("");
 const kinshipPersonId = ref(""), kinship = ref<Kinship | null>(null);
+const changeRequests = ref<ChangeRequest[]>([]), reviewers = ref<Reviewer[]>([]), reviewerAssignments = ref<ReviewerAssignment[]>([]);
+const selectedChangeRequest = ref<ChangeRequest | null>(null), changePreview = ref<ChangePreview | null>(null), reviewNote = ref("");
+const proposalForm = ref({ reason: "", operation: "relation_add", subjectPersonId: "", relatedPersonId: "", relationKind: "biological_parent" });
+const assignmentForm = ref({ reviewerAccountId: "", validFrom: "", validUntil: "", reason: "" });
 const chartSvg = ref<SVGSVGElement | null>(null);
 const chartPan = ref({ x: 0, y: 0 }), chartDrag = ref<{ pointerId: number; clientX: number; clientY: number } | null>(null);
 const isAdmin = computed(() => account.value?.roles.includes("admin") ?? false);
@@ -68,6 +76,18 @@ async function refreshAdminData() {
     if (!lineageId.value && lineages.value[0]) lineageId.value = lineages.value[0].id;
   }
   if (editionsResponse.ok) { editions.value = ((await editionsResponse.json()) as { editions: Edition[] }).editions; if (!editionId.value && editions.value[0]) editionId.value = editions.value[0].id; }
+  await refreshWorkflowData();
+}
+async function refreshWorkflowData() {
+  if (!lineageId.value) return;
+  const [requestsResponse, reviewersResponse, assignmentsResponse] = await Promise.all([
+    request(`/api/admin/change-requests?lineageId=${encodeURIComponent(lineageId.value)}`),
+    request("/api/admin/accounts/reviewers"),
+    request(`/api/admin/lineages/${encodeURIComponent(lineageId.value)}/reviewer-assignments`),
+  ]);
+  if (requestsResponse.ok) changeRequests.value = ((await requestsResponse.json()) as { changeRequests: ChangeRequest[] }).changeRequests;
+  if (reviewersResponse.ok) reviewers.value = ((await reviewersResponse.json()) as { accounts: Reviewer[] }).accounts;
+  if (assignmentsResponse.ok) reviewerAssignments.value = ((await assignmentsResponse.json()) as { assignments: ReviewerAssignment[] }).assignments;
 }
 async function refreshIdentity() {
   const response = await request("/api/me");
@@ -144,6 +164,51 @@ async function createLineage() {
   newLineageName.value = ""; lineageId.value = result.lineage.id; chart.value = null;
   await refreshAdminData(); notice.value = "世系已建立；录入并发布承谱 revision 后即可载入吊线图。";
 }
+async function createProposal() {
+  if (!lineageId.value) return void (notice.value = "请先选择世系。");
+  const form = proposalForm.value;
+  const response = await request(`/api/admin/lineages/${encodeURIComponent(lineageId.value)}/change-requests`, { method: "POST", body: JSON.stringify({ reason: form.reason, items: [{ operation: form.operation, subjectPersonId: form.subjectPersonId, relatedPersonId: form.relatedPersonId, relationKind: form.relationKind }], membershipItems: [], structureItems: [] }) });
+  if (!response.ok) return void (notice.value = await message(response));
+  const result = await response.json() as { changeRequest: ChangeRequest };
+  proposalForm.value = { reason: "", operation: "relation_add", subjectPersonId: "", relatedPersonId: "", relationKind: "biological_parent" };
+  await refreshWorkflowData(); await previewChangeRequest(result.changeRequest.id); notice.value = "草稿已创建，请核对预览后再提交。";
+}
+async function previewChangeRequest(id: string) {
+  const response = await request(`/api/admin/change-requests/${encodeURIComponent(id)}/preview`);
+  if (!response.ok) return void (notice.value = await message(response));
+  changePreview.value = await response.json() as ChangePreview;
+  selectedChangeRequest.value = changeRequests.value.find((item) => item.id === id) ?? changePreview.value.changeRequest;
+}
+async function submitChangeRequest() {
+  const item = selectedChangeRequest.value; if (!item) return;
+  const response = await request(`/api/admin/change-requests/${item.id}/submit`, { method: "POST", body: JSON.stringify({ version: item.version }) });
+  notice.value = response.ok ? "提案已提交审核。" : await message(response); if (response.ok) { selectedChangeRequest.value = null; changePreview.value = null; await refreshWorkflowData(); }
+}
+async function approveChangeRequest() {
+  const item = selectedChangeRequest.value; if (!item) return;
+  const response = await request(`/api/admin/change-requests/${item.id}/approve`, { method: "POST", body: JSON.stringify({ version: item.version }) });
+  notice.value = response.ok ? "提案已批准，可由有效指派审核人发布。" : await message(response); if (response.ok) { selectedChangeRequest.value = null; changePreview.value = null; await refreshWorkflowData(); }
+}
+async function rejectChangeRequest() {
+  const item = selectedChangeRequest.value; if (!item || !reviewNote.value.trim()) return void (notice.value = "请填写驳回理由。");
+  const response = await request(`/api/admin/change-requests/${item.id}/reject`, { method: "POST", body: JSON.stringify({ version: item.version, reviewNote: reviewNote.value }) });
+  notice.value = response.ok ? "提案已驳回。" : await message(response); if (response.ok) { reviewNote.value = ""; selectedChangeRequest.value = null; changePreview.value = null; await refreshWorkflowData(); }
+}
+async function publishChangeRequest() {
+  const item = selectedChangeRequest.value; if (!item) return;
+  const response = await request(`/api/admin/change-requests/${item.id}/publish`, { method: "POST", body: JSON.stringify({ version: item.version, revisionId: crypto.randomUUID() }) });
+  notice.value = response.ok ? "提案已发布为新的不可变 revision。" : await message(response); if (response.ok) { selectedChangeRequest.value = null; changePreview.value = null; await refreshWorkflowData(); }
+}
+async function createReviewerAssignment() {
+  if (!lineageId.value) return; const form = assignmentForm.value;
+  const response = await request(`/api/admin/lineages/${lineageId.value}/reviewer-assignments`, { method: "POST", body: JSON.stringify({ ...form, validFrom: new Date(form.validFrom).toISOString(), validUntil: new Date(form.validUntil).toISOString() }) });
+  if (!response.ok) return void (notice.value = await message(response));
+  assignmentForm.value = { reviewerAccountId: "", validFrom: "", validUntil: "", reason: "" }; await refreshWorkflowData(); notice.value = "审核人指派已建立。";
+}
+async function revokeReviewerAssignment(item: ReviewerAssignment) {
+  const response = await request(`/api/admin/reviewer-assignments/${item.id}/revoke`, { method: "POST", body: JSON.stringify({ version: item.version, reason: "管理员撤销审核人指派" }) });
+  notice.value = response.ok ? "审核人指派已撤销。" : await message(response); if (response.ok) await refreshWorkflowData();
+}
 function zoomChart(direction: 1 | -1) {
   chartZoom.value = Math.min(3, Math.max(0.5, Number((chartZoom.value + direction * 0.25).toFixed(2))));
   chartPan.value = { x: 0, y: 0 };
@@ -208,9 +273,16 @@ onMounted(async () => { try { const response = await request("/api/health"); sta
       <h2>账号审核</h2><form class="person-form" @submit.prevent="createPerson"><h3>建立人物锚点</h3><label>族谱姓名<input v-model.trim="newPerson.displayName" required /></label><label>可见性<select v-model="newPerson.visibility"><option>PUBLIC</option><option>MEMBER</option><option>ADMIN</option></select></label><button>建立人物</button></form>
       <p v-if="pendingAccounts.length === 0">暂无待审核账号。</p>
       <article v-for="item in pendingAccounts" :key="item.id" class="pending"><h3>{{ item.display_name }} <small>@{{ item.username }}</small></h3><p>线索：{{ item.registration_branch_name || "未填房支" }}；{{ item.registration_ancestor_name || "未填父辈/祖辈" }}</p><label>人工关联人物<select v-model="selectedPerson[item.id]"><option value="">请选择，不自动匹配</option><option v-for="person in persons" :key="person.id" :value="person.id">{{ person.display_name }} · {{ person.id }}</option></select></label><label>额外角色<select v-model="selectedRole[item.id]"><option value="member">仅族人</option><option value="editor">编辑员</option><option value="admin">管理员</option></select></label><div class="actions"><button @click="approve(item)">通过</button><button class="secondary" @click="reject(item)">拒绝</button></div></article>
+      <section class="workflow-admin">
+        <h2>提案工作台</h2><p>首个界面只提供单条亲属关系草稿；成员和房支结构仍通过受控 API，待专门编辑体验确认后再开放。</p>
+        <form class="workflow-form" @submit.prevent="createProposal"><label>世系<select v-model="lineageId" required @change="refreshWorkflowData"><option value="" disabled>请选择世系</option><option v-for="lineage in lineages" :key="lineage.id" :value="lineage.id">{{ lineage.name }}</option></select></label><label>理由<input v-model.trim="proposalForm.reason" maxlength="1000" required /></label><label>操作<select v-model="proposalForm.operation"><option value="relation_add">新增亲属关系</option><option value="relation_remove">移除亲属关系</option></select></label><label>主体人物 ID<input v-model.trim="proposalForm.subjectPersonId" required /></label><label>关联人物 ID<input v-model.trim="proposalForm.relatedPersonId" required /></label><label>关系类型<select v-model="proposalForm.relationKind"><option value="biological_parent">生父母</option><option value="adoptive_parent">养父母</option><option value="successor_parent">嗣父母</option><option value="spouse">配偶</option></select></label><button>创建草稿并预览</button></form>
+        <section class="queue"><h3>审核队列</h3><p v-if="changeRequests.length === 0">当前世系暂无提案。</p><button v-for="item in changeRequests" :key="item.id" type="button" class="queue-item" @click="previewChangeRequest(item.id)"><strong>{{ item.state }}</strong> · {{ item.reason }}<small>{{ item.id }}</small></button></section>
+        <article v-if="selectedChangeRequest" class="pending"><h3>提案预览：{{ selectedChangeRequest.state }}</h3><p>{{ selectedChangeRequest.reason }}</p><p v-if="changePreview">校验：{{ changePreview.preview.valid ? "通过" : "未通过" }}；关系 {{ changePreview.preview.relations.length }} 条，成员 {{ changePreview.preview.memberships.length }} 条，房支 {{ changePreview.preview.branchStructure.branches.length }} 个。</p><p v-if="changePreview && changePreview.preview.issues.length">问题：{{ changePreview.preview.issues.map((issue) => issue.code).join("、") }}</p><div class="actions"><button v-if="selectedChangeRequest.state === 'draft'" @click="submitChangeRequest">提交审核</button><button v-if="selectedChangeRequest.state === 'pending_review'" @click="approveChangeRequest">批准</button><button v-if="selectedChangeRequest.state === 'approved'" @click="publishChangeRequest">发布</button></div><label v-if="selectedChangeRequest.state === 'pending_review'">驳回理由<textarea v-model.trim="reviewNote" maxlength="1000" /></label><button v-if="selectedChangeRequest.state === 'pending_review'" class="secondary" @click="rejectChangeRequest">驳回</button></article>
+      </section>
+      <section class="workflow-admin"><h2>审核人指派</h2><p>指派独立于编辑范围；有效期最长 90 天，撤销后立即失效。</p><form class="workflow-form" @submit.prevent="createReviewerAssignment"><label>审核人<select v-model="assignmentForm.reviewerAccountId" required><option value="" disabled>请选择活跃管理员</option><option v-for="reviewer in reviewers" :key="reviewer.id" :value="reviewer.id">{{ reviewer.display_name }} · @{{ reviewer.username }}</option></select></label><label>生效时间<input v-model="assignmentForm.validFrom" type="datetime-local" required /></label><label>失效时间<input v-model="assignmentForm.validUntil" type="datetime-local" required /></label><label>指派理由<input v-model.trim="assignmentForm.reason" maxlength="1000" required /></label><button>建立指派</button></form><p v-if="reviewerAssignments.length === 0">当前世系没有审核人指派。</p><article v-for="item in reviewerAssignments" :key="item.id" class="pending"><p>{{ reviewers.find((reviewer) => reviewer.id === item.reviewer_account_id)?.display_name || item.reviewer_account_id }}</p><p>{{ item.valid_from }} 至 {{ item.valid_until }} · {{ item.revoked_at ? "已撤销" : "有效/待生效" }}</p><p>{{ item.reason }}</p><button v-if="!item.revoked_at" class="secondary" @click="revokeReviewerAssignment(item)">撤销</button></article></section>
       <section class="chart-admin">
         <h2>传统吊线图</h2><p>仅读取当前已发布世系；输入世系 ID 后载入，选择人物不会修改关系。</p>
-        <form class="chart-controls" @submit.prevent="loadHangingChart"><label>世系<select v-model="lineageId" required><option value="" disabled>请选择世系</option><option v-for="lineage in lineages" :key="lineage.id" :value="lineage.id">{{ lineage.name }}{{ lineage.published_revision_id ? "（已发布）" : "（未发布）" }}</option></select></label><label>根人物 ID（可选）<input v-model.trim="rootPersonId" placeholder="仅展示该支后代" /></label><button>载入吊线图</button></form>
+        <form class="chart-controls" @submit.prevent="loadHangingChart"><label>世系<select v-model="lineageId" required @change="refreshWorkflowData"><option value="" disabled>请选择世系</option><option v-for="lineage in lineages" :key="lineage.id" :value="lineage.id">{{ lineage.name }}{{ lineage.published_revision_id ? "（已发布）" : "（未发布）" }}</option></select></label><label>根人物 ID（可选）<input v-model.trim="rootPersonId" placeholder="仅展示该支后代" /></label><button>载入吊线图</button></form>
         <form class="chart-controls" @submit.prevent="loadHistoricalComparison"><label>历史谱书版本<select v-model="editionId"><option value="" disabled>请选择谱书版本</option><option v-for="edition in editions" :key="edition.id" :value="edition.id">{{ edition.genealogy_title }} · {{ edition.title }}</option></select></label><p>仅比较已确认映射和已解释的关系。</p><button>读取历史差异</button></form>
         <form class="chart-controls" @submit.prevent="loadKinship"><label>亲属图人物 ID<input v-model.trim="kinshipPersonId" placeholder="当前发布世系中的人物" /></label><p>仅读取生父、嗣父、养父与配偶快照。</p><button>载入亲属图</button></form>
         <div v-if="kinshipLayout" class="chart-canvas"><h3>人物中心亲属图（只读）</h3><svg viewBox="0 0 720 420" aria-label="人物中心亲属图"><template v-for="edge in kinshipLayout.relations" :key="`${edge.subjectPersonId}:${edge.relatedPersonId}:${edge.relationKind}`"><line :x1="edge.from.x + 85" :y1="edge.from.y + 24" :x2="edge.to.x + 85" :y2="edge.to.y + 24" /><text class="kinship-relation-label" :x="(edge.from.x + edge.to.x) / 2 + 85" :y="(edge.from.y + edge.to.y) / 2 + 18">{{ kinshipRelationLabel(edge.relationKind) }}</text></template><g v-for="node in kinshipLayout.nodes" :key="node.id" :transform="`translate(${node.x} ${node.y})`"><rect width="170" height="48" rx="4" /><text x="12" y="29">{{ node.displayName }}</text></g></svg></div>

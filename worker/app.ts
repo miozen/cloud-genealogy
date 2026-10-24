@@ -34,6 +34,7 @@ import { publishSuccessionRevision, rollbackSuccessionRevision } from "./lineage
 import { buildPublishedHangingChart } from "./lineage/hanging-chart-service";
 import { projectHistoricalLineage } from "./lineage/historical-lineage-projection";
 import { compareHistoricalLineage } from "./lineage/historical-lineage-comparison";
+import { projectKinship } from "./lineage/kinship-projection";
 import { csrfProtection, requireAuthentication, sessionMiddleware } from "./middleware/authentication";
 import { securityHeaders } from "./middleware/security";
 import type { AppEnv } from "./types";
@@ -504,6 +505,20 @@ export function createApp() {
       projection,
     );
     return context.json({ view: "comparison", lineageId, editionId, revisionId: pointer.revision_id, pointerVersion: pointer.version, projection, comparison });
+  });
+
+  app.get("/api/admin/lineages/:lineageId/kinship", requireAuthentication, async (context) => {
+    const auth = context.get("auth")!;
+    if (!hasPermission(auth.roles, "system.manage")) return context.json({ code: "forbidden" }, 403);
+    const personId = context.req.query("personId");
+    if (!personId) return context.json({ code: "validation_failed", message: "personId 必填。" }, 400);
+    const pointer = await context.env.DB.prepare("SELECT revision_id, version FROM lineage_published_pointer WHERE lineage_id = ?").bind(context.req.param("lineageId")).first<PublishedPointerRow>();
+    if (!pointer) return context.json({ code: "published_revision_not_found" }, 404);
+    const relations = await context.env.DB.prepare("SELECT subject_person_id, related_person_id, relation_kind FROM canonical_relation_snapshot WHERE revision_id = ? AND (subject_person_id = ? OR related_person_id = ?) ORDER BY id").bind(pointer.revision_id, personId, personId).all<{ subject_person_id: string; related_person_id: string; relation_kind: "biological_parent" | "adoptive_parent" | "successor_parent" | "spouse" }>();
+    const ids = [...new Set([personId, ...relations.results.flatMap((row) => [row.subject_person_id, row.related_person_id])])];
+    const people = ids.length ? await context.env.DB.prepare(`SELECT id, display_name FROM person WHERE id IN (${ids.map(() => "?").join(",")}) ORDER BY id`).bind(...ids).all<{ id: string; display_name: string }>() : { results: [] };
+    const graph = projectKinship(personId, people.results.map((person) => ({ id: person.id, displayName: person.display_name })), relations.results.map((row) => ({ subjectPersonId: row.subject_person_id, relatedPersonId: row.related_person_id, relationKind: row.relation_kind })));
+    return context.json({ view: "kinship", lineageId: context.req.param("lineageId"), revisionId: pointer.revision_id, pointerVersion: pointer.version, ...graph });
   });
 
   app.post("/api/admin/lineages/:lineageId/revisions/publish", requireAuthentication, async (context) => {

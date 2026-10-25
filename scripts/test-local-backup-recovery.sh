@@ -71,7 +71,19 @@ node scripts/backup-package.mjs verify --package "$package_dir" --migration-dir 
   cd "$fixture_root"
   "$project_root/node_modules/.bin/wrangler" d1 export DB --local --no-schema --output "$fixture_root/data-only.sql" >/dev/null
 )
+printf 'INSERT INTO "person" VALUES (\x27not-a-wrangler-export\x27);\n' > "$fixture_root/invalid-data.sql"
+if node "$project_root/scripts/prepare-d1-restore-data.mjs" --input "$fixture_root/invalid-data.sql" --output "$fixture_root/invalid-prepared.sql" >/dev/null 2>&1; then
+  echo "非 Wrangler data-only 文件通过了恢复数据准备。" >&2
+  exit 1
+fi
+test ! -e "$fixture_root/invalid-prepared.sql"
 node "$project_root/scripts/prepare-d1-restore-data.mjs" --input "$fixture_root/data-only.sql" --output "$fixture_root/prepared-data.sql" >/dev/null
+if node "$project_root/scripts/prepare-d1-restore-data.mjs" --input "$fixture_root/data-only.sql" --output "$fixture_root/prepared-data.sql" >/dev/null 2>&1; then
+  echo "恢复数据准备覆盖了已有输出文件。" >&2
+  exit 1
+fi
+! rg -q 'INSERT INTO "d1_migrations"' "$fixture_root/prepared-data.sql"
+rg -q '^INSERT OR IGNORE INTO "role"' "$fixture_root/prepared-data.sql"
 npx wrangler d1 migrations apply DB --local --persist-to "$prepared_state" >/dev/null
 npx wrangler d1 execute DB --local --persist-to "$prepared_state" --file "$fixture_root/prepared-data.sql" >/dev/null
 npx wrangler d1 execute DB --local --persist-to "$prepared_state" --command "SELECT COUNT(*) AS people FROM person WHERE id = 'backup-fixture-person';" > "$fixture_root/prepared-result.json"

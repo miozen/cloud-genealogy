@@ -1,6 +1,6 @@
 # P0-4 历史双视图与完整亲属图状态
 
-状态：切片 A/B/C 已完成；受限展开设计审查已完成，待业务确认后实施。最后更新：2026-10-25。
+状态：切片 A/B/C/D 已完成；完整亲属图具备管理员受限展开。最后更新：2026-10-25。
 
 ## 已完成：切片 A（历史关系语义与纯投影）
 
@@ -35,4 +35,9 @@
 ## 后续切片
 
 1. 历史视图仍是来源记录网格；如需更适合谱书阅读的布局，应在不混入统一世系边的前提下另行设计并验证。
-2. 已完成 [完整亲属图受限展开设计审查](/home/mio/projects/cloud-genealogy/docs/P0-4-KINSHIP-EXPANSION-DESIGN-REVIEW.md)：推荐先保持管理员专用、最大半径 2、60 节点/120 边，并先补关系方向校验。API 契约、隐私边界和验收数据仍需项目负责人确认；未确认前不实施。
+2. 已完成切片 D：管理员可读取当前 published revision 的亲属图 `radius=1|2`，服务端按层查询并限制在 60 节点/120 关系；超过限制只返回 `truncated`，不泄露边界外信息。布局按距中心分层且画布高度随节点数增长。管理员以外继续被拒绝。关系预览会拒绝与同一候选承谱边方向相反的父母关系，反向配偶重复会被合并；无法从既有 UUID 判断的独立亲子方向仍需审核，详见 [设计审查](/home/mio/projects/cloud-genealogy/docs/P0-4-KINSHIP-EXPANSION-DESIGN-REVIEW.md)。
+
+## 切片 D 实际验证
+
+- `npm run lint`、`npm run check`、`npm run build` 通过：23 个测试文件、56 项测试。
+- `LOCAL_AUTH_TEST_PORT=18979 npm run test:local-auth` 通过：隔离 local Worker/D1 验证默认半径、半径 2、非法半径拒绝、提案方向冲突预览、发布和回退后的读取；未使用 `--remote`。

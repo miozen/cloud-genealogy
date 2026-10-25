@@ -47,3 +47,17 @@ it("expresses membership rollback as explicit add and remove items", () => {
     { operation: "add", branchId: "old", personId: "person", membershipKind: "blood_primary" },
   ]);
 });
+
+it("rejects parent relations that contradict the published succession direction and deduplicates reverse spouse entries", () => {
+  const invalid = previewChangeRequest(
+    [{ parentPersonId: "parent", childPersonId: "child" }], [],
+    [{ operation: "relation_add", subjectPersonId: "parent", relatedPersonId: "child", relationKind: "biological_parent" }],
+  );
+  expect(invalid.valid).toBe(false);
+  expect(invalid.issues).toContainEqual({ code: "canonical_parent_direction_conflicts_succession", personIds: ["parent", "child"] });
+  const spouses = previewChangeRequest([], [], [
+    { operation: "relation_add", subjectPersonId: "a", relatedPersonId: "b", relationKind: "spouse" },
+    { operation: "relation_add", subjectPersonId: "b", relatedPersonId: "a", relationKind: "spouse" },
+  ]);
+  expect(spouses.relations).toHaveLength(1);
+});

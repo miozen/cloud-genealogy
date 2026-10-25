@@ -27,12 +27,19 @@ export function previewChangeRequest(baseEdges: readonly SuccessionEdgeCandidate
     } else if (!memberships.delete(membershipKey(membership))) membershipIssues.push({ code: "membership_not_found", personIds: [item.personId] });
   }
   const succession = previewSuccessionRevision({ baseEdges, proposedEdges: [...edges.values()] });
+  const relationIssues: Array<{ code: "canonical_parent_direction_conflicts_succession"; personIds: string[] }> = [];
+  const successionKeys = new Set([...edges.values()].map((edge) => `${edge.parentPersonId}\u0000${edge.childPersonId}`));
+  for (const relation of relations.values()) {
+    if (relation.relationKind !== "spouse" && successionKeys.has(`${relation.subjectPersonId}\u0000${relation.relatedPersonId}`)) {
+      relationIssues.push({ code: "canonical_parent_direction_conflicts_succession", personIds: [relation.subjectPersonId, relation.relatedPersonId] });
+    }
+  }
   const primaryPeople = new Set<string>();
   for (const membership of memberships.values()) {
     if (membership.membershipKind === "blood_primary" && primaryPeople.has(membership.personId)) membershipIssues.push({ code: "multiple_primary_branch", personIds: [membership.personId] });
     if (membership.membershipKind === "blood_primary") primaryPeople.add(membership.personId);
   }
-  return { ...succession, valid: succession.valid && membershipIssues.length === 0, issues: [...succession.issues, ...membershipIssues], edges: [...edges.values()], relations: [...relations.values()], memberships: [...memberships.values()] };
+  return { ...succession, valid: succession.valid && membershipIssues.length === 0 && relationIssues.length === 0, issues: [...succession.issues, ...relationIssues, ...membershipIssues], edges: [...edges.values()], relations: [...relations.values()], memberships: [...memberships.values()] };
 }
 
 /** Produces an explicit proposal that changes one published snapshot into another. */
@@ -60,5 +67,8 @@ export function buildSnapshotMembershipChangeItems(baseMemberships: readonly Bra
 }
 
 function edgeKey(parentPersonId: string, childPersonId: string) { return `${parentPersonId}\u0000${childPersonId}`; }
-function relationKey(relation: CanonicalRelationCandidate) { return `${relation.subjectPersonId}\u0000${relation.relatedPersonId}\u0000${relation.relationKind}`; }
+function relationKey(relation: CanonicalRelationCandidate) {
+  if (relation.relationKind === "spouse") return [relation.subjectPersonId, relation.relatedPersonId].sort().join("\u0000") + "\u0000spouse";
+  return `${relation.subjectPersonId}\u0000${relation.relatedPersonId}\u0000${relation.relationKind}`;
+}
 function membershipKey(membership: BranchMembershipCandidate) { return `${membership.branchId}\u0000${membership.personId}\u0000${membership.membershipKind}`; }

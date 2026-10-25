@@ -42,7 +42,7 @@ import { publishSuccessionRevision, rollbackSuccessionRevision } from "./lineage
 import { buildPublishedHangingChart } from "./lineage/hanging-chart-service";
 import { projectHistoricalLineage } from "./lineage/historical-lineage-projection";
 import { compareHistoricalLineage } from "./lineage/historical-lineage-comparison";
-import { projectKinship } from "./lineage/kinship-projection";
+import { boundedKinship } from "./lineage/kinship-projection";
 import { buildSnapshotChangeItems, buildSnapshotMembershipChangeItems, previewChangeRequest, type BranchMembershipCandidate, type BranchMembershipChangeItemCandidate, type ChangeItemCandidate } from "./lineage/change-request-preview";
 import { previewBranchStructureChange, type BranchStructureCandidate, type BranchStructureChangeItemCandidate } from "./lineage/branch-structure-change-preview";
 import { allowsDirectRevisionWrite } from "./lineage/publish-policy";
@@ -680,12 +680,42 @@ export function createApp() {
     if (!hasPermission(auth.roles, "system.manage")) return context.json({ code: "forbidden" }, 403);
     const personId = context.req.query("personId");
     if (!personId) return context.json({ code: "validation_failed", message: "personId 必填。" }, 400);
+    const radiusValue = context.req.query("radius") ?? "1";
+    if (radiusValue !== "1" && radiusValue !== "2") return context.json({ code: "validation_failed", message: "radius 只能是 1 或 2。" }, 400);
+    const radius = Number(radiusValue) as 1 | 2;
     const pointer = await context.env.DB.prepare("SELECT revision_id, version FROM lineage_published_pointer WHERE lineage_id = ?").bind(context.req.param("lineageId")).first<PublishedPointerRow>();
     if (!pointer) return context.json({ code: "published_revision_not_found" }, 404);
-    const relations = await context.env.DB.prepare("SELECT subject_person_id, related_person_id, relation_kind FROM canonical_relation_snapshot WHERE revision_id = ? AND (subject_person_id = ? OR related_person_id = ?) ORDER BY id").bind(pointer.revision_id, personId, personId).all<{ subject_person_id: string; related_person_id: string; relation_kind: "biological_parent" | "adoptive_parent" | "successor_parent" | "spouse" }>();
-    const ids = [...new Set([personId, ...relations.results.flatMap((row) => [row.subject_person_id, row.related_person_id])])];
-    const people = ids.length ? await context.env.DB.prepare(`SELECT id, display_name FROM person WHERE id IN (${ids.map(() => "?").join(",")}) ORDER BY id`).bind(...ids).all<{ id: string; display_name: string }>() : { results: [] };
-    const graph = projectKinship(personId, people.results.map((person) => ({ id: person.id, displayName: person.display_name })), relations.results.map((row) => ({ subjectPersonId: row.subject_person_id, relatedPersonId: row.related_person_id, relationKind: row.relation_kind })));
+    const center = await context.env.DB.prepare("SELECT id, display_name FROM person WHERE id = ?").bind(personId).first<{ id: string; display_name: string }>();
+    if (!center) return context.json({ code: "person_not_found" }, 404);
+    const maximumNodes = 60, maximumRelations = 120;
+    const nodes = new Map([[personId, 0]]), relationRows = new Map<string, { subjectPersonId: string; relatedPersonId: string; relationKind: "biological_parent" | "adoptive_parent" | "successor_parent" | "spouse" }>();
+    let frontier = [personId], truncated = false;
+    for (let distance = 0; distance < radius && frontier.length > 0; distance += 1) {
+      const placeholders = frontier.map(() => "?").join(",");
+      const availableRows = maximumRelations - relationRows.size + 1;
+      const rows = await context.env.DB.prepare(
+        `SELECT id, subject_person_id, related_person_id, relation_kind FROM canonical_relation_snapshot
+         WHERE revision_id = ? AND (subject_person_id IN (${placeholders}) OR related_person_id IN (${placeholders}))
+         ORDER BY id LIMIT ?`,
+      ).bind(pointer.revision_id, ...frontier, ...frontier, availableRows).all<{ id: string; subject_person_id: string; related_person_id: string; relation_kind: "biological_parent" | "adoptive_parent" | "successor_parent" | "spouse" }>();
+      if (rows.results.length === availableRows) truncated = true;
+      const next = new Set<string>();
+      for (const row of rows.results) {
+        if (relationRows.has(row.id)) continue;
+        if (relationRows.size >= maximumRelations) { truncated = true; continue; }
+        const additions = [row.subject_person_id, row.related_person_id].filter((id) => !nodes.has(id));
+        if (nodes.size + additions.length > maximumNodes) { truncated = true; continue; }
+        relationRows.set(row.id, { subjectPersonId: row.subject_person_id, relatedPersonId: row.related_person_id, relationKind: row.relation_kind });
+        for (const id of additions) { nodes.set(id, distance + 1); next.add(id); }
+      }
+      frontier = [...next].sort();
+      if (truncated) break;
+    }
+    const ids = [...nodes.keys()];
+    const people = await context.env.DB.prepare(`SELECT id, display_name FROM person WHERE id IN (${ids.map(() => "?").join(",")}) ORDER BY id`).bind(...ids).all<{ id: string; display_name: string }>();
+    if (people.results.length !== ids.length) return context.json({ code: "kinship_snapshot_inconsistent" }, 409);
+    const graph = boundedKinship(personId, people.results.map((person) => ({ id: person.id, displayName: person.display_name })), [...relationRows.values()], radius, { nodes: maximumNodes, relations: maximumRelations });
+    truncated ||= graph.truncated;
     return context.json({ view: "kinship", lineageId: context.req.param("lineageId"), revisionId: pointer.revision_id, pointerVersion: pointer.version, ...graph });
   });
 

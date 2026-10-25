@@ -392,11 +392,29 @@ assert.equal(hangingChart.body.layout.connectors.length, 1);
 const kinship = await request(`/api/admin/lineages/${lineageId}/kinship?personId=${secondPerson.body.person.id}`, { cookie: adminCookie });
 expectStatus(kinship, 200);
 assert.equal(kinship.body.view, "kinship");
+assert.equal(kinship.body.radius, 1);
+assert.equal(kinship.body.truncated, false);
 assert.deepEqual(kinship.body.relations, [
   { subjectPersonId: secondPerson.body.person.id, relatedPersonId: personResult.body.person.id, relationKind: "biological_parent" },
   { subjectPersonId: secondPerson.body.person.id, relatedPersonId: successorParent.body.person.id, relationKind: "successor_parent" },
   { subjectPersonId: secondPerson.body.person.id, relatedPersonId: spouse.body.person.id, relationKind: "spouse" },
 ]);
+const expandedKinship = await request(`/api/admin/lineages/${lineageId}/kinship?personId=${secondPerson.body.person.id}&radius=2`, { cookie: adminCookie });
+expectStatus(expandedKinship, 200);
+assert.equal(expandedKinship.body.radius, 2);
+assert.equal(expandedKinship.body.nodes.find((node) => node.id === secondPerson.body.person.id)?.distance, 0);
+const invalidRadius = await request(`/api/admin/lineages/${lineageId}/kinship?personId=${secondPerson.body.person.id}&radius=3`, { cookie: adminCookie });
+expectStatus(invalidRadius, 400);
+assert.equal(invalidRadius.body.code, "validation_failed");
+const reversedParentProposal = await request(`/api/admin/lineages/${lineageId}/change-requests`, {
+  method: "POST", cookie: adminCookie, csrf: adminCsrf,
+  body: { reason: "反向父母关系必须在预览中报错", items: [{ operation: "relation_add", subjectPersonId: personResult.body.person.id, relatedPersonId: secondPerson.body.person.id, relationKind: "biological_parent" }] },
+});
+expectStatus(reversedParentProposal, 201);
+const reversedParentPreview = await request(`/api/admin/change-requests/${reversedParentProposal.body.changeRequest.id}/preview`, { cookie: adminCookie });
+expectStatus(reversedParentPreview, 200);
+assert.equal(reversedParentPreview.body.preview.valid, false);
+assert.equal(reversedParentPreview.body.preview.issues.some((issue) => issue.code === "canonical_parent_direction_conflicts_succession"), true);
 const rollback = await request(`/api/admin/lineages/${lineageId}/revisions/rollback`, {
   method: "POST",
   cookie: adminCookie,

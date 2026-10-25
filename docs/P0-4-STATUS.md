@@ -40,6 +40,7 @@
 
 - `npm run lint`、`npm run check`、`npm run build` 通过：24 个测试文件、57 项测试。
 - `LOCAL_AUTH_TEST_PORT=18982 npm run test:local-auth` 通过：隔离 local Worker/D1 验证既有历史投影/差异/关系语义链路仍兼容；并固定验证两跳 `rootRecordId` 边界、100 节点与 200 主张截断，以及响应不包含范围外关系端点。为覆盖实际 D1 参数上限，历史读取的关系和记录加载均按小批量合并排序；未使用 `--remote`。
+- 第 26 项已完成：历史图节点显示来源记录 ID，并可通过鼠标、Enter 或空格直接选入既有 `rootRecordId` 输入；仍须由管理员明确点击“读取历史差异”才重新请求，避免自动连续加载或扩大范围。`npm run lint`、`npm run check`、`npm run build` 均通过；未调用远端资源。
 2. 已完成切片 D：管理员可读取当前 published revision 的亲属图 `radius=1|2`，服务端按层查询并限制在 60 节点/120 关系；超过限制只返回 `truncated`，不泄露边界外信息。布局按距中心分层且画布高度随节点数增长。管理员以外继续被拒绝。关系预览会拒绝与同一候选承谱边方向相反的父母关系，反向配偶重复会被合并；无法从既有 UUID 判断的独立亲子方向仍需审核，详见 [设计审查](/home/mio/projects/cloud-genealogy/docs/P0-4-KINSHIP-EXPANSION-DESIGN-REVIEW.md)。
 
 ## 切片 D 实际验证

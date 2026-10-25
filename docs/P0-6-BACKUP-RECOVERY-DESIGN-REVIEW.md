@@ -1,6 +1,6 @@
 # P0-6 备份与恢复设计审查
 
-状态：设计审查完成；离线包与 local 恢复基线已实现，remote 实施待独立授权。最后更新：2026-10-25。
+状态：设计审查完成；离线包、local 恢复基线与 D1 data-only 导入准备工具已实现，remote 实施待独立授权。最后更新：2026-10-25。
 
 ## 1. 本次审查结论
 
@@ -62,6 +62,8 @@ D1 与 R2 不提供跨服务原子快照。仅“先导出 SQL、再下载整个
 不推荐把备份循环实现在 Worker/Cron：它会受免费计划的 CPU、子请求、Cron 数量和执行限制影响，也会把高权限读取凭据置于运行时。推荐由管理员受控的本地命令执行 D1 导出与 R2 S3 拉取；未来如采用 CI，必须先单独确认最小权限 token、加密密钥托管、日志脱敏和保管责任。
 
 local 基线现已提供完整归档的加密与认证解密工具；算法、失败行为和非门限的双人操作流程见 `P0-6-KEY-RECOVERY-DESIGN.md`。这不改变“真实口令、remote token 与 remote 恢复须单独授权”的边界。
+
+Wrangler 的完整 D1 导出包含内部 `d1_migrations`，因此不能直接写入已经完成迁移的目标。`scripts/prepare-d1-restore-data.mjs` 只接受带这些内部记录的 Wrangler data-only 导出：删除内部记录，并将 `role`、`permission`、`role_permission` 三个固定种子表改成 `INSERT OR IGNORE`。它只适用于“先应用全部 migrations 的空目标”，并由 local 演练覆盖；不是通用 SQL 清洗或业务数据合并工具。
 
 ## 5. 恢复演练与正式恢复
 

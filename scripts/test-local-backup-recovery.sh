@@ -8,6 +8,7 @@ cd "$project_root"
 fixture_root="$(mktemp -d)"
 target_state="$fixture_root/target-state"
 package_dir="$fixture_root/backup-package"
+prepared_state="$fixture_root/prepared-target-state"
 archive_file="$fixture_root/backup-package.tar.gz"
 encrypted_file="$fixture_root/backup-package.tar.gz.cgbk"
 decrypted_file="$fixture_root/backup-package-restored.tar.gz"
@@ -65,6 +66,16 @@ node scripts/backup-package.mjs create \
   --git-commit 0000000 \
   --counts-file "$fixture_root/counts.json" >/dev/null
 node scripts/backup-package.mjs verify --package "$package_dir" --migration-dir "$project_root/migrations" >/dev/null
+
+(
+  cd "$fixture_root"
+  "$project_root/node_modules/.bin/wrangler" d1 export DB --local --no-schema --output "$fixture_root/data-only.sql" >/dev/null
+)
+node "$project_root/scripts/prepare-d1-restore-data.mjs" --input "$fixture_root/data-only.sql" --output "$fixture_root/prepared-data.sql" >/dev/null
+npx wrangler d1 migrations apply DB --local --persist-to "$prepared_state" >/dev/null
+npx wrangler d1 execute DB --local --persist-to "$prepared_state" --file "$fixture_root/prepared-data.sql" >/dev/null
+npx wrangler d1 execute DB --local --persist-to "$prepared_state" --command "SELECT COUNT(*) AS people FROM person WHERE id = 'backup-fixture-person';" > "$fixture_root/prepared-result.json"
+rg -q '"people":\s*1' "$fixture_root/prepared-result.json"
 
 printf 'disposable-local-recovery-passphrase\n' > "$passphrase_file"
 chmod 600 "$passphrase_file"

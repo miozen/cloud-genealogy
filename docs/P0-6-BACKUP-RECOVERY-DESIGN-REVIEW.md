@@ -1,10 +1,10 @@
 # P0-6 备份与恢复设计审查
 
-状态：设计审查完成，实施待确认。最后更新：2026-10-25。
+状态：设计审查完成；离线包与 local 恢复基线已实现，remote 实施待独立授权。最后更新：2026-10-25。
 
 ## 1. 本次审查结论
 
-P0-6 是上线阻断项，但当前仓库**尚未具备**可对 remote D1/R2 执行备份或恢复的功能：没有备份脚本、`backup_record` 物理表、媒体元数据表、R2 业务读写代码或 CI 工作流。`wrangler.jsonc` 仅声明 local、preview、production 的 D1/R2 binding；其中 production 资源 ID 仍为占位值。故本文件只确认实施边界，不能作为已完成备份、演练或生产可恢复的证明。
+P0-6 是上线阻断项。当前已具备仅面向本地落盘包的 `scripts/backup-package.mjs` 与 `npm run test:local-backup-recovery`：它们验证 D1 SQL、R2 对象、SHA-256 manifest、迁移基线和隔离 local D1/R2 恢复，但**不能**对 remote D1/R2 执行备份或恢复。仓库仍没有 `backup_record` 物理表、媒体元数据表、R2 业务读写代码或 CI 工作流。`wrangler.jsonc` 仅声明 local、preview、production 的 D1/R2 binding；其中 production 资源 ID 仍为占位值。因此不能将本地演练描述为已完成远程备份、远程演练或生产可恢复证明。
 
 已确认的技术事实：
 
@@ -93,4 +93,4 @@ D1 与 R2 不提供跨服务原子快照。仅“先导出 SQL、再下载整个
 
 ## 8. 下一步
 
-在确认上表决策前，不创建高权限 token、不操作 preview/production D1/R2、不部署，也不实现恢复写入。确认后应先完成“离线包格式 + local fixture + 只读预检”切片，再由用户单独授权测试环境恢复演练；正式恢复能力和任何生产切换继续保持独立审批。
+本地“离线包格式 + local fixture + 只读预检”切片已完成。后续在确认加密/密钥保管和远程执行细节前，不创建高权限 token、不操作 preview/production D1/R2、不部署，也不实现 remote 恢复写入；测试环境恢复演练、正式恢复能力和任何生产切换继续保持独立审批。

@@ -11,13 +11,14 @@
 - 新增 `npm run test:local-backup-recovery`：在一次性临时目录中使用 Wrangler local D1/R2 完成导出、对象取回、manifest 生成/预检、全新目标恢复和对象内容比对；篡改对象后预检会失败，恢复命令不会执行。
 - 新增 `scripts/backup-counts.mjs` 与 `npm run collect:local-backup-counts -- ...`：它只接受显式 local Wrangler 可执行文件、local 工作目录和输出文件，实际查询账号/权限、人物、谱书、来源、revision、关系、房支和审计共 16 项 D1 计数；`backup-package.mjs --counts-file` 只接受该采集器产生的计数文件。
 - local R2 演练对象会在 manifest 中标记为 `local_fixture`。非 local 包如包含 R2 对象，预检要求每个对象提供 `mediaAssetId`；当前尚无媒体元数据表，故工具会拒绝把测试夹具误用为远程媒体备份。
+- 新增 `scripts/backup-crypt.mjs` 与 `npm run crypt:backup -- ...`：对完整离线归档进行 AES-256-GCM 加密和认证解密，使用随机 salt/IV 与 Node 内建 scrypt；拒绝覆盖输出，认证失败不留下输出文件。真实密钥保管流程见 `P0-6-KEY-RECOVERY-DESIGN.md`。
 
 ## 当前风险与未完成项
 
 - 本地基线采用管理员受控命令、至少保留三个成功点、恢复到新资源而非覆盖的推荐默认值；真正 remote 执行仍须在加密与密钥保管责任、保留节奏、写冻结体验及资源切换细节确认后另行授权。
 - 生产资源仍未创建/使用；production D1 ID 为占位值。任何远程 D1/R2 导出、测试恢复、资源创建、Secret 写入或部署都需要独立明确授权。
 - D1 与 R2 不具备跨服务原子快照；媒体上线前必须实现可审计写冻结及以媒体元数据为准的对象清单，不能依赖全桶盲扫。
-- 当前只完成 local D1/R2 夹具演练；尚无 remote 测试环境演练、真实媒体元数据引用校验、加密包恢复或灾难切换测试。
+- 当前只完成 local D1/R2 夹具演练；尚无 remote 测试环境演练、真实媒体元数据引用校验或灾难切换测试。
 
 ## 本切片验证
 
@@ -25,10 +26,10 @@
 |---|---|
 | 本地源码、迁移、运行配置与脚本审计 | 已执行；确认没有既有备份/恢复实现或 CI 工作流。 |
 | Cloudflare 官方文档复核 | 已执行；D1 SQL 导出/导入、R2 S3 访问及 Workers 限制与设计一致。 |
-| `npm run test:local-backup-recovery` | 通过：仅临时 local D1/R2，验证实际业务计数采集、导出、只读预检、隔离恢复、对象内容比对及篡改拦截。 |
+| `npm run test:local-backup-recovery` | 通过：仅临时 local D1/R2，验证业务计数采集、导出、只读预检、加密认证解密、错误口令/篡改拦截、隔离恢复及对象内容比对。 |
 | `npm run lint`、`npm run check`、`npm run build` | 通过：23 个测试文件、53 项测试；生产构建完成。 |
 | remote D1/R2、部署或恢复写入 | 未执行。 |
 
 ## 下一步（需确认后）
 
-下一切片应设计加密包与密钥恢复演练，并为 P2 媒体模型确认 `media_asset` 的稳定 ID、对象键、哈希、大小、MIME 与 retired 状态；仍不连接 remote。完成后，才单独申请测试环境恢复演练授权。
+下一切片应形成不含秘密的管理员备份/恢复操作清单，并由用户确认真实密钥保管责任、归档保留周期与测试环境恢复窗口；仍不连接 remote。完成后，才单独申请测试环境恢复演练授权。

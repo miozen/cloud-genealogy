@@ -8,8 +8,14 @@ cd "$project_root"
 fixture_root="$(mktemp -d)"
 target_state="$fixture_root/target-state"
 package_dir="$fixture_root/backup-package"
+archive_file="$fixture_root/backup-package.tar.gz"
+encrypted_file="$fixture_root/backup-package.tar.gz.cgbk"
+decrypted_file="$fixture_root/backup-package-restored.tar.gz"
+decrypted_dir="$fixture_root/decrypted"
 source_media="$fixture_root/source-media.txt"
 restored_media="$fixture_root/restored-media.txt"
+passphrase_file="$fixture_root/recovery-passphrase"
+wrong_passphrase_file="$fixture_root/wrong-recovery-passphrase"
 export XDG_CONFIG_HOME="$fixture_root/config"
 export WRANGLER_SEND_METRICS=false
 
@@ -54,6 +60,24 @@ node scripts/backup-package.mjs create \
   --counts-file "$fixture_root/counts.json" >/dev/null
 node scripts/backup-package.mjs verify --package "$package_dir" --migration-dir "$project_root/migrations" >/dev/null
 
+printf 'disposable-local-recovery-passphrase\n' > "$passphrase_file"
+chmod 600 "$passphrase_file"
+tar --create --gzip --file "$archive_file" --directory "$fixture_root" backup-package
+node "$project_root/scripts/backup-crypt.mjs" encrypt --input "$archive_file" --output "$encrypted_file" --passphrase-file "$passphrase_file" >/dev/null
+node "$project_root/scripts/backup-crypt.mjs" decrypt --input "$encrypted_file" --output "$decrypted_file" --passphrase-file "$passphrase_file" >/dev/null
+cmp -- "$archive_file" "$decrypted_file"
+mkdir -p "$decrypted_dir"
+tar --extract --gzip --file "$decrypted_file" --directory "$decrypted_dir"
+node "$project_root/scripts/backup-package.mjs" verify --package "$decrypted_dir/backup-package" --migration-dir "$project_root/migrations" >/dev/null
+
+printf 'different-disposable-recovery-passphrase\n' > "$wrong_passphrase_file"
+chmod 600 "$wrong_passphrase_file"
+if node "$project_root/scripts/backup-crypt.mjs" decrypt --input "$encrypted_file" --output "$fixture_root/wrong-passphrase.tar.gz" --passphrase-file "$wrong_passphrase_file" >/dev/null 2>&1; then
+  echo "错误口令通过了解密认证。" >&2
+  exit 1
+fi
+test ! -e "$fixture_root/wrong-passphrase.tar.gz"
+
 npx wrangler d1 execute DB --local --persist-to "$target_state" --file "$package_dir/d1/schema-and-data.sql" >/dev/null
 npx wrangler d1 execute DB --local --persist-to "$target_state" --command "
   SELECT COUNT(*) AS people FROM person WHERE id = 'backup-fixture-person';
@@ -61,7 +85,7 @@ npx wrangler d1 execute DB --local --persist-to "$target_state" --command "
 rg -q '"people":\s*1' "$fixture_root/restore-result.json"
 
 npx wrangler r2 object put cloud-genealogy-local/media/fixture.txt --local --persist-to "$target_state" --file "$package_dir/r2/media/fixture.txt" >/dev/null
-npx wrangler r2 object get cloud-genealogy-local/media/fixture.txt --local --persist-to "$target_state" --file "$restored_media" >/dev/null
+npx wrangler r2 object get cloud-genealogy-local/media/fixture.txt --local --persist-to "$target_state" --file "$restored_media"
 cmp -- "$source_media" "$restored_media"
 
 # A changed payload must fail before any target restore command is allowed.
@@ -71,4 +95,11 @@ if node scripts/backup-package.mjs verify --package "$package_dir" --migration-d
   exit 1
 fi
 
-echo "本地 D1/R2 备份包预检与隔离恢复演练通过。"
+printf '\001' | dd of="$encrypted_file" bs=1 seek=24 conv=notrunc status=none
+if node "$project_root/scripts/backup-crypt.mjs" decrypt --input "$encrypted_file" --output "$fixture_root/tampered.tar.gz" --passphrase-file "$passphrase_file" >/dev/null 2>&1; then
+  echo "被篡改的加密备份包通过了解密认证。" >&2
+  exit 1
+fi
+test ! -e "$fixture_root/tampered.tar.gz"
+
+echo "本地 D1/R2 备份包预检、加密认证与隔离恢复演练通过。"

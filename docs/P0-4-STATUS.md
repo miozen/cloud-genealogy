@@ -34,7 +34,7 @@
 
 ## 后续切片
 
-1. 历史视图仍是来源记录网格；如需更适合谱书阅读的布局，应在不混入统一世系边的前提下另行设计并验证。
+1. 已完成 [历史谱书阅读布局设计审查](/home/mio/projects/cloud-genealogy/docs/P0-4-HISTORICAL-READING-LAYOUT-DESIGN-REVIEW.md)：当前网格安全但不表达世代，推荐来源 ID 驱动的 SCC 冲突组分层、独立配偶线、未连通记录区与 100 节点/200 关系的服务端上限。API、隐私边界与验收数据仍需项目负责人确认；未确认前不实施。
 2. 已完成切片 D：管理员可读取当前 published revision 的亲属图 `radius=1|2`，服务端按层查询并限制在 60 节点/120 关系；超过限制只返回 `truncated`，不泄露边界外信息。布局按距中心分层且画布高度随节点数增长。管理员以外继续被拒绝。关系预览会拒绝与同一候选承谱边方向相反的父母关系，反向配偶重复会被合并；无法从既有 UUID 判断的独立亲子方向仍需审核，详见 [设计审查](/home/mio/projects/cloud-genealogy/docs/P0-4-KINSHIP-EXPANSION-DESIGN-REVIEW.md)。
 
 ## 切片 D 实际验证

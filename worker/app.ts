@@ -282,6 +282,12 @@ export function createApp() {
     });
   });
 
+  app.get("/api/admin/media-assets/upload-availability", requireAuthentication, (context) => {
+    const auth = context.get("auth")!;
+    if (!hasPermission(auth.roles, "system.manage")) return context.json({ code: "forbidden" }, 403);
+    return context.json({ available: getR2PresignConfiguration(context.env) !== null });
+  });
+
   app.post("/api/admin/media-assets/upload-intents", requireAuthentication, async (context) => {
     const auth = context.get("auth")!;
     if (!hasPermission(auth.roles, "system.manage")) return context.json({ code: "forbidden" }, 403);

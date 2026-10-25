@@ -172,6 +172,10 @@ expectStatus(adminLogin, 200);
 const adminCookie = sessionCookie(adminLogin);
 const adminCsrf = adminLogin.body.csrfToken;
 
+const mediaUploadAvailability = await request("/api/admin/media-assets/upload-availability", { cookie: adminCookie });
+expectStatus(mediaUploadAvailability, 200);
+assert.equal(mediaUploadAvailability.body.available, true);
+
 const mediaIntent = await request("/api/admin/media-assets/upload-intents", {
   method: "POST", cookie: adminCookie, csrf: adminCsrf,
   body: { sha256: "a".repeat(64), byteSize: 128, mimeType: "image/jpeg", originalFilename: "本地媒体.jpg", visibility: "MEMBER" },

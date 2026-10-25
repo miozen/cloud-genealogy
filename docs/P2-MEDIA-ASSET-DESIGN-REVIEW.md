@@ -135,3 +135,9 @@ Cloudflare 的当前约束也支持“元数据优先”：D1 单查询最多 10
 - 管理员创建上传意图 API 已接入签名器。仅当运行环境同时提供 R2 account ID、bucket、access key ID 与 secret access key 时，才会先生成上传 URL、再原子写入 `pending_upload` 资产和审计记录；响应只含 URL、到期时间与浏览器必须带上的签名请求头，绝不含访问密钥。
 - 缺少任一配置或配置不合法时，API 返回 `503 media_direct_upload_unavailable`，且不会写入待上传资产，避免生成无法使用或无法完成的意图。四项配置仍不写入 `wrangler.jsonc`；实际环境的 access/secret 必须以 Worker Secret 提供。
 - `test:local-auth` 只对一次性隔离 local Worker 注入无效示例签名配置，验证受权意图响应含受限 URL 和必需请求头；它没有访问 S3 API、没有上传对象，随后仍验证缺对象完成被拒绝。
+
+## 13. 第 33 项实现状态
+
+- 管理员页面新增最小图片上传入口：先读取受权的直传可用性；未配置时按钮禁用并明确提示，不创建意图。已配置时仅接受 JPEG/PNG/WebP，调用同源 API 创建意图，再用 presigned URL 的必需签名头直接 `PUT`，最后调用同源完成校验。
+- 浏览器直传不复用同源 API 的 Cookie/CSRF 请求封装；R2 `PUT` 仅含签名器要求的 MIME 和 checksum 头。客户端错误不会把资产描述为已激活，最终状态仍以完成 API 的 R2 `HEAD` 校验为准。
+- 增加可注入 fetch 的单元测试，验证未配置时不会发出 R2 请求；local Worker 集成测试验证管理员能读取可用性。尚未对真实 R2 直传、CORS 或 remote Worker 进行验证。

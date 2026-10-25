@@ -117,3 +117,9 @@ Cloudflare 的当前约束也支持“元数据优先”：D1 单查询最多 10
 - `0016_media_asset_inventory.sql` 已实现 `media_asset` 与 `person_media`。资产状态、对象键、哈希、大小、MIME、可见性、保留期和人物关联均由 D1 约束；没有上传 API、R2 写入或远端配置。
 - `worker/media/media-asset.ts` 是不依赖 D1/R2 的上传意图、完成校验和退役状态规则；覆盖随机对象键、5 分钟失效、10 MiB、MIME/哈希/文件名校验、R2 元数据不符转失败及最后引用解除后 30 天保留。
 - 已实际通过 `npm run lint`、`npm run check`（25 个测试文件、61 项测试）、`npm run build` 与 `npm run test:local-core-model`。后者仅运行隔离 local Worker/D1；本项未调用 R2、preview 或 production。
+
+## 10. 第 30 项实现状态
+
+- 新增管理员上传意图 API、完成校验 API 和 `/api/media-assets/:assetId` 私有读取 API。创建和完成均写审计；完成仅接受当前上传者的 `pending_upload` 意图，并以 R2 `head` 的大小、MIME 和 SHA-256 对照 D1 意图。
+- 本项不签发真实 presigned URL，也不配置 R2 S3 Secret；因此它不宣称已具备浏览器直传成功路径。完成校验会安全地将缺对象、过期或元数据不匹配的意图标记为 `failed`。
+- `npm run test:local-auth` 已在隔离 local Worker/D1/R2 实际验证：管理员创建意图、缺失 R2 对象被拒绝且不可读取、成员资产的匿名读取被拒绝、管理员经 Worker 读取 local R2 对象成功。未使用 `--remote`。

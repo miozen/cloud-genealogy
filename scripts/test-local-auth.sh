@@ -22,6 +22,8 @@ rm -rf "$state_dir"
 
 clean_test_rows() {
   npx wrangler d1 execute DB --local --persist-to "$state_dir" --command "
+    DELETE FROM person_media;
+    DELETE FROM media_asset;
     DELETE FROM lineage_published_pointer;
     DELETE FROM lineage_succession_snapshot;
     DELETE FROM canonical_relation_snapshot;
@@ -165,6 +167,24 @@ const adminLogin = await request("/api/auth/login", {
 expectStatus(adminLogin, 200);
 const adminCookie = sessionCookie(adminLogin);
 const adminCsrf = adminLogin.body.csrfToken;
+
+const mediaIntent = await request("/api/admin/media-assets/upload-intents", {
+  method: "POST", cookie: adminCookie, csrf: adminCsrf,
+  body: { sha256: "a".repeat(64), byteSize: 128, mimeType: "image/jpeg", originalFilename: "本地媒体.jpg", visibility: "MEMBER" },
+});
+expectStatus(mediaIntent, 201);
+assert.match(mediaIntent.body.mediaAsset.objectKey, /^media\/[0-9a-f-]{36}$/);
+const missingMediaCompletion = await request(`/api/admin/media-assets/${mediaIntent.body.mediaAsset.id}/complete`, { method: "POST", cookie: adminCookie, csrf: adminCsrf });
+expectStatus(missingMediaCompletion, 409);
+assert.equal(missingMediaCompletion.body.code, "media_upload_verification_failed");
+expectStatus(await request(`/api/media-assets/${mediaIntent.body.mediaAsset.id}`, { cookie: adminCookie }), 404);
+execFileSync("npx", ["wrangler", "r2", "object", "put", "cloud-genealogy-local/media/local-read-fixture", "--local", "--persist-to", ".wrangler/local-auth-integration", "--content-type", "image/jpeg", "--pipe"], { input: "local media fixture", stdio: "pipe" });
+execFileSync("npx", ["wrangler", "d1", "execute", "DB", "--local", "--persist-to", ".wrangler/local-auth-integration", "--command", "INSERT INTO media_asset (id, object_key, sha256, byte_size, mime_type, original_filename, visibility, state, created_by_account_id, created_at, upload_expires_at, finalized_at) SELECT 'local-media-read', 'media/local-read-fixture', 'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa', 19, 'image/jpeg', 'local.jpg', 'MEMBER', 'active', id, '2026-10-25T00:00:00.000Z', '2026-10-25T00:05:00.000Z', '2026-10-25T00:00:00.000Z' FROM account WHERE username = 'local.admin';"], { stdio: "pipe" });
+expectStatus(await request("/api/media-assets/local-media-read"), 401);
+const privateMediaRead = await fetch(`${baseUrl}/api/media-assets/local-media-read`, { headers: { cookie: adminCookie } });
+assert.equal(privateMediaRead.status, 200);
+assert.equal(privateMediaRead.headers.get("content-type"), "image/jpeg");
+assert.equal(await privateMediaRead.text(), "local media fixture");
 
 const pending = await request("/api/admin/accounts/pending", { cookie: adminCookie });
 expectStatus(pending, 200);

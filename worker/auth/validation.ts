@@ -148,6 +148,13 @@ export const sourceRelationSemanticRuleInput = z.object({
   }
 });
 const visibility = z.enum(["PUBLIC", "MEMBER", "ADMIN"]);
+export const mediaUploadIntentInput = z.object({
+  sha256: z.string().regex(/^[0-9a-f]{64}$/u, "SHA-256 必须为小写十六进制摘要。"),
+  byteSize: z.number().int().min(1).max(10 * 1024 * 1024),
+  mimeType: z.enum(["image/jpeg", "image/png", "image/webp"]),
+  originalFilename: z.string().trim().min(1).max(255).refine((value) => ![...value].some((character) => { const code = character.charCodeAt(0); return code <= 31 || code === 127; }), "文件名不能包含控制字符。"),
+  visibility,
+});
 export const personNameInput = z.object({
   nameText: z.string().trim().min(1, "姓名不能为空。").max(80, "姓名最长 80 个字符。"),
   nameKind: z.enum(["genealogy", "courtesy", "art_name", "alias", "source_text"]),

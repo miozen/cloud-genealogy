@@ -1,6 +1,6 @@
 import { Hono, type Context } from "hono";
 import { deleteCookie, getCookie, setCookie } from "hono/cookie";
-import { canProposeForPeopleWithBranchMembership, hasPermission, type AccountScope } from "./auth/authorization";
+import { canProposeForPeopleWithBranchMembership, canReadVisibility, hasPermission, type AccountScope } from "./auth/authorization";
 import { consumeLoginRateLimit } from "./auth/login-rate-limit-store";
 import { createOpaqueToken, hashOpaqueToken } from "./auth/opaque-token";
 import { hashPassword, verifyPassword } from "./auth/password";
@@ -35,8 +35,10 @@ import {
   rejectChangeRequestInput,
   publishChangeRequestInput,
   rollbackChangeRequestInput,
+  mediaUploadIntentInput,
   validationMessage,
 } from "./auth/validation";
+import { createMediaUploadIntent, finalizeMediaUpload } from "./media/media-asset";
 import { previewSuccessionRevision } from "./lineage/revision-preview";
 import { publishSuccessionRevision, rollbackSuccessionRevision } from "./lineage/revision-publish";
 import { buildPublishedHangingChart } from "./lineage/hanging-chart-service";
@@ -86,10 +88,12 @@ interface StructureRow { branch_id: string; parent_branch_id: string | null; nam
 interface StructureChangeItemRow { operation: BranchStructureChangeItemCandidate["operation"]; branch_id: string; parent_branch_id: string | null; name: string; branch_kind: BranchStructureCandidate["branchKind"] | null; }
 interface BranchMembershipSnapshotRow extends MembershipRow { display_name: string; }
 interface BranchScopeCountRow { branch_id: string; account_scope_count: number; }
+interface MediaAssetRow { id: string; object_key: string; sha256: string; byte_size: number; mime_type: "image/jpeg" | "image/png" | "image/webp"; original_filename: string; visibility: "PUBLIC" | "MEMBER" | "ADMIN"; state: "pending_upload" | "active" | "failed" | "retired"; created_by_account_id: string; created_at: string; upload_expires_at: string; }
 
 function now(): string {
   return new Date().toISOString();
 }
+function toHex(value: ArrayBuffer): string { return [...new Uint8Array(value)].map((byte) => byte.toString(16).padStart(2, "0")).join(""); }
 
 function cookieOptions(context: { env: AppEnv["Bindings"] }) {
   return {
@@ -275,6 +279,46 @@ export function createApp() {
         roles: auth.roles,
       },
     });
+  });
+
+  app.post("/api/admin/media-assets/upload-intents", requireAuthentication, async (context) => {
+    const auth = context.get("auth")!;
+    if (!hasPermission(auth.roles, "system.manage")) return context.json({ code: "forbidden" }, 403);
+    const parsed = mediaUploadIntentInput.safeParse(await context.req.json().catch(() => null));
+    if (!parsed.success) return context.json({ code: "validation_failed", message: validationMessage(parsed) }, 400);
+    const intent = createMediaUploadIntent({ id: crypto.randomUUID(), createdByAccountId: auth.accountId, ...parsed.data }, new Date());
+    await context.env.DB.batch([
+      context.env.DB.prepare("INSERT INTO media_asset (id, object_key, sha256, byte_size, mime_type, original_filename, visibility, state, created_by_account_id, created_at, upload_expires_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)").bind(intent.id, intent.objectKey, intent.sha256, intent.byteSize, intent.mimeType, intent.originalFilename, intent.visibility, intent.state, intent.createdByAccountId, intent.createdAt, intent.uploadExpiresAt),
+      context.env.DB.prepare("INSERT INTO audit_log (id, actor_account_id, action, object_type, object_id, metadata_json, created_at) VALUES (?, ?, ?, ?, ?, ?, ?)").bind(crypto.randomUUID(), auth.accountId, "media.upload_intent_created", "media_asset", intent.id, JSON.stringify({ mimeType: intent.mimeType, byteSize: intent.byteSize, visibility: intent.visibility }), intent.createdAt),
+    ]);
+    return context.json({ mediaAsset: intent }, 201);
+  });
+
+  app.post("/api/admin/media-assets/:assetId/complete", requireAuthentication, async (context) => {
+    const auth = context.get("auth")!;
+    if (!hasPermission(auth.roles, "system.manage")) return context.json({ code: "forbidden" }, 403);
+    const asset = await context.env.DB.prepare("SELECT id, object_key, sha256, byte_size, mime_type, original_filename, visibility, state, created_by_account_id, created_at, upload_expires_at FROM media_asset WHERE id = ? AND created_by_account_id = ? AND state = 'pending_upload'").bind(context.req.param("assetId"), auth.accountId).first<MediaAssetRow>();
+    if (!asset) return context.json({ code: "media_upload_intent_not_found" }, 404);
+    const object = await context.env.MEDIA.head(asset.object_key);
+    const uploaded = object ? { sha256: object.checksums.sha256 ? toHex(object.checksums.sha256) : "", byteSize: object.size, mimeType: object.httpMetadata?.contentType ?? "", etag: object.etag } : null;
+    const finalized = finalizeMediaUpload({ id: asset.id, objectKey: asset.object_key, sha256: asset.sha256, byteSize: asset.byte_size, mimeType: asset.mime_type, originalFilename: asset.original_filename, visibility: asset.visibility, state: "pending_upload", createdByAccountId: asset.created_by_account_id, createdAt: asset.created_at, uploadExpiresAt: asset.upload_expires_at }, uploaded, new Date());
+    await context.env.DB.batch([
+      context.env.DB.prepare("UPDATE media_asset SET state = ?, finalized_at = ?, failed_at = ?, cleanup_after = ?, r2_etag = ? WHERE id = ? AND state = 'pending_upload'").bind(finalized.state, finalized.finalizedAt, finalized.failedAt, finalized.cleanupAfter, finalized.r2Etag, asset.id),
+      context.env.DB.prepare("INSERT INTO audit_log (id, actor_account_id, action, object_type, object_id, metadata_json, created_at) VALUES (?, ?, ?, ?, ?, ?, ?)").bind(crypto.randomUUID(), auth.accountId, finalized.state === "active" ? "media.upload_completed" : "media.upload_failed", "media_asset", asset.id, JSON.stringify({ objectPresent: object !== null }), now()),
+    ]);
+    if (finalized.state !== "active") return context.json({ code: "media_upload_verification_failed" }, 409);
+    return context.json({ mediaAsset: finalized });
+  });
+
+  app.get("/api/media-assets/:assetId", async (context) => {
+    const asset = await context.env.DB.prepare("SELECT id, object_key, mime_type, original_filename, visibility FROM media_asset WHERE id = ? AND state = 'active'").bind(context.req.param("assetId")).first<{ id: string; object_key: string; mime_type: string; original_filename: string; visibility: "PUBLIC" | "MEMBER" | "ADMIN" }>();
+    if (!asset) return context.json({ code: "media_asset_not_found" }, 404);
+    const auth = context.get("auth");
+    if (!auth && asset.visibility !== "PUBLIC") return context.json({ code: "authentication_required" }, 401);
+    if (auth && !canReadVisibility(auth.roles, asset.visibility)) return context.json({ code: "forbidden" }, 403);
+    const object = await context.env.MEDIA.get(asset.object_key);
+    if (!object) return context.json({ code: "media_object_missing" }, 409);
+    return new Response(object.body, { headers: { "content-type": asset.mime_type, "content-disposition": `inline; filename="${asset.original_filename.replaceAll('"', "")}"`, "x-content-type-options": "nosniff" } });
   });
 
   app.post("/api/setup/bootstrap", async (context) => {

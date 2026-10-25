@@ -13,6 +13,7 @@
 - local R2 演练对象会在 manifest 中标记为 `local_fixture`。非 local 包如包含 R2 对象，预检要求每个对象提供 `mediaAssetId`；当前尚无媒体元数据表，故工具会拒绝把测试夹具误用为远程媒体备份。
 - 新增 `scripts/backup-crypt.mjs` 与 `npm run crypt:backup -- ...`：对完整离线归档进行 AES-256-GCM 加密和认证解密，使用随机 salt/IV 与 Node 内建 scrypt；拒绝覆盖输出，认证失败不留下输出文件。真实密钥保管流程见 `P0-6-KEY-RECOVERY-DESIGN.md`。
 - 新增 `P0-6-ADMIN-RUNBOOK.md`：将 local 演练、remote 备份前置条件、恢复预检、测试环境演练和生产恢复的授权边界固化为管理员清单；不含任何真实秘密或远程资源标识。
+- 新增 `P0-6-TEST-RECOVERY-AUTHORIZATION.md`：固化测试环境演练的成功标准、一次性授权范围、禁止事项和待安全审批记录补齐的事实。
 
 ## 当前风险与未完成项
 
@@ -33,4 +34,4 @@
 
 ## 下一步（需确认后）
 
-管理员操作清单已完成。下一步需要用户确认真实密钥保管责任、加密归档保留周期与测试环境恢复窗口；确认后，才能单独申请 remote 测试环境恢复演练授权。
+已确认双人恢复确认、至少三个成功恢复点和测试环境优先的原则，并新增 `P0-6-TEST-RECOVERY-AUTHORIZATION.md`。下一步须在安全审批记录中补齐责任人身份、具体演练窗口、源包、测试资源与最小权限凭据，再由用户发出一次性 remote 测试环境执行授权。

@@ -43,6 +43,8 @@
 
 第 40 项仅加入 local 清理 run/item 模型及纯冻结/双人确认规则，恢复点标识和包哈希为必填；没有 HTTP 入口或执行能力。它不能替代 P0-6 remote 备份与恢复证明，也没有解除真实清理禁令。
 
+第 41 项仅在 local development 环境开放管理员冻结、查询和不同第二管理员确认清理 run；preview/production 会拒绝，且没有 R2/D1 删除执行路径。local 恢复点字段只用于协议演练，不得被表述为真实 remote 备份证明。
+
 ## Preview 恢复演练（2026-10-25）
 
 - 已明确授权重建唯一远程测试 D1 `cloud-genealogy-preview`；新 ID 为 `aaaacbfb-762d-41b7-a424-aaa6e69ec563`，`wrangler.jsonc` 已同步。production 未操作。

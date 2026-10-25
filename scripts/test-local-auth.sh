@@ -774,6 +774,25 @@ assert.equal(cleanupPreview.body.candidates.some((asset) => asset.id === expired
 assert.equal(cleanupPreview.body.candidates.some((asset) => asset.id === localMediaAssetId), false);
 const cleanupAuditCountAfter = JSON.parse(execFileSync("npx", ["wrangler", "d1", "execute", "DB", "--local", "--persist-to", ".wrangler/local-auth-integration", "--command", "SELECT COUNT(*) AS count FROM audit_log;", "--json"], { encoding: "utf8" }))[0].results[0].count;
 assert.equal(cleanupAuditCountAfter, cleanupAuditCountBefore);
+const cleanupRun = await request("/api/admin/media-cleanup-runs", {
+  method: "POST", cookie: adminCookie, csrf: adminCsrf,
+  body: { backupRecoveryPoint: "local-recovery-drill-2026-10-25", backupPackageSha256: "c".repeat(64) },
+});
+expectStatus(cleanupRun, 201);
+assert.equal(cleanupRun.body.cleanupRun.state, "pending_confirmation");
+assert.equal(cleanupRun.body.cleanupRun.candidateCount, 1);
+const frozenCleanupRun = await request(`/api/admin/media-cleanup-runs/${cleanupRun.body.cleanupRun.id}`, { cookie: adminCookie });
+expectStatus(frozenCleanupRun, 200);
+assert.equal(frozenCleanupRun.body.items.length, 1);
+assert.equal(frozenCleanupRun.body.items[0].media_asset_id, expiredCleanupAssetId);
+const selfCleanupConfirmation = await request(`/api/admin/media-cleanup-runs/${cleanupRun.body.cleanupRun.id}/confirm`, { method: "POST", cookie: adminCookie, csrf: adminCsrf });
+expectStatus(selfCleanupConfirmation, 409);
+assert.equal(selfCleanupConfirmation.body.code, "media_cleanup_second_confirmer_invalid");
+const confirmedCleanupRun = await request(`/api/admin/media-cleanup-runs/${cleanupRun.body.cleanupRun.id}/confirm`, { method: "POST", cookie: reviewerCookie, csrf: reviewerCsrf });
+expectStatus(confirmedCleanupRun, 200);
+assert.equal(confirmedCleanupRun.body.cleanupRun.state, "confirmed");
+const cleanupAuditActions = JSON.parse(execFileSync("npx", ["wrangler", "d1", "execute", "DB", "--local", "--persist-to", ".wrangler/local-auth-integration", "--command", `SELECT COUNT(*) AS count FROM audit_log WHERE object_id = '${cleanupRun.body.cleanupRun.id}' AND action IN ('media.cleanup_run_frozen', 'media.cleanup_run_confirmed');`, "--json"], { encoding: "utf8" }))[0].results[0].count;
+assert.equal(cleanupAuditActions, 2);
 
 const identity = await request("/api/me", { cookie: memberCookie });
 expectStatus(identity, 200);

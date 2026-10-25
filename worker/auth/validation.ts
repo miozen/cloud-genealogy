@@ -162,6 +162,10 @@ export const personMediaInput = z.object({
   caption: z.string().trim().min(1).max(1_000).refine((value) => ![...value].some((character) => { const code = character.charCodeAt(0); return code <= 31 || code === 127; }), "说明不能包含控制字符。").optional(),
 });
 export const personMediaOrderInput = z.object({ displayOrder: z.number().int().min(0).max(10_000) });
+export const mediaCleanupRunInput = z.object({
+  backupRecoveryPoint: z.string().trim().min(1).max(255),
+  backupPackageSha256: z.string().regex(/^[0-9a-f]{64}$/u, "备份包 SHA-256 必须为小写十六进制摘要。"),
+});
 export const personNameInput = z.object({
   nameText: z.string().trim().min(1, "姓名不能为空。").max(80, "姓名最长 80 个字符。"),
   nameKind: z.enum(["genealogy", "courtesy", "art_name", "alias", "source_text"]),

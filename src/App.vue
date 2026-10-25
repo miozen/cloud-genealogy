@@ -2,7 +2,7 @@
 import { computed, onMounted, ref } from "vue";
 import { chartViewBox, createChartViewport, panChartViewport } from "./chart-viewport";
 import { canSubmitBranchChange, previewRetirements as getPreviewRetirements, projectComposerBranches, type LocalStructureItem, type WorkbenchBranch } from "./branch-workbench-composer";
-import { layoutHistoricalRecords } from "./historical-record-layout";
+import { layoutHistoricalReading } from "./historical-reading-layout";
 import { layoutKinship } from "./kinship-layout";
 
 type Account = { id: string; username: string; displayName: string; roles: string[] };
@@ -16,6 +16,7 @@ type PersonDetail = { person: { id: string; displayName: string; visibility: str
 type Lineage = { id: string; name: string; succession_rule: string; published_revision_id: string | null; pointer_version: number | null };
 type Edition = { id: string; title: string; edition_label: string | null; genealogy_title: string };
 type HistoricalComparison = { projection: { nodes: Array<{ sourceRecordId: string; displayName: string | null }>; parentChildEdges: Array<{ claimId: string; parentRecordId: string; childRecordId: string }>; annotations: Array<{ claimId: string; status: string; relationKind: string; rawText: string }> }; comparison: { canonicalEdges: Array<{ status: string }>; historicalEdges: Array<{ claimId: string; status: string }> } };
+type HistoricalReading = { truncated: boolean; projection: { nodes: Array<{ sourceRecordId: string; displayName: string | null }>; parentChildEdges: Array<{ claimId: string; parentRecordId: string; childRecordId: string }>; spouseEdges: Array<{ claimId: string; leftRecordId: string; rightRecordId: string }> } };
 type Kinship = { centerPersonId: string; radius: 1 | 2; truncated: boolean; nodes: Array<{ id: string; displayName: string; distance: number }>; relations: Array<{ subjectPersonId: string; relatedPersonId: string; relationKind: string }> };
 type ChangeRequest = { id: string; lineage_id: string; state: "draft" | "pending_review" | "approved" | "rejected" | "published" | "conflicted"; reason: string; created_by_account_id: string; reviewed_by_account_id: string | null; review_note: string | null; version: number; created_at: string; discarded_at: string | null; discarded_by_account_id: string | null };
 type Reviewer = { id: string; username: string; display_name: string };
@@ -33,7 +34,7 @@ const newPerson = ref({ displayName: "", visibility: "MEMBER" as Person["visibil
 const selectedPerson = ref<Record<string, string>>({}), selectedRole = ref<Record<string, "member" | "editor" | "admin">>({});
 const lineageId = ref(""), rootPersonId = ref(""), chart = ref<HangingChart | null>(null), chartSearch = ref("");
 const chartZoom = ref(1), centeredPersonId = ref<string | null>(null), chartPersonId = ref<string | null>(null), chartPerson = ref<PersonDetail | null>(null);
-const lineages = ref<Lineage[]>([]), editions = ref<Edition[]>([]), editionId = ref(""), comparison = ref<HistoricalComparison | null>(null), newLineageName = ref("");
+const lineages = ref<Lineage[]>([]), editions = ref<Edition[]>([]), editionId = ref(""), historicalRootRecordId = ref(""), comparison = ref<HistoricalComparison | null>(null), historicalReading = ref<HistoricalReading | null>(null), newLineageName = ref("");
 const kinshipPersonId = ref(""), kinshipRadius = ref<1 | 2>(1), kinship = ref<Kinship | null>(null);
 const changeRequests = ref<ChangeRequest[]>([]), reviewers = ref<Reviewer[]>([]), reviewerAssignments = ref<ReviewerAssignment[]>([]);
 const selectedChangeRequest = ref<ChangeRequest | null>(null), changePreview = ref<ChangePreview | null>(null), reviewNote = ref("");
@@ -63,7 +64,7 @@ const chartViewport = computed(() => {
   return panChartViewport(chartBounds.value, base, chartPan.value.x, chartPan.value.y);
 });
 const chartViewBoxValue = computed(() => chartViewBox(chartViewport.value));
-const historicalLayout = computed(() => comparison.value ? layoutHistoricalRecords(comparison.value.projection.nodes, comparison.value.projection.parentChildEdges) : null);
+const historicalLayout = computed(() => historicalReading.value ? layoutHistoricalReading(historicalReading.value.projection.nodes, historicalReading.value.projection.parentChildEdges, historicalReading.value.projection.spouseEdges) : null);
 const historicalStatus = computed(() => new Map(comparison.value?.comparison.historicalEdges.map((edge) => [edge.claimId, edge.status])));
 const kinshipLayout = computed(() => kinship.value ? layoutKinship(kinship.value.centerPersonId, kinship.value.nodes, kinship.value.relations) : null);
 const composerBranches = computed(() => projectComposerBranches(branchWorkbench.value?.branches ?? [], branchComposer.value.structureItems));
@@ -154,9 +155,14 @@ async function loadHangingChart() {
 }
 async function loadHistoricalComparison() {
   if (!lineageId.value || !editionId.value) return void (notice.value = "请选择已发布世系和谱书版本。");
-  const response = await request(`/api/admin/lineages/${encodeURIComponent(lineageId.value)}/historical-comparison?editionId=${encodeURIComponent(editionId.value)}`);
+  const [response, readingResponse] = await Promise.all([
+    request(`/api/admin/lineages/${encodeURIComponent(lineageId.value)}/historical-comparison?editionId=${encodeURIComponent(editionId.value)}`),
+    request(`/api/admin/genealogy-editions/${encodeURIComponent(editionId.value)}/historical-projection${historicalRootRecordId.value.trim() ? `?rootRecordId=${encodeURIComponent(historicalRootRecordId.value.trim())}` : ""}`),
+  ]);
   if (!response.ok) return void (notice.value = await message(response));
+  if (!readingResponse.ok) return void (notice.value = await message(readingResponse));
   comparison.value = await response.json() as HistoricalComparison;
+  historicalReading.value = await readingResponse.json() as HistoricalReading;
   notice.value = "已载入统一世系与历史谱书的只读差异。";
 }
 async function loadKinship() {
@@ -341,10 +347,10 @@ onMounted(async () => { try { const response = await request("/api/health"); sta
       <section class="chart-admin">
         <h2>传统吊线图</h2><p>仅读取当前已发布世系；输入世系 ID 后载入，选择人物不会修改关系。</p>
         <form class="chart-controls" @submit.prevent="loadHangingChart"><label>世系<select v-model="lineageId" required @change="refreshWorkflowData"><option value="" disabled>请选择世系</option><option v-for="lineage in lineages" :key="lineage.id" :value="lineage.id">{{ lineage.name }}{{ lineage.published_revision_id ? "（已发布）" : "（未发布）" }}</option></select></label><label>根人物 ID（可选）<input v-model.trim="rootPersonId" placeholder="仅展示该支后代" /></label><button>载入吊线图</button></form>
-        <form class="chart-controls" @submit.prevent="loadHistoricalComparison"><label>历史谱书版本<select v-model="editionId"><option value="" disabled>请选择谱书版本</option><option v-for="edition in editions" :key="edition.id" :value="edition.id">{{ edition.genealogy_title }} · {{ edition.title }}</option></select></label><p>仅比较已确认映射和已解释的关系。</p><button>读取历史差异</button></form>
+        <form class="chart-controls" @submit.prevent="loadHistoricalComparison"><label>历史谱书版本<select v-model="editionId"><option value="" disabled>请选择谱书版本</option><option v-for="edition in editions" :key="edition.id" :value="edition.id">{{ edition.genealogy_title }} · {{ edition.title }}</option></select></label><label>来源根记录 ID（可选）<input v-model.trim="historicalRootRecordId" placeholder="仅读取两跳来源关系" /></label><button>读取历史差异</button></form>
         <form class="chart-controls" @submit.prevent="loadKinship"><label>亲属图人物 ID<input v-model.trim="kinshipPersonId" placeholder="当前发布世系中的人物" /></label><label>展开半径<select v-model.number="kinshipRadius"><option :value="1">1 跳</option><option :value="2">2 跳</option></select></label><p>仅管理员读取当前发布快照；最多 60 人、120 条关系。</p><button>载入亲属图</button></form>
         <div v-if="kinshipLayout" class="chart-canvas"><h3>人物中心亲属图（只读）</h3><p v-if="kinship?.truncated" class="notice">结果已达上限；请选择图内人物重新居中。</p><svg :viewBox="`0 0 ${kinshipLayout.width} ${kinshipLayout.height}`" aria-label="人物中心亲属图"><template v-for="edge in kinshipLayout.relations" :key="`${edge.subjectPersonId}:${edge.relatedPersonId}:${edge.relationKind}`"><line :x1="edge.from.x + 85" :y1="edge.from.y + 24" :x2="edge.to.x + 85" :y2="edge.to.y + 24" /><text class="kinship-relation-label" :x="(edge.from.x + edge.to.x) / 2 + 85" :y="(edge.from.y + edge.to.y) / 2 + 18">{{ kinshipRelationLabel(edge.relationKind) }}</text></template><g v-for="node in kinshipLayout.nodes" :key="node.id" :transform="`translate(${node.x} ${node.y})`"><rect width="170" height="48" rx="4" /><text x="12" y="29">{{ node.displayName }}</text></g></svg></div>
-        <section v-if="comparison" class="pending"><h3>历史差异（只读）</h3><p>统一边：{{ comparison.comparison.canonicalEdges.filter((edge) => edge.status === "same").length }} 一致，{{ comparison.comparison.canonicalEdges.filter((edge) => edge.status === "canonical_only").length }} 仅统一。</p><p>历史边：{{ comparison.comparison.historicalEdges.filter((edge) => edge.status === "same").length }} 一致，{{ comparison.comparison.historicalEdges.filter((edge) => edge.status === "historical_only").length }} 仅历史，{{ comparison.comparison.historicalEdges.filter((edge) => edge.status === "uncomparable").length }} 无法比较。</p><div v-if="historicalLayout" class="chart-canvas"><svg :viewBox="`0 0 ${Math.max(640, historicalLayout.nodes.length * 110)} ${Math.max(240, Math.ceil(historicalLayout.nodes.length / Math.ceil(Math.sqrt(historicalLayout.nodes.length || 1))) * 104 + 70)}`" aria-label="历史谱书来源关系图"><line v-for="edge in historicalLayout.connectors" :key="edge.claimId" :class="`historical-${historicalStatus.get(edge.claimId)}`" :x1="edge.x1" :y1="edge.y1" :x2="edge.x2" :y2="edge.y2" /><g v-for="node in historicalLayout.nodes" :key="node.sourceRecordId" :transform="`translate(${node.x} ${node.y})`"><rect width="170" height="48" rx="4" /><text x="12" y="29">{{ node.displayName || node.sourceRecordId }}</text></g></svg></div><p v-for="item in comparison.projection.annotations" :key="item.claimId">{{ item.status }}：{{ item.relationKind }}（{{ item.rawText }}）</p></section>
+        <section v-if="comparison" class="pending"><h3>历史差异（只读）</h3><p>统一边：{{ comparison.comparison.canonicalEdges.filter((edge) => edge.status === "same").length }} 一致，{{ comparison.comparison.canonicalEdges.filter((edge) => edge.status === "canonical_only").length }} 仅统一。</p><p>历史边：{{ comparison.comparison.historicalEdges.filter((edge) => edge.status === "same").length }} 一致，{{ comparison.comparison.historicalEdges.filter((edge) => edge.status === "historical_only").length }} 仅历史，{{ comparison.comparison.historicalEdges.filter((edge) => edge.status === "uncomparable").length }} 无法比较。</p><div v-if="historicalLayout" class="chart-canvas"><p v-if="historicalReading?.truncated" class="notice">阅读结果已达上限；请选择图内来源记录重新作为根。</p><svg :viewBox="`0 0 ${historicalLayout.width} ${historicalLayout.height}`" aria-label="历史谱书来源关系图"><line v-for="edge in historicalLayout.parentConnectors" :key="edge.claimId" :class="`historical-${historicalStatus.get(edge.claimId)}`" :x1="edge.x1" :y1="edge.y1" :x2="edge.x2" :y2="edge.y2" /><line v-for="edge in historicalLayout.spouseConnectors" :key="edge.claimId" class="historical-spouse" :x1="edge.x1" :y1="edge.y1" :x2="edge.x2" :y2="edge.y2" /><g v-for="node in historicalLayout.nodes" :key="node.sourceRecordId" :class="{ 'historical-conflict': node.conflict }" :transform="`translate(${node.x} ${node.y})`"><rect width="170" height="48" rx="4" /><text x="12" y="29">{{ node.displayName || node.sourceRecordId }}</text></g></svg></div><p v-for="item in comparison.projection.annotations" :key="item.claimId">{{ item.status }}：{{ item.relationKind }}（{{ item.rawText }}）</p></section>
         <form class="new-lineage" @submit.prevent="createLineage"><label>新建世系名称<input v-model.trim="newLineageName" maxlength="160" required /></label><button type="submit" class="secondary">建立空世系</button></form>
         <div v-if="chart" class="chart-tools"><label>姓名定位<input v-model.trim="chartSearch" placeholder="输入姓名" /></label><div class="actions"><button type="button" class="secondary" @click="zoomChart(-1)">缩小</button><button type="button" class="secondary" @click="resetChartViewport">重置视图</button><button type="button" class="secondary" @click="zoomChart(1)">放大</button><button type="button" @click="exportChartSvg">导出 SVG</button></div></div>
         <div v-if="chartMatches.length" class="chart-matches"><button v-for="node in chartMatches" :key="node.personId" type="button" @click="selectChartPerson(node.personId)">{{ node.displayName }}</button></div>

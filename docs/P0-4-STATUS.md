@@ -1,6 +1,6 @@
 # P0-4 历史双视图与完整亲属图状态
 
-状态：切片 A/B/C/D 与历史阅读布局核心已完成；历史受限读取与页面接入待后续切片。最后更新：2026-10-25。
+状态：切片 A/B/C/D 与历史受限阅读已完成。最后更新：2026-10-25。
 
 ## 已完成：切片 A（历史关系语义与纯投影）
 
@@ -34,7 +34,12 @@
 
 ## 后续切片
 
-1. 已完成历史阅读布局核心：`src/historical-reading-layout.ts` 只接收来源记录和显式解释的边，使用 SCC 将环保留为冲突组、独立输出配偶线和未连通来源记录，不读取 canonical snapshot。纯测试覆盖三代边、环、配偶和未连通记录。下一子项是按已确认的 100 节点/200 关系上限接入受限 API 与管理员页面。
+1. 已完成历史受限阅读：管理员历史投影默认最多返回 100 个来源记录和 200 条范围内主张，可选 `rootRecordId` 时只读取来源图两跳；达到限制只返回 `truncated`，不返回范围外标识。`historical-reading-layout.ts` 只接收来源记录和显式解释的边，使用 SCC 将环保留为冲突组、独立输出配偶线和未连通来源记录，不读取 canonical snapshot。管理员页已采用该受限阅读图；统一差异接口仍独立读取完整比较数据，不受阅读截断影响。
+
+## 历史阅读实际验证
+
+- `npm run lint`、`npm run check`、`npm run build` 通过：24 个测试文件、57 项测试。
+- `LOCAL_AUTH_TEST_PORT=18981 npm run test:local-auth` 通过：隔离 local Worker/D1 验证既有历史投影/差异/关系语义链路仍兼容；未使用 `--remote`。
 2. 已完成切片 D：管理员可读取当前 published revision 的亲属图 `radius=1|2`，服务端按层查询并限制在 60 节点/120 关系；超过限制只返回 `truncated`，不泄露边界外信息。布局按距中心分层且画布高度随节点数增长。管理员以外继续被拒绝。关系预览会拒绝与同一候选承谱边方向相反的父母关系，反向配偶重复会被合并；无法从既有 UUID 判断的独立亲子方向仍需审核，详见 [设计审查](/home/mio/projects/cloud-genealogy/docs/P0-4-KINSHIP-EXPANSION-DESIGN-REVIEW.md)。
 
 ## 切片 D 实际验证

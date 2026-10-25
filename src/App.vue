@@ -19,7 +19,11 @@ type Kinship = { centerPersonId: string; nodes: Array<{ id: string; displayName:
 type ChangeRequest = { id: string; lineage_id: string; state: "draft" | "pending_review" | "approved" | "rejected" | "published" | "conflicted"; reason: string; created_by_account_id: string; reviewed_by_account_id: string | null; review_note: string | null; version: number; created_at: string };
 type Reviewer = { id: string; username: string; display_name: string };
 type ReviewerAssignment = { id: string; reviewer_account_id: string; valid_from: string; valid_until: string; reason: string; revoked_at: string | null; version: number };
-type ChangePreview = { changeRequest: ChangeRequest; preview: { valid: boolean; issues: Array<{ code: string }>; edges: unknown[]; relations: unknown[]; memberships: unknown[]; branchStructure: { branches: unknown[] } } };
+type Branch = { branchId: string; parentBranchId: string | null; name: string; branchKind: "agnatic" | "migration" | "administrative"; retiredAt: string | null; membershipCount: number; accountScopeCount: number };
+type BranchWorkbench = { lineageId: string; revisionId: string; pointerVersion: number; branches: Branch[]; memberships: Array<{ branchId: string; personId: string; personDisplayName: string; membershipKind: string }> };
+type StructureItem = { operation: "create" | "rename" | "retire"; branchId: string; parentBranchId: string | null; name: string; branchKind: "agnatic" | "migration" | "administrative" };
+type MembershipItem = { operation: "add" | "remove"; branchId: string; personId: string; membershipKind: "blood_primary" | "migration" | "administrative" };
+type ChangePreview = { changeRequest: ChangeRequest; preview: { valid: boolean; issues: Array<{ code: string }>; edges: unknown[]; relations: unknown[]; memberships: unknown[]; branchStructure: { branches: Array<{ branchId: string; name: string; retiredAt: string | null }> }; retirementDependencies: Array<{ branchId: string; membershipCount: number; accountScopeCount: number; blockingCodes: string[] }> } };
 const status = ref("正在检查 API…"), notice = ref(""), account = ref<Account | null>(null), csrfToken = ref("");
 const registerForm = ref({ username: "", password: "", genealogyName: "", branchName: "", ancestorName: "" });
 const loginForm = ref({ username: "", password: "" });
@@ -34,6 +38,11 @@ const changeRequests = ref<ChangeRequest[]>([]), reviewers = ref<Reviewer[]>([])
 const selectedChangeRequest = ref<ChangeRequest | null>(null), changePreview = ref<ChangePreview | null>(null), reviewNote = ref("");
 const proposalForm = ref({ reason: "", operation: "relation_add", subjectPersonId: "", relatedPersonId: "", relationKind: "biological_parent" });
 const assignmentForm = ref({ reviewerAccountId: "", validFrom: "", validUntil: "", reason: "" });
+const branchWorkbench = ref<BranchWorkbench | null>(null);
+const branchComposer = ref({ reason: "", structureItems: [] as StructureItem[], membershipItems: [] as MembershipItem[] });
+const structureDraft = ref({ operation: "create" as StructureItem["operation"], branchId: "", parentBranchId: "", name: "", branchKind: "agnatic" as StructureItem["branchKind"] });
+const membershipDraft = ref({ operation: "add" as MembershipItem["operation"], branchId: "", personId: "", membershipKind: "blood_primary" as MembershipItem["membershipKind"] });
+const retirementConfirmations = ref<Record<string, string>>({});
 const chartSvg = ref<SVGSVGElement | null>(null);
 const chartPan = ref({ x: 0, y: 0 }), chartDrag = ref<{ pointerId: number; clientX: number; clientY: number } | null>(null);
 const isAdmin = computed(() => account.value?.roles.includes("admin") ?? false);
@@ -56,6 +65,17 @@ const chartViewBoxValue = computed(() => chartViewBox(chartViewport.value));
 const historicalLayout = computed(() => comparison.value ? layoutHistoricalRecords(comparison.value.projection.nodes, comparison.value.projection.parentChildEdges) : null);
 const historicalStatus = computed(() => new Map(comparison.value?.comparison.historicalEdges.map((edge) => [edge.claimId, edge.status])));
 const kinshipLayout = computed(() => kinship.value ? layoutKinship(kinship.value.centerPersonId, kinship.value.nodes, kinship.value.relations) : null);
+const composerBranches = computed(() => {
+  const branches = new Map((branchWorkbench.value?.branches ?? []).map((branch) => [branch.branchId, { ...branch }]));
+  for (const item of branchComposer.value.structureItems) {
+    if (item.operation === "create") branches.set(item.branchId, { branchId: item.branchId, parentBranchId: item.parentBranchId, name: item.name, branchKind: item.branchKind, retiredAt: null, membershipCount: 0, accountScopeCount: 0 });
+    if (item.operation === "rename" && branches.has(item.branchId)) branches.get(item.branchId)!.name = item.name;
+    if (item.operation === "retire" && branches.has(item.branchId)) branches.get(item.branchId)!.retiredAt = "__PROPOSED_RETIREMENT__";
+  }
+  return [...branches.values()].sort((left, right) => left.name.localeCompare(right.name));
+});
+const previewRetirements = computed(() => changePreview.value?.preview.branchStructure.branches.filter((branch) => branch.retiredAt === "__PROPOSED_RETIREMENT__") ?? []);
+const retirementsConfirmed = computed(() => previewRetirements.value.every((branch) => retirementConfirmations.value[branch.branchId]?.trim() === branch.name));
 
 async function request(path: string, options: RequestInit = {}) {
   const headers = new Headers(options.headers);
@@ -88,6 +108,8 @@ async function refreshWorkflowData() {
   if (requestsResponse.ok) changeRequests.value = ((await requestsResponse.json()) as { changeRequests: ChangeRequest[] }).changeRequests;
   if (reviewersResponse.ok) reviewers.value = ((await reviewersResponse.json()) as { accounts: Reviewer[] }).accounts;
   if (assignmentsResponse.ok) reviewerAssignments.value = ((await assignmentsResponse.json()) as { assignments: ReviewerAssignment[] }).assignments;
+  const workbenchResponse = await request(`/api/admin/lineages/${encodeURIComponent(lineageId.value)}/branch-workbench`);
+  branchWorkbench.value = workbenchResponse.ok ? await workbenchResponse.json() as BranchWorkbench : null;
 }
 async function refreshIdentity() {
   const response = await request("/api/me");
@@ -173,14 +195,49 @@ async function createProposal() {
   proposalForm.value = { reason: "", operation: "relation_add", subjectPersonId: "", relatedPersonId: "", relationKind: "biological_parent" };
   await refreshWorkflowData(); await previewChangeRequest(result.changeRequest.id); notice.value = "草稿已创建，请核对预览后再提交。";
 }
+async function addStructureItem() {
+  const draft = structureDraft.value;
+  if (draft.operation === "create" && !draft.name.trim()) return void (notice.value = "请填写新房支名称。");
+  if (draft.operation !== "create" && !draft.branchId) return void (notice.value = "请选择目标房支。");
+  if (draft.operation === "rename" && !draft.name.trim()) return void (notice.value = "请填写新名称。");
+  const branchId = draft.operation === "create" ? crypto.randomUUID() : draft.branchId;
+  branchComposer.value.structureItems.push({ operation: draft.operation, branchId, parentBranchId: draft.operation === "create" ? (draft.parentBranchId || null) : null, name: draft.operation === "retire" ? "" : draft.name.trim(), branchKind: draft.branchKind });
+  structureDraft.value = { operation: "create", branchId: "", parentBranchId: "", name: "", branchKind: "agnatic" };
+}
+function addMembershipItem() {
+  const draft = membershipDraft.value;
+  if (!draft.branchId || !draft.personId) return void (notice.value = "请选择房支和人物。");
+  if (branchComposer.value.membershipItems.some((item) => item.operation === draft.operation && item.branchId === draft.branchId && item.personId === draft.personId && item.membershipKind === draft.membershipKind)) return void (notice.value = "该成员条目已在本次编排中。");
+  branchComposer.value.membershipItems.push({ ...draft });
+  membershipDraft.value = { operation: "add", branchId: "", personId: "", membershipKind: "blood_primary" };
+}
+function removeStructureItem(index: number) { branchComposer.value.structureItems.splice(index, 1); }
+function removeMembershipItem(index: number) { branchComposer.value.membershipItems.splice(index, 1); }
+function clearBranchComposer() {
+  branchComposer.value = { reason: "", structureItems: [], membershipItems: [] };
+  structureDraft.value = { operation: "create", branchId: "", parentBranchId: "", name: "", branchKind: "agnatic" };
+  membershipDraft.value = { operation: "add", branchId: "", personId: "", membershipKind: "blood_primary" };
+}
+async function createBranchProposal() {
+  if (!lineageId.value) return void (notice.value = "请先选择世系。");
+  const composer = branchComposer.value;
+  if (!composer.reason.trim() || composer.structureItems.length + composer.membershipItems.length === 0) return void (notice.value = "请填写理由，并至少编排一项房支或成员变更。");
+  const response = await request(`/api/admin/lineages/${encodeURIComponent(lineageId.value)}/change-requests`, { method: "POST", body: JSON.stringify({ reason: composer.reason, items: [], membershipItems: composer.membershipItems, structureItems: composer.structureItems }) });
+  if (!response.ok) return void (notice.value = await message(response));
+  const result = await response.json() as { changeRequest: ChangeRequest };
+  clearBranchComposer(); await refreshWorkflowData(); await previewChangeRequest(result.changeRequest.id); notice.value = "房支变更草稿已创建。请核对服务端预览；草稿不可直接修改。";
+}
 async function previewChangeRequest(id: string) {
   const response = await request(`/api/admin/change-requests/${encodeURIComponent(id)}/preview`);
   if (!response.ok) return void (notice.value = await message(response));
   changePreview.value = await response.json() as ChangePreview;
   selectedChangeRequest.value = changeRequests.value.find((item) => item.id === id) ?? changePreview.value.changeRequest;
+  retirementConfirmations.value = {};
 }
 async function submitChangeRequest() {
   const item = selectedChangeRequest.value; if (!item) return;
+  if (!changePreview.value?.preview.valid) return void (notice.value = "预览未通过，不能提交审核。");
+  if (!retirementsConfirmed.value) return void (notice.value = "请逐项输入待退休房支名称以确认高风险操作。");
   const response = await request(`/api/admin/change-requests/${item.id}/submit`, { method: "POST", body: JSON.stringify({ version: item.version }) });
   notice.value = response.ok ? "提案已提交审核。" : await message(response); if (response.ok) { selectedChangeRequest.value = null; changePreview.value = null; await refreshWorkflowData(); }
 }
@@ -274,10 +331,11 @@ onMounted(async () => { try { const response = await request("/api/health"); sta
       <p v-if="pendingAccounts.length === 0">暂无待审核账号。</p>
       <article v-for="item in pendingAccounts" :key="item.id" class="pending"><h3>{{ item.display_name }} <small>@{{ item.username }}</small></h3><p>线索：{{ item.registration_branch_name || "未填房支" }}；{{ item.registration_ancestor_name || "未填父辈/祖辈" }}</p><label>人工关联人物<select v-model="selectedPerson[item.id]"><option value="">请选择，不自动匹配</option><option v-for="person in persons" :key="person.id" :value="person.id">{{ person.display_name }} · {{ person.id }}</option></select></label><label>额外角色<select v-model="selectedRole[item.id]"><option value="member">仅族人</option><option value="editor">编辑员</option><option value="admin">管理员</option></select></label><div class="actions"><button @click="approve(item)">通过</button><button class="secondary" @click="reject(item)">拒绝</button></div></article>
       <section class="workflow-admin">
-        <h2>提案工作台</h2><p>首个界面只提供单条亲属关系草稿；成员和房支结构仍通过受控 API，待专门编辑体验确认后再开放。</p>
+        <h2>提案工作台</h2><p>关系提案与房支变更均须先创建不可直接修改的草稿，再阅读服务端预览并提交审核。</p>
         <form class="workflow-form" @submit.prevent="createProposal"><label>世系<select v-model="lineageId" required @change="refreshWorkflowData"><option value="" disabled>请选择世系</option><option v-for="lineage in lineages" :key="lineage.id" :value="lineage.id">{{ lineage.name }}</option></select></label><label>理由<input v-model.trim="proposalForm.reason" maxlength="1000" required /></label><label>操作<select v-model="proposalForm.operation"><option value="relation_add">新增亲属关系</option><option value="relation_remove">移除亲属关系</option></select></label><label>主体人物 ID<input v-model.trim="proposalForm.subjectPersonId" required /></label><label>关联人物 ID<input v-model.trim="proposalForm.relatedPersonId" required /></label><label>关系类型<select v-model="proposalForm.relationKind"><option value="biological_parent">生父母</option><option value="adoptive_parent">养父母</option><option value="successor_parent">嗣父母</option><option value="spouse">配偶</option></select></label><button>创建草稿并预览</button></form>
+        <section class="branch-composer"><h3>房支变更编排器</h3><p v-if="!branchWorkbench">请选择一个已有 published revision 的世系以编排房支变更。</p><template v-else><p>基准 revision：{{ branchWorkbench.revisionId }}。下方编排仅保留在浏览器中，点击创建草稿前不会写入权威数据。</p><label>变更理由<input v-model.trim="branchComposer.reason" maxlength="1000" placeholder="说明本次房支或成员调整原因" /></label><form class="workflow-form" @submit.prevent="addStructureItem"><label>结构操作<select v-model="structureDraft.operation"><option value="create">创建房支</option><option value="rename">改名</option><option value="retire">退休</option></select></label><label v-if="structureDraft.operation !== 'create'">目标房支<select v-model="structureDraft.branchId"><option value="" disabled>请选择房支</option><option v-for="branch in composerBranches.filter((item) => !item.retiredAt)" :key="branch.branchId" :value="branch.branchId">{{ branch.name }}</option></select></label><label v-if="structureDraft.operation === 'create'">父房（可选）<select v-model="structureDraft.parentBranchId"><option value="">无（顶层房支）</option><option v-for="branch in composerBranches.filter((item) => !item.retiredAt)" :key="branch.branchId" :value="branch.branchId">{{ branch.name }}</option></select></label><label v-if="structureDraft.operation !== 'retire'">名称<input v-model.trim="structureDraft.name" maxlength="80" /></label><label v-if="structureDraft.operation === 'create'">类型<select v-model="structureDraft.branchKind"><option value="agnatic">父系</option><option value="migration">迁入支</option><option value="administrative">行政支</option></select></label><button type="submit">加入结构变更</button></form><form class="workflow-form" @submit.prevent="addMembershipItem"><label>成员操作<select v-model="membershipDraft.operation"><option value="add">加入成员</option><option value="remove">移除成员</option></select></label><label>目标房支<select v-model="membershipDraft.branchId"><option value="" disabled>请选择房支</option><option v-for="branch in composerBranches.filter((item) => !item.retiredAt)" :key="branch.branchId" :value="branch.branchId">{{ branch.name }}</option></select></label><label>人物<select v-model="membershipDraft.personId"><option value="" disabled>请选择人物</option><option v-for="person in persons" :key="person.id" :value="person.id">{{ person.display_name }}</option></select></label><label>归属类型<select v-model="membershipDraft.membershipKind"><option value="blood_primary">血缘主归属</option><option value="migration">迁入</option><option value="administrative">行政归属</option></select></label><button type="submit">加入成员变更</button></form><div class="composer-items"><p v-if="branchComposer.structureItems.length + branchComposer.membershipItems.length === 0">尚未编排任何房支变更。</p><div v-for="(item, index) in branchComposer.structureItems" :key="`structure-${item.branchId}-${index}`"><span>结构：{{ item.operation }} · {{ item.name || composerBranches.find((branch) => branch.branchId === item.branchId)?.name || item.branchId }}</span><button type="button" class="secondary" @click="removeStructureItem(index)">移除</button></div><div v-for="(item, index) in branchComposer.membershipItems" :key="`membership-${item.branchId}-${item.personId}-${index}`"><span>成员：{{ item.operation }} · {{ composerBranches.find((branch) => branch.branchId === item.branchId)?.name || item.branchId }} · {{ persons.find((person) => person.id === item.personId)?.display_name || item.personId }}</span><button type="button" class="secondary" @click="removeMembershipItem(index)">移除</button></div></div><div class="actions"><button type="button" class="secondary" @click="clearBranchComposer">清空本地编排</button><button type="button" @click="createBranchProposal">创建房支草稿并预览</button></div></template></section>
         <section class="queue"><h3>审核队列</h3><p v-if="changeRequests.length === 0">当前世系暂无提案。</p><button v-for="item in changeRequests" :key="item.id" type="button" class="queue-item" @click="previewChangeRequest(item.id)"><strong>{{ item.state }}</strong> · {{ item.reason }}<small>{{ item.id }}</small></button></section>
-        <article v-if="selectedChangeRequest" class="pending"><h3>提案预览：{{ selectedChangeRequest.state }}</h3><p>{{ selectedChangeRequest.reason }}</p><p v-if="changePreview">校验：{{ changePreview.preview.valid ? "通过" : "未通过" }}；关系 {{ changePreview.preview.relations.length }} 条，成员 {{ changePreview.preview.memberships.length }} 条，房支 {{ changePreview.preview.branchStructure.branches.length }} 个。</p><p v-if="changePreview && changePreview.preview.issues.length">问题：{{ changePreview.preview.issues.map((issue) => issue.code).join("、") }}</p><div class="actions"><button v-if="selectedChangeRequest.state === 'draft'" @click="submitChangeRequest">提交审核</button><button v-if="selectedChangeRequest.state === 'pending_review'" @click="approveChangeRequest">批准</button><button v-if="selectedChangeRequest.state === 'approved'" @click="publishChangeRequest">发布</button></div><label v-if="selectedChangeRequest.state === 'pending_review'">驳回理由<textarea v-model.trim="reviewNote" maxlength="1000" /></label><button v-if="selectedChangeRequest.state === 'pending_review'" class="secondary" @click="rejectChangeRequest">驳回</button></article>
+        <article v-if="selectedChangeRequest" class="pending"><h3>提案预览：{{ selectedChangeRequest.state }}</h3><p>{{ selectedChangeRequest.reason }}</p><p v-if="changePreview">校验：{{ changePreview.preview.valid ? "通过" : "未通过" }}；关系 {{ changePreview.preview.relations.length }} 条，成员 {{ changePreview.preview.memberships.length }} 条，房支 {{ changePreview.preview.branchStructure.branches.length }} 个。</p><p v-if="changePreview && changePreview.preview.issues.length">问题：{{ changePreview.preview.issues.map((issue) => issue.code).join("、") }}</p><div v-if="changePreview && changePreview.preview.retirementDependencies.length" class="retirement-preview"><h4>退休依赖预览</h4><p v-for="dependency in changePreview.preview.retirementDependencies" :key="dependency.branchId">{{ changePreview.preview.branchStructure.branches.find((branch) => branch.branchId === dependency.branchId)?.name || dependency.branchId }}：成员 {{ dependency.membershipCount }} 人，账号范围引用 {{ dependency.accountScopeCount }} 项{{ dependency.blockingCodes.length ? `；阻塞：${dependency.blockingCodes.join("、")}` : "；可退休" }}</p></div><label v-for="branch in previewRetirements" :key="branch.branchId">为确认退休「{{ branch.name }}」，请输入完整房支名称<input v-model="retirementConfirmations[branch.branchId]" /></label><p v-if="previewRetirements.length">仅当预览通过且上述名称完全匹配时，才可提交审核。</p><div class="actions"><button v-if="selectedChangeRequest.state === 'draft'" :disabled="!changePreview?.preview.valid || !retirementsConfirmed" @click="submitChangeRequest">提交审核</button><button v-if="selectedChangeRequest.state === 'pending_review'" @click="approveChangeRequest">批准</button><button v-if="selectedChangeRequest.state === 'approved'" @click="publishChangeRequest">发布</button></div><label v-if="selectedChangeRequest.state === 'pending_review'">驳回理由<textarea v-model.trim="reviewNote" maxlength="1000" /></label><button v-if="selectedChangeRequest.state === 'pending_review'" class="secondary" @click="rejectChangeRequest">驳回</button></article>
       </section>
       <section class="workflow-admin"><h2>审核人指派</h2><p>指派独立于编辑范围；有效期最长 90 天，撤销后立即失效。</p><form class="workflow-form" @submit.prevent="createReviewerAssignment"><label>审核人<select v-model="assignmentForm.reviewerAccountId" required><option value="" disabled>请选择活跃管理员</option><option v-for="reviewer in reviewers" :key="reviewer.id" :value="reviewer.id">{{ reviewer.display_name }} · @{{ reviewer.username }}</option></select></label><label>生效时间<input v-model="assignmentForm.validFrom" type="datetime-local" required /></label><label>失效时间<input v-model="assignmentForm.validUntil" type="datetime-local" required /></label><label>指派理由<input v-model.trim="assignmentForm.reason" maxlength="1000" required /></label><button>建立指派</button></form><p v-if="reviewerAssignments.length === 0">当前世系没有审核人指派。</p><article v-for="item in reviewerAssignments" :key="item.id" class="pending"><p>{{ reviewers.find((reviewer) => reviewer.id === item.reviewer_account_id)?.display_name || item.reviewer_account_id }}</p><p>{{ item.valid_from }} 至 {{ item.valid_until }} · {{ item.revoked_at ? "已撤销" : "有效/待生效" }}</p><p>{{ item.reason }}</p><button v-if="!item.revoked_at" class="secondary" @click="revokeReviewerAssignment(item)">撤销</button></article></section>
       <section class="chart-admin">

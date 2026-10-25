@@ -1,6 +1,6 @@
 # 云族谱项目 · Codex 交接包
 
-状态：P0-0 至 P0-4 已完成既定首切片；P0-5 已完成受控提案、审核发布、房支成员/结构最小变更、审核人指派、可审计草稿废弃与本地验证。P0-5 的高风险扩展操作、P0-6 备份恢复和任何 preview/production 迁移、部署仍待单独确认（2026-10-25）。
+状态：P0-0 至 P0-5 已完成既定首切片；P0-6 已完成 local 备份恢复基线与 preview 合成恢复演练，P2 已完成媒体资产和 local-only 清理审阅流程。真实 remote 备份/恢复、清理执行、preview/production 迁移和部署仍待单独确认（2026-10-25）。
 
 阅读顺序：
 1. `PRODUCT.md` 产品范围与业务规则
@@ -21,9 +21,10 @@
 16. `P0-5-BRANCH-WORKBENCH-DESIGN-REVIEW.md` 房支成员与结构工作台的待确认交互边界
 17. `P2-MEDIA-ASSET-DESIGN-REVIEW.md` 媒体资产、上传、关联、恢复与当前实施状态
 18. `P2-MEDIA-CLEANUP-DESIGN-REVIEW.md` 媒体到期清理的待确认安全协议
-19. `DEVELOPMENT-HANDBOOK.md` 接力电脑的环境、Git、SSH、验证与部署流程
-20. `AGENTS.md` Codex 工作约束
-21. `CODEX_START.md` 首轮可复制提示词
+19. `HANDOFF-CURRENT.md` 当前分支、验证、迁移差异、边界与下一步
+20. `DEVELOPMENT-HANDBOOK.md` 接力电脑的环境、Git、SSH、验证与部署流程
+21. `AGENTS.md` Codex 工作约束
+22. `CODEX_START.md` 首轮可复制提示词
 
 ## 不可随意变更的已确认决策
 - 单一家族，多房支、多本谱书、多座云祠；不是 SaaS 多租户。

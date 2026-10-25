@@ -30,7 +30,7 @@
 | 本地源码、迁移、运行配置与脚本审计 | 已执行；确认没有既有备份/恢复实现或 CI 工作流。 |
 | Cloudflare 官方文档复核 | 已执行；D1 SQL 导出/导入、R2 S3 访问及 Workers 限制与设计一致。 |
 | `npm run test:local-backup-recovery` | 通过：仅临时 local D1/R2，验证业务计数采集、导出、只读预检、D1 data-only 准备的拒绝路径和已迁移空目标导入、加密认证解密、错误口令/篡改拦截、隔离恢复及对象内容比对。 |
-| `npm run lint`、`npm run check`、`npm run build` | 通过：27 个测试文件、66 项测试；生产构建完成。 |
+| `npm run lint`、`npm run check`、`npm run build` | 已于第 43 项通过：28 个测试文件、71 项测试；生产构建完成。 |
 | preview D1/R2 合成恢复演练 | 通过：已重建 preview、应用 15 项迁移、恢复合成人物与媒体并完成外键/字节校验；未部署 Worker。 |
 
 第 36 项已扩展 local 演练：fixture 现有真实 `active media_asset → person_media → R2` 链；包格式 v2 将 R2 文件逐一绑定媒体 ID/哈希/大小/MIME/状态/引用数，恢复后核验资产元数据、关联行和对象字节。未访问 preview 或 production。
@@ -48,6 +48,8 @@
 第 42 项补齐 local run 的取消和过期收敛：待确认批次可取消，过期确认会收敛为 `expired`；所有这些状态仍不调用 R2 或执行删除。
 
 第 43 项新增 local 清理批次的只读 D1 漂移预检：冻结元数据与当前状态或关联数不一致时只报告将跳过的原因，不写状态、不读 R2，也不开放执行。
+
+接力基线见 [当前接力快照](/home/mio/projects/cloud-genealogy/docs/HANDOFF-CURRENT.md)：其中记录当前功能分支、local `0017` 与 preview `0015` 的迁移差异、最近真实验证和远端禁止事项。
 
 ## Preview 恢复演练（2026-10-25）
 

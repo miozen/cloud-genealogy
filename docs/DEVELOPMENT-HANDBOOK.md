@@ -1,6 +1,6 @@
 # 开发与交接手册
 
-最后更新：2026-10-23。本文是任一接力电脑从零接手本项目的唯一操作基线；生产资源、Secrets、远程数据库和 R2 均不应在未明确授权时操作。
+最后更新：2026-10-25。本文是任一接力电脑从零接手本项目的操作基线；当前切片、分支和未完成边界另见 `docs/HANDOFF-CURRENT.md`。生产资源、Secrets、远程数据库和 R2 均不应在未明确授权时操作。
 
 ## 0. 人机接力方式
 
@@ -25,14 +25,14 @@
 
 - 唯一远程测试资源：`cloud-genealogy-preview` D1 与同名私有 R2 桶；production 未创建且绝不用于测试。
 - preview D1 于 2026-10-25 重建，当前 ID：`aaaacbfb-762d-41b7-a424-aaa6e69ec563`；该 ID 已写入 `wrangler.jsonc` 的 `preview` binding。
-- preview 已应用 migrations `0001` 至 `0015`，并完成一次合成 D1/R2 恢复演练：外键检查无结果、合成人物计数为 1、媒体字节一致。未部署 Worker、未写入 Secrets。
+- preview 已应用 migrations `0001` 至 `0015`，并完成一次合成 D1/R2 恢复演练：外键检查无结果、合成人物计数为 1、媒体字节一致。local 分支现已包含 `0016`、`0017`，但它们尚未获 preview 迁移授权；未部署 Worker、未写入 Secrets。
 - D1 完整导出含内部 `d1_migrations`，不可直接导入已初始化 preview。`npm run prepare:d1-restore-data -- --input <data-only.sql> --output <prepared.sql>` 已将 Wrangler data-only 导出中的这些内部行移除，并仅将 `role`、`permission`、`role_permission` 的固定种子行改为 `INSERT OR IGNORE`。目标必须是**刚完成迁移的空库**；该工具不是合并工具，不能用于含业务数据的 preview，更不能用于 production。
 - 接力前先执行 `git status --short --branch`、阅读 `docs/P0-6-STATUS.md`，并且只有用户明确允许覆盖 preview 后才能执行任何 `--env preview --remote` 写命令。
 
 ## 1. 工作站前置条件
 
 - Git 2.43+。
-- **NVM**（不是 Maven 的 `mvn`）管理的 Node.js 22 LTS。当前已验证版本为 Node `22.23.4`、npm `10.9.9`；接手 WSL 会话时先执行 `source ~/.nvm/nvm.sh && nvm use 22`，再运行 npm 命令。
+- **NVM**（不是 Maven 的 `mvn`）管理的 Node.js 22 LTS。本仓库没有 `pom.xml` 或 Maven 构建链；当前已验证版本为 Node `22.23.4`、npm `10.9.9`。接手 WSL 会话时先执行 `source ~/.nvm/nvm.sh && nvm use 22`，再运行 npm 命令。
 - Cloudflare 账户与 GitHub SSH 私钥仅在需要部署或推送时配置；不得把密钥放入仓库、`.dev.vars`、日志或截图。
 
 首次安装或切换 Node：
@@ -46,9 +46,10 @@ node --version
 npm --version
 ```
 
-接手项目后：
+接手项目后（先按 `docs/HANDOFF-CURRENT.md` 切换到当前接力分支）：
 
 ```bash
+source ~/.nvm/nvm.sh
 nvm use 22
 npm ci
 npm run check

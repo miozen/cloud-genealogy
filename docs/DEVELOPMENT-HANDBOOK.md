@@ -8,7 +8,7 @@
 - Codex 默认连续完成一个完整可验收里程碑（实现、相关本地测试、构建、提交、推送、PR 合并）后再报告，不应在每个微小步骤等待“继续”。
 - 只有需要业务负责人决定、生产授权、产生费用、不可恢复操作或遇到真实阻塞时才暂停；不得要求项目负责人重复上下文或自行执行开发命令。
 - 只有以下情况才暂停请求决定：会改变已确认产品规则、产生费用、访问/写入生产资源、删除不可恢复数据，或存在无法由仓库与安全检查消除的歧义。
-- 每阶段同步更新决策、进度、风险和下一步到 `docs/`，使其他电脑克隆后可直接接力。
+- 每阶段同步更新决策、进度、风险和下一步到 `docs/`，使其他电脑克隆后可直接接力；**任何推送包含实现、迁移、测试或环境变更时，必须在同一提交同步更新对应状态文档与本手册（若接力基线变化）**。
 
 ## 0.1 本地优先验证规则
 
@@ -16,9 +16,18 @@
 - 每个功能或修改完成后，优先执行本地类型检查、单元测试、已配置的代码规范检查、构建，以及与改动相关的本地集成测试。
 - D1、R2、媒体和测试数据默认使用 Wrangler local bindings。除非明确授权，不得操作 preview/production 的数据库、R2、Secrets 或部署。
 - 只有本地验证通过且确实需要验证 Cloudflare 平台行为时，才申请 preview 环境授权；production 操作始终需要单独明确授权。
+- preview 是唯一远程测试环境，可在项目负责人明确确认数据可覆盖后重建、迁移和恢复演练；不得把 preview 当作 production，也不得创建额外长期 recovery-test 环境。
 - 交付报告必须区分“已执行且通过”“已执行但失败”“未执行及原因”；未执行项绝不写为通过。
 - 当前已有本地命令：`npm run lint`（ESLint 代码规范检查）、`npm run check`（类型检查和单元测试）、`npm run build`（生产构建）、`npm run test:local-core-model`（P0-2 固定 D1 数据）、`npm run test:local-auth`（本地 Worker/D1 集成）、`npm run test:local-backup-recovery`（临时 local D1/R2 的离线包预检、加密认证与隔离恢复演练）、`npm run collect:local-backup-counts -- --wrangler <path> --cwd <local-dir> --output <counts.json>`（本地 D1 的核心业务计数采集）、`npm run crypt:backup -- <encrypt|decrypt> --input <file> --output <new-file> --passphrase-file <mode-0600-file>`（离线归档加密/认证解密）、`npm run dev:worker`（本地 Worker）、`wrangler d1 ... --local`（本地迁移/查询）。交付前至少运行与改动相关的 lint、check 和 build，并如实记录结果。
 - `npm run test:local-auth` 会在独立的 `.wrangler/local-auth-integration/` 状态目录中启动本地 Worker，自动迁移并验证 bootstrap、注册待审、CSRF、人工人物关联、批准、登录、重置密码、会话撤销与退出。脚本使用临时测试凭证，退出时清理测试账号及关联记录；不得加 `--remote`。
+
+## 0.2 远程测试接力基线
+
+- 唯一远程测试资源：`cloud-genealogy-preview` D1 与同名私有 R2 桶；production 未创建且绝不用于测试。
+- preview D1 于 2026-10-25 重建，当前 ID：`aaaacbfb-762d-41b7-a424-aaa6e69ec563`；该 ID 已写入 `wrangler.jsonc` 的 `preview` binding。
+- preview 已应用 migrations `0001` 至 `0015`，并完成一次合成 D1/R2 恢复演练：外键检查无结果、合成人物计数为 1、媒体字节一致。未部署 Worker、未写入 Secrets。
+- D1 完整导出含内部 `d1_migrations`，不可直接导入已初始化 preview；当前演练先迁移，再导入移除内部行的合成业务数据。未来必须将这一规则固化为受测恢复工具，不能依赖临时命令。
+- 接力前先执行 `git status --short --branch`、阅读 `docs/P0-6-STATUS.md`，并且只有用户明确允许覆盖 preview 后才能执行任何 `--env preview --remote` 写命令。
 
 ## 1. 工作站前置条件
 

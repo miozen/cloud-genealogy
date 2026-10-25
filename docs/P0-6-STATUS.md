@@ -9,6 +9,8 @@
 - 确认本切片前没有既有 backup/restore 工具；当前仍没有 `backup_record` 物理表、媒体元数据表、R2 业务写入代码或 CI 工作流，因此没有宣称未发生的 remote 备份、恢复或演练。
 - 新增 `scripts/backup-package.mjs`：只处理已落在本地目录的离线包，生成带 D1 SQL、R2 对象、迁移基线、计数与 SHA-256 的 `manifest.json`，并在任何导入前执行只读预检。它不含 remote 命令、凭据读取、加密或恢复写入。
 - 新增 `npm run test:local-backup-recovery`：在一次性临时目录中使用 Wrangler local D1/R2 完成导出、对象取回、manifest 生成/预检、全新目标恢复和对象内容比对；篡改对象后预检会失败，恢复命令不会执行。
+- 新增 `scripts/backup-counts.mjs` 与 `npm run collect:local-backup-counts -- ...`：它只接受显式 local Wrangler 可执行文件、local 工作目录和输出文件，实际查询账号/权限、人物、谱书、来源、revision、关系、房支和审计共 16 项 D1 计数；`backup-package.mjs --counts-file` 只接受该采集器产生的计数文件。
+- local R2 演练对象会在 manifest 中标记为 `local_fixture`。非 local 包如包含 R2 对象，预检要求每个对象提供 `mediaAssetId`；当前尚无媒体元数据表，故工具会拒绝把测试夹具误用为远程媒体备份。
 
 ## 当前风险与未完成项
 
@@ -23,10 +25,10 @@
 |---|---|
 | 本地源码、迁移、运行配置与脚本审计 | 已执行；确认没有既有备份/恢复实现或 CI 工作流。 |
 | Cloudflare 官方文档复核 | 已执行；D1 SQL 导出/导入、R2 S3 访问及 Workers 限制与设计一致。 |
-| `npm run test:local-backup-recovery` | 通过：仅临时 local D1/R2，验证导出、只读预检、隔离恢复、对象内容比对及篡改拦截。 |
+| `npm run test:local-backup-recovery` | 通过：仅临时 local D1/R2，验证实际业务计数采集、导出、只读预检、隔离恢复、对象内容比对及篡改拦截。 |
 | `npm run lint`、`npm run check`、`npm run build` | 通过：23 个测试文件、53 项测试；生产构建完成。 |
 | remote D1/R2、部署或恢复写入 | 未执行。 |
 
 ## 下一步（需确认后）
 
-下一切片应先补齐包内业务计数与未来媒体元数据的真实采集入口，并设计加密/密钥恢复演练；仍不连接 remote。完成后，才单独申请测试环境恢复演练授权。
+下一切片应设计加密包与密钥恢复演练，并为 P2 媒体模型确认 `media_asset` 的稳定 ID、对象键、哈希、大小、MIME 与 retired 状态；仍不连接 remote。完成后，才单独申请测试环境恢复演练授权。

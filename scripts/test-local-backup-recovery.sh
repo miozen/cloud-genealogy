@@ -40,12 +40,18 @@ printf '%s\n' \
   "$project_root/node_modules/.bin/wrangler" r2 object get cloud-genealogy-local/media/fixture.txt --local --file "$package_dir/r2/media/fixture.txt" >/dev/null
 )
 
+node "$project_root/scripts/backup-counts.mjs" \
+  --wrangler "$project_root/node_modules/.bin/wrangler" \
+  --cwd "$fixture_root" \
+  --output "$fixture_root/counts.json" >/dev/null
+rg -q '"person": 1' "$fixture_root/counts.json"
+
 node scripts/backup-package.mjs create \
   --package "$package_dir" \
   --migration-dir "$project_root/migrations" \
   --source-environment local \
   --git-commit 0000000 \
-  --count person=1 >/dev/null
+  --counts-file "$fixture_root/counts.json" >/dev/null
 node scripts/backup-package.mjs verify --package "$package_dir" --migration-dir "$project_root/migrations" >/dev/null
 
 npx wrangler d1 execute DB --local --persist-to "$target_state" --file "$package_dir/d1/schema-and-data.sql" >/dev/null

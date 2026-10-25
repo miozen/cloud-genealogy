@@ -19,6 +19,7 @@
     "test:local-core-model": "bash scripts/test-local-core-model.sh",
     "test:local-chart-scale": "bash scripts/test-local-chart-scale.sh",
     "test:local-backup-recovery": "bash scripts/test-local-backup-recovery.sh",
+    "collect:local-backup-counts": "node scripts/backup-counts.mjs",
     "lint": "eslint . --max-warnings=0",
     "typecheck": "vue-tsc --noEmit",
     "check": "npm run typecheck && npm run test"

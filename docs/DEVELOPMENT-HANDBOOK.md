@@ -17,7 +17,7 @@
 - D1、R2、媒体和测试数据默认使用 Wrangler local bindings。除非明确授权，不得操作 preview/production 的数据库、R2、Secrets 或部署。
 - 只有本地验证通过且确实需要验证 Cloudflare 平台行为时，才申请 preview 环境授权；production 操作始终需要单独明确授权。
 - 交付报告必须区分“已执行且通过”“已执行但失败”“未执行及原因”；未执行项绝不写为通过。
-- 当前已有本地命令：`npm run lint`（ESLint 代码规范检查）、`npm run check`（类型检查和单元测试）、`npm run build`（生产构建）、`npm run test:local-core-model`（P0-2 固定 D1 数据）、`npm run test:local-auth`（本地 Worker/D1 集成）、`npm run test:local-backup-recovery`（临时 local D1/R2 的离线包预检与隔离恢复演练）、`npm run dev:worker`（本地 Worker）、`wrangler d1 ... --local`（本地迁移/查询）。交付前至少运行与改动相关的 lint、check 和 build，并如实记录结果。
+- 当前已有本地命令：`npm run lint`（ESLint 代码规范检查）、`npm run check`（类型检查和单元测试）、`npm run build`（生产构建）、`npm run test:local-core-model`（P0-2 固定 D1 数据）、`npm run test:local-auth`（本地 Worker/D1 集成）、`npm run test:local-backup-recovery`（临时 local D1/R2 的离线包预检与隔离恢复演练）、`npm run collect:local-backup-counts -- --wrangler <path> --cwd <local-dir> --output <counts.json>`（本地 D1 的核心业务计数采集）、`npm run dev:worker`（本地 Worker）、`wrangler d1 ... --local`（本地迁移/查询）。交付前至少运行与改动相关的 lint、check 和 build，并如实记录结果。
 - `npm run test:local-auth` 会在独立的 `.wrangler/local-auth-integration/` 状态目录中启动本地 Worker，自动迁移并验证 bootstrap、注册待审、CSRF、人工人物关联、批准、登录、重置密码、会话撤销与退出。脚本使用临时测试凭证，退出时清理测试账号及关联记录；不得加 `--remote`。
 
 ## 1. 工作站前置条件

@@ -7,7 +7,7 @@ import path from "node:path";
 const formatVersion = 1;
 
 function usage() {
-  console.error("Usage: backup-package.mjs create --package <dir> --migration-dir <dir> --source-environment <local|preview|production> --git-commit <sha> --count <name=value> [--count <name=value>] [--encryption-scheme <name>]\n       backup-package.mjs verify --package <dir> --migration-dir <dir>");
+  console.error("Usage: backup-package.mjs create --package <dir> --migration-dir <dir> --source-environment <local|preview|production> --git-commit <sha> (--counts-file <counts.json> | --count <name=value> [--count <name=value>]) [--encryption-scheme <name>]\n       backup-package.mjs verify --package <dir> --migration-dir <dir>");
 }
 
 function parseArgs(argv) {
@@ -52,14 +52,14 @@ async function listFiles(root, current = root) {
   return files.sort();
 }
 
-async function describeFile(root, relativePath) {
+async function describeFile(root, relativePath, sourceEnvironment) {
   const absolute = path.join(root, relativePath);
   const contents = await readFile(absolute);
   const info = await stat(absolute);
   return {
     path: relativePath,
     kind: relativePath === "d1/schema-and-data.sql" ? "d1" : "r2",
-    ...(relativePath.startsWith("r2/") ? { objectKey: relativePath.slice(3) } : {}),
+    ...(relativePath.startsWith("r2/") ? { objectKey: relativePath.slice(3), ...(sourceEnvironment === "local" ? { referenceKind: "local_fixture" } : {}) } : {}),
     bytes: info.size,
     sha256: sha256(contents),
   };
@@ -74,7 +74,25 @@ async function migrationBaseline(migrationDir) {
   return Promise.all(files.map(async (file) => ({ path: `migrations/${file}`, sha256: sha256(await readFile(path.join(migrationDir, file))) })));
 }
 
-function parseCounts(values) {
+function validateCounts(counts) {
+  if (!counts || typeof counts !== "object" || Array.isArray(counts)) throw new Error("Counts must be an object.");
+  const normalized = {};
+  for (const [name, value] of Object.entries(counts)) {
+    if (!/^[a-z][a-z0-9_]*$/.test(name) || !Number.isSafeInteger(value) || value < 0) throw new Error(`Invalid count ${name}.`);
+    normalized[name] = value;
+  }
+  if (Object.keys(normalized).length === 0) throw new Error("At least one count is required.");
+  return normalized;
+}
+
+async function parseCounts(values) {
+  const countsFile = one(values, "counts-file", false);
+  if (countsFile && (values.get("count") ?? []).length > 0) throw new Error("Use either --counts-file or --count, not both.");
+  if (countsFile) {
+    const payload = JSON.parse(await readFile(path.resolve(countsFile), "utf8"));
+    if (payload?.formatVersion !== 1 || payload?.source !== "local_d1") throw new Error("Counts file must be produced by the local D1 count collector.");
+    return validateCounts(payload.counts);
+  }
   const counts = {};
   for (const value of values.get("count") ?? []) {
     const [name, raw] = value.split("=", 2);
@@ -82,8 +100,7 @@ function parseCounts(values) {
     if (Object.hasOwn(counts, name)) throw new Error(`Duplicate count name: ${name}`);
     counts[name] = Number(raw);
   }
-  if (Object.keys(counts).length === 0) throw new Error("At least one --count is required.");
-  return counts;
+  return validateCounts(counts);
 }
 
 function assertManifestShape(manifest) {
@@ -112,6 +129,8 @@ function assertManifestShape(manifest) {
       hasD1 = true;
     } else if (file.kind === "r2") {
       if (!filePath.startsWith("r2/") || typeof file.objectKey !== "string" || !file.objectKey || file.objectKey.startsWith("/")) fail(`invalid R2 object ${filePath}`);
+      if (manifest.sourceEnvironment === "local" && file.referenceKind !== "local_fixture") fail(`local R2 object must be marked fixture-only: ${filePath}`);
+      if (manifest.sourceEnvironment !== "local" && (typeof file.mediaAssetId !== "string" || !file.mediaAssetId)) fail(`remote R2 object lacks a media metadata reference: ${filePath}`);
     } else fail(`unknown file kind for ${filePath}`);
   }
   if (!hasD1) fail("missing D1 export");
@@ -133,8 +152,8 @@ async function createPackage(values) {
     consistencyMode: sourceEnvironment === "local" ? "local_fixture" : "logical_write_freeze",
     encryption: { scheme: encryptionScheme },
     migrations: await migrationBaseline(migrationDir),
-    counts: parseCounts(values),
-    files: await Promise.all(packageFiles.map((file) => describeFile(packageDir, file))),
+    counts: await parseCounts(values),
+    files: await Promise.all(packageFiles.map((file) => describeFile(packageDir, file, sourceEnvironment))),
   };
   assertManifestShape(manifest);
   await writeFile(path.join(packageDir, "manifest.json"), `${JSON.stringify(manifest, null, 2)}\n`, { encoding: "utf8", flag: "wx" });

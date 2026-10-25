@@ -233,6 +233,17 @@ const personMediaLink = await request(`/api/admin/persons/${protectedMediaPerson
   body: { mediaAssetId: localMediaAssetId, role: "portrait", caption: "本地权限夹具" },
 });
 expectStatus(personMediaLink, 201);
+const linkedPersonMedia = await request(`/api/admin/persons/${protectedMediaPerson.body.person.id}/media`, { cookie: adminCookie });
+expectStatus(linkedPersonMedia, 200);
+assert.equal(linkedPersonMedia.body.personMedia.length, 1);
+const personMediaId = linkedPersonMedia.body.personMedia[0].id;
+const reorderedPersonMedia = await request(`/api/admin/person-media/${personMediaId}/order`, {
+  method: "POST", cookie: adminCookie, csrf: adminCsrf, body: { displayOrder: 7 },
+});
+expectStatus(reorderedPersonMedia, 200);
+const linksAfterReorder = await request(`/api/admin/persons/${protectedMediaPerson.body.person.id}/media`, { cookie: adminCookie });
+expectStatus(linksAfterReorder, 200);
+assert.equal(linksAfterReorder.body.personMedia[0].display_order, 7);
 const duplicatePersonMediaLink = await request(`/api/admin/persons/${protectedMediaPerson.body.person.id}/media`, {
   method: "POST", cookie: adminCookie, csrf: adminCsrf,
   body: { mediaAssetId: localMediaAssetId, role: "portrait" },
@@ -740,6 +751,14 @@ const memberCookie = sessionCookie(memberLogin);
 const memberCsrf = memberLogin.body.csrfToken;
 
 expectStatus(await request(`/api/media-assets/${localMediaAssetId}`, { cookie: memberCookie }), 403);
+const retiredPersonMedia = await request(`/api/admin/person-media/${personMediaId}/retire`, { method: "POST", cookie: adminCookie, csrf: adminCsrf });
+expectStatus(retiredPersonMedia, 200);
+assert.equal(retiredPersonMedia.body.mediaAssetState, "retired");
+assert.ok(retiredPersonMedia.body.cleanupAfter);
+const linksAfterRetirement = await request(`/api/admin/persons/${protectedMediaPerson.body.person.id}/media`, { cookie: adminCookie });
+expectStatus(linksAfterRetirement, 200);
+assert.equal(linksAfterRetirement.body.personMedia.length, 0);
+expectStatus(await request(`/api/media-assets/${localMediaAssetId}`, { cookie: adminCookie }), 404);
 
 const identity = await request("/api/me", { cookie: memberCookie });
 expectStatus(identity, 200);

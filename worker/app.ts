@@ -37,9 +37,10 @@ import {
   rollbackChangeRequestInput,
   mediaUploadIntentInput,
   personMediaInput,
+  personMediaOrderInput,
   validationMessage,
 } from "./auth/validation";
-import { createMediaUploadIntent, finalizeMediaUpload } from "./media/media-asset";
+import { createMediaUploadIntent, finalizeMediaUpload, retireMediaAsset } from "./media/media-asset";
 import { createR2PresignedPut, getR2PresignConfiguration } from "./media/r2-presigned-put";
 import { previewSuccessionRevision } from "./lineage/revision-preview";
 import { publishSuccessionRevision, rollbackSuccessionRevision } from "./lineage/revision-publish";
@@ -1291,6 +1292,55 @@ export function createApp() {
       context.env.DB.prepare("INSERT INTO audit_log (id, actor_account_id, action, object_type, object_id, metadata_json, created_at) VALUES (?, ?, ?, ?, ?, ?, ?)").bind(crypto.randomUUID(), auth.accountId, "person.media_linked", "person_media", id, JSON.stringify({ personId, mediaAssetId: parsed.data.mediaAssetId, role: parsed.data.role }), timestamp),
     ]);
     return context.json({ personMedia: { id, personId, mediaAssetId: parsed.data.mediaAssetId, role: parsed.data.role, displayOrder: parsed.data.displayOrder, caption: parsed.data.caption ?? null } }, 201);
+  });
+
+  app.get("/api/admin/persons/:personId/media", requireAuthentication, async (context) => {
+    const auth = context.get("auth")!;
+    if (!hasPermission(auth.roles, "system.manage")) return context.json({ code: "forbidden" }, 403);
+    const personId = context.req.param("personId");
+    const person = await context.env.DB.prepare("SELECT id FROM person WHERE id = ?").bind(personId).first<{ id: string }>();
+    if (!person) return context.json({ code: "person_not_found" }, 404);
+    const links = await context.env.DB.prepare(
+      `SELECT link.id, link.media_asset_id, link.role, link.display_order, link.caption, asset.original_filename, asset.mime_type, asset.visibility
+       FROM person_media AS link INNER JOIN media_asset AS asset ON asset.id = link.media_asset_id
+       WHERE link.person_id = ? AND link.retired_at IS NULL AND asset.state = 'active'
+       ORDER BY link.display_order, link.created_at, link.id`,
+    ).bind(personId).all();
+    return context.json({ personMedia: links.results });
+  });
+
+  app.post("/api/admin/person-media/:personMediaId/order", requireAuthentication, async (context) => {
+    const auth = context.get("auth")!;
+    if (!hasPermission(auth.roles, "system.manage")) return context.json({ code: "forbidden" }, 403);
+    const parsed = personMediaOrderInput.safeParse(await context.req.json().catch(() => null));
+    if (!parsed.success) return context.json({ code: "validation_failed", message: validationMessage(parsed) }, 400);
+    const link = await context.env.DB.prepare("SELECT person_id, media_asset_id FROM person_media WHERE id = ? AND retired_at IS NULL").bind(context.req.param("personMediaId")).first<{ person_id: string; media_asset_id: string }>();
+    if (!link) return context.json({ code: "person_media_not_found" }, 404);
+    const timestamp = now();
+    await context.env.DB.batch([
+      context.env.DB.prepare("UPDATE person_media SET display_order = ? WHERE id = ? AND retired_at IS NULL").bind(parsed.data.displayOrder, context.req.param("personMediaId")),
+      context.env.DB.prepare("INSERT INTO audit_log (id, actor_account_id, action, object_type, object_id, metadata_json, created_at) VALUES (?, ?, ?, ?, ?, ?, ?)").bind(crypto.randomUUID(), auth.accountId, "person.media_reordered", "person_media", context.req.param("personMediaId"), JSON.stringify({ personId: link.person_id, mediaAssetId: link.media_asset_id, displayOrder: parsed.data.displayOrder }), timestamp),
+    ]);
+    return context.json({ personMedia: { id: context.req.param("personMediaId"), displayOrder: parsed.data.displayOrder } });
+  });
+
+  app.post("/api/admin/person-media/:personMediaId/retire", requireAuthentication, async (context) => {
+    const auth = context.get("auth")!;
+    if (!hasPermission(auth.roles, "system.manage")) return context.json({ code: "forbidden" }, 403);
+    const linkId = context.req.param("personMediaId");
+    const link = await context.env.DB.prepare("SELECT link.person_id, link.media_asset_id, asset.state FROM person_media AS link INNER JOIN media_asset AS asset ON asset.id = link.media_asset_id WHERE link.id = ? AND link.retired_at IS NULL").bind(linkId).first<{ person_id: string; media_asset_id: string; state: "active" | "retired" }>();
+    if (!link) return context.json({ code: "person_media_not_found" }, 404);
+    const otherLinks = await context.env.DB.prepare("SELECT COUNT(*) AS count FROM person_media WHERE media_asset_id = ? AND retired_at IS NULL AND id != ?").bind(link.media_asset_id, linkId).first<{ count: number }>();
+    const timestamp = new Date();
+    const retirement = link.state === "active" && otherLinks?.count === 0 ? retireMediaAsset("active", 0, timestamp) : null;
+    await context.env.DB.batch([
+      context.env.DB.prepare("UPDATE person_media SET retired_at = ? WHERE id = ? AND retired_at IS NULL").bind(timestamp.toISOString(), linkId),
+      ...(retirement ? [context.env.DB.prepare("UPDATE media_asset SET state = 'retired', retired_at = ?, cleanup_after = ? WHERE id = ? AND state = 'active' AND NOT EXISTS (SELECT 1 FROM person_media WHERE media_asset_id = ? AND retired_at IS NULL)").bind(retirement.retiredAt, retirement.cleanupAfter, link.media_asset_id, link.media_asset_id)] : []),
+      context.env.DB.prepare("INSERT INTO audit_log (id, actor_account_id, action, object_type, object_id, metadata_json, created_at) VALUES (?, ?, ?, ?, ?, ?, ?)").bind(crypto.randomUUID(), auth.accountId, "person.media_unlinked", "person_media", linkId, JSON.stringify({ personId: link.person_id, mediaAssetId: link.media_asset_id, assetRetirementRequested: retirement !== null }), timestamp.toISOString()),
+      ...(retirement ? [context.env.DB.prepare("INSERT INTO audit_log (id, actor_account_id, action, object_type, object_id, metadata_json, created_at) VALUES (?, ?, ?, ?, ?, ?, ?)").bind(crypto.randomUUID(), auth.accountId, "media.retired", "media_asset", link.media_asset_id, JSON.stringify({ reason: "last_person_media_link_retired" }), timestamp.toISOString())] : []),
+    ]);
+    const asset = await context.env.DB.prepare("SELECT state, cleanup_after FROM media_asset WHERE id = ?").bind(link.media_asset_id).first<{ state: "active" | "retired"; cleanup_after: string | null }>();
+    return context.json({ status: "retired", mediaAssetState: asset?.state, cleanupAfter: asset?.cleanup_after ?? null });
   });
 
   app.get("/api/admin/persons/:personId", requireAuthentication, async (context) => {

@@ -621,18 +621,26 @@ export function createApp() {
     const edition = await context.env.DB.prepare("SELECT id FROM genealogy_edition WHERE id = ? AND retired_at IS NULL").bind(editionId).first<{ id: string }>();
     if (!edition) return context.json({ code: "edition_not_found" }, 404);
     const maximumNodes = 100, maximumClaims = 200, rootRecordId = context.req.query("rootRecordId")?.trim();
-    const selectedIds = new Set<string>(), claimRows: Array<{ id: string; subject_record_id: string; related_record_id: string | null; relation_kind: string; raw_text: string }> = [];
+    type HistoricalClaimRow = { id: string; subject_record_id: string; related_record_id: string | null; relation_kind: string; raw_text: string; created_at: string };
+    const selectedIds = new Set<string>(), claimRows: HistoricalClaimRow[] = [];
+    const byCreatedAt = (left: HistoricalClaimRow, right: HistoricalClaimRow) => left.created_at.localeCompare(right.created_at) || left.id.localeCompare(right.id);
     let truncated = false;
     if (rootRecordId) {
       const root = await context.env.DB.prepare("SELECT id FROM source_person_record WHERE id = ? AND edition_id = ?").bind(rootRecordId, editionId).first<{ id: string }>();
       if (!root) return context.json({ code: "source_record_not_found" }, 404);
       selectedIds.add(root.id); let frontier = [root.id];
       for (let depth = 0; depth < 2 && frontier.length > 0; depth += 1) {
-        const placeholders = frontier.map(() => "?").join(",");
-        const rows = await context.env.DB.prepare(`SELECT id, subject_record_id, related_record_id, relation_kind, raw_text FROM source_relation_claim WHERE edition_id = ? AND retracted_at IS NULL AND (subject_record_id IN (${placeholders}) OR related_record_id IN (${placeholders})) ORDER BY created_at, id LIMIT ?`).bind(editionId, ...frontier, ...frontier, maximumClaims - claimRows.length + 1).all<{ id: string; subject_record_id: string; related_record_id: string | null; relation_kind: string; raw_text: string }>();
-        if (rows.results.length > maximumClaims - claimRows.length) truncated = true;
+        const availableClaims = maximumClaims - claimRows.length + 1;
+        const candidates = new Map<string, HistoricalClaimRow>();
+        for (let start = 0; start < frontier.length; start += 48) {
+          const chunk = frontier.slice(start, start + 48), placeholders = chunk.map(() => "?").join(",");
+          const rows = await context.env.DB.prepare(`SELECT id, subject_record_id, related_record_id, relation_kind, raw_text, created_at FROM source_relation_claim WHERE edition_id = ? AND retracted_at IS NULL AND (subject_record_id IN (${placeholders}) OR related_record_id IN (${placeholders})) ORDER BY created_at, id LIMIT ?`).bind(editionId, ...chunk, ...chunk, availableClaims).all<HistoricalClaimRow>();
+          rows.results.forEach((row) => candidates.set(row.id, row));
+        }
+        const rows = [...candidates.values()].sort(byCreatedAt).slice(0, availableClaims);
+        if (rows.length > maximumClaims - claimRows.length) truncated = true;
         const next = new Set<string>();
-        for (const row of rows.results) {
+        for (const row of rows) {
           if (claimRows.length >= maximumClaims) { truncated = true; break; }
           const endpoints: Array<string | null> = [row.subject_record_id, row.related_record_id];
           const additions = endpoints.filter((id): id is string => id !== null && !selectedIds.has(id));
@@ -646,27 +654,35 @@ export function createApp() {
       if (records.results.length > maximumNodes) truncated = true;
       records.results.slice(0, maximumNodes).forEach((row) => selectedIds.add(row.id));
       if (selectedIds.size) {
-        const placeholders = [...selectedIds].map(() => "?").join(",");
-        const claims = await context.env.DB.prepare(`SELECT id, subject_record_id, related_record_id, relation_kind, raw_text FROM source_relation_claim WHERE edition_id = ? AND retracted_at IS NULL AND subject_record_id IN (${placeholders}) AND (related_record_id IS NULL OR related_record_id IN (${placeholders})) ORDER BY created_at, id LIMIT ?`).bind(editionId, ...selectedIds, ...selectedIds, maximumClaims + 1).all<typeof claimRows[number]>();
-        if (claims.results.length > maximumClaims) truncated = true;
-        claimRows.push(...claims.results.slice(0, maximumClaims));
+        const candidates = new Map<string, HistoricalClaimRow>();
+        const ids = [...selectedIds];
+        for (let start = 0; start < ids.length; start += 97) {
+          const chunk = ids.slice(start, start + 97), placeholders = chunk.map(() => "?").join(",");
+          const claims = await context.env.DB.prepare(`SELECT id, subject_record_id, related_record_id, relation_kind, raw_text, created_at FROM source_relation_claim WHERE edition_id = ? AND retracted_at IS NULL AND subject_record_id IN (${placeholders}) ORDER BY created_at, id LIMIT ?`).bind(editionId, ...chunk, maximumClaims + 1).all<HistoricalClaimRow>();
+          claims.results.filter((claim) => claim.related_record_id === null || selectedIds.has(claim.related_record_id)).forEach((claim) => candidates.set(claim.id, claim));
+        }
+        const claims = [...candidates.values()].sort(byCreatedAt);
+        if (claims.length > maximumClaims) truncated = true;
+        claimRows.push(...claims.slice(0, maximumClaims));
       }
     }
     const ids = [...selectedIds];
     if (ids.length === 0) return context.json({ view: "historical", editionId, rootRecordId: rootRecordId ?? null, truncated, relationClaims: [], projection: { nodes: [], parentChildEdges: [], spouseEdges: [], annotations: [] } });
-    const [records, rules] = await context.env.DB.batch([
-      context.env.DB.prepare(`SELECT r.id, r.name_text, l.person_id FROM source_person_record r LEFT JOIN source_person_link l ON l.source_record_id = r.id AND l.status = 'confirmed' AND l.revoked_at IS NULL WHERE r.id IN (${ids.map(() => "?").join(",")}) ORDER BY r.created_at, r.id`).bind(...ids),
-      context.env.DB.prepare("SELECT relation_kind, graph_kind, parent_kind FROM source_relation_semantic_rule WHERE retired_at IS NULL ORDER BY relation_kind, id"),
-    ]);
-    if (!records || !rules) throw new Error("historical projection query did not return every result set");
-    const recordRows = records.results as Array<{ id: string; name_text: string | null; person_id: string | null }>;
-    const ruleRows = rules.results as Array<{ relation_kind: string; graph_kind: "parent_to_child" | "child_to_parent" | "spouse" | "non_graph"; parent_kind: "biological_parent" | "adoptive_parent" | "successor_parent" | null }>;
+    const recordCandidates: Array<{ id: string; name_text: string | null; person_id: string | null; created_at: string }> = [];
+    for (let start = 0; start < ids.length; start += 90) {
+      const chunk = ids.slice(start, start + 90);
+      const records = await context.env.DB.prepare(`SELECT r.id, r.name_text, l.person_id, r.created_at FROM source_person_record r LEFT JOIN source_person_link l ON l.source_record_id = r.id AND l.status = 'confirmed' AND l.revoked_at IS NULL WHERE r.id IN (${chunk.map(() => "?").join(",")}) ORDER BY r.created_at, r.id`).bind(...chunk).all<{ id: string; name_text: string | null; person_id: string | null; created_at: string }>();
+      recordCandidates.push(...records.results);
+    }
+    const rules = await context.env.DB.prepare("SELECT relation_kind, graph_kind, parent_kind FROM source_relation_semantic_rule WHERE retired_at IS NULL ORDER BY relation_kind, id").all<{ relation_kind: string; graph_kind: "parent_to_child" | "child_to_parent" | "spouse" | "non_graph"; parent_kind: "biological_parent" | "adoptive_parent" | "successor_parent" | null }>();
+    const recordRows = recordCandidates.sort((left, right) => left.created_at.localeCompare(right.created_at) || left.id.localeCompare(right.id));
+    const ruleRows = rules.results;
     const projection = projectHistoricalLineage(
       recordRows.map((record) => ({ id: record.id, displayName: record.name_text, confirmedPersonId: record.person_id })),
       claimRows.map((claim) => ({ id: claim.id, subjectRecordId: claim.subject_record_id, relatedRecordId: claim.related_record_id, relationKind: claim.relation_kind, rawText: claim.raw_text })),
       ruleRows.map((rule) => ({ relationKind: rule.relation_kind, graphKind: rule.graph_kind, parentKind: rule.parent_kind })),
     );
-    return context.json({ view: "historical", editionId, rootRecordId: rootRecordId ?? null, truncated, relationClaims: claimRows, projection });
+    return context.json({ view: "historical", editionId, rootRecordId: rootRecordId ?? null, truncated, relationClaims: claimRows.map((claim) => ({ id: claim.id, subject_record_id: claim.subject_record_id, related_record_id: claim.related_record_id, relation_kind: claim.relation_kind, raw_text: claim.raw_text })), projection });
   });
 
   app.get("/api/admin/lineages/:lineageId/historical-comparison", requireAuthentication, async (context) => {

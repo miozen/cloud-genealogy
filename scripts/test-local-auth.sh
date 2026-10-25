@@ -383,6 +383,47 @@ const historicalComparison = await request(`/api/admin/lineages/${lineageId}/his
 expectStatus(historicalComparison, 200);
 assert.deepEqual(historicalComparison.body.comparison.canonicalEdges.map((edge) => edge.status), ["canonical_only"]);
 assert.deepEqual(historicalComparison.body.comparison.historicalEdges.map((edge) => edge.status), ["historical_only"]);
+
+// Seed this fixture through the isolated local D1 only.  Using a separate
+// edition keeps the 100-node/200-claim boundary assertions deterministic and
+// avoids turning this regression test into hundreds of HTTP setup requests.
+const boundedEdition = await request(`/api/admin/genealogies/${genealogy.body.genealogy.id}/editions`, {
+  method: "POST", cookie: adminCookie, csrf: adminCsrf, body: { title: "历史读取边界测试", editionLabel: "local-bounds" },
+});
+expectStatus(boundedEdition, 201);
+const boundedEditionId = boundedEdition.body.edition.id;
+const boundedRecords = Array.from({ length: 101 }, (_, index) => {
+  const suffix = String(index).padStart(3, "0");
+  return `INSERT INTO source_person_record (id, edition_id, source_key, name_text, raw_text, created_at) VALUES ('local-bound-node-${suffix}', '${boundedEditionId}', 'bound-${suffix}', '边界人物 ${suffix}', 'local bound fixture', '2000-01-01T00:00:00.000Z');`;
+});
+const boundedClaims = Array.from({ length: 201 }, (_, index) => {
+  const suffix = String(index).padStart(3, "0");
+  return `INSERT INTO source_relation_claim (id, edition_id, subject_record_id, related_record_id, relation_kind, raw_text, created_at) VALUES ('local-bound-claim-${suffix}', '${boundedEditionId}', 'local-bound-node-000', 'local-bound-node-001', 'biological_parent', 'local bound claim ${suffix}', '2021-01-01T00:00:00.000Z');`;
+});
+const rootedFixture = [
+  "INSERT INTO source_person_record (id, edition_id, source_key, name_text, raw_text, created_at) VALUES ('local-root-a', '" + boundedEditionId + "', 'root-a', '根 A', 'local root fixture', '2022-01-01T00:00:00.000Z');",
+  "INSERT INTO source_person_record (id, edition_id, source_key, name_text, raw_text, created_at) VALUES ('local-root-b', '" + boundedEditionId + "', 'root-b', '根 B', 'local root fixture', '2022-01-01T00:00:01.000Z');",
+  "INSERT INTO source_person_record (id, edition_id, source_key, name_text, raw_text, created_at) VALUES ('local-root-c', '" + boundedEditionId + "', 'root-c', '根 C', 'local root fixture', '2022-01-01T00:00:02.000Z');",
+  "INSERT INTO source_relation_claim (id, edition_id, subject_record_id, related_record_id, relation_kind, raw_text, created_at) VALUES ('local-root-claim-ab', '" + boundedEditionId + "', 'local-root-a', 'local-root-b', 'biological_parent', 'A 之父为 B', '2022-01-01T00:00:00.000Z');",
+  "INSERT INTO source_relation_claim (id, edition_id, subject_record_id, related_record_id, relation_kind, raw_text, created_at) VALUES ('local-root-claim-bc', '" + boundedEditionId + "', 'local-root-b', 'local-root-c', 'biological_parent', 'B 之父为 C', '2022-01-01T00:00:01.000Z');",
+];
+execFileSync("npx", ["wrangler", "d1", "execute", "DB", "--local", "--persist-to", ".wrangler/local-auth-integration", "--command", [...boundedRecords, ...boundedClaims, ...rootedFixture].join("\n")], { stdio: "pipe" });
+
+const boundedHistoricalProjection = await request(`/api/admin/genealogy-editions/${boundedEditionId}/historical-projection`, { cookie: adminCookie });
+expectStatus(boundedHistoricalProjection, 200);
+assert.equal(boundedHistoricalProjection.body.truncated, true);
+assert.equal(boundedHistoricalProjection.body.projection.nodes.length, 100);
+assert.equal(boundedHistoricalProjection.body.relationClaims.length, 200);
+const boundedNodeIds = new Set(boundedHistoricalProjection.body.projection.nodes.map((node) => node.sourceRecordId));
+assert.equal(boundedHistoricalProjection.body.relationClaims.every((claim) => boundedNodeIds.has(claim.subject_record_id) && (claim.related_record_id === null || boundedNodeIds.has(claim.related_record_id))), true);
+assert.equal(boundedNodeIds.has("local-bound-node-100"), false);
+
+const rootedHistoricalProjection = await request(`/api/admin/genealogy-editions/${boundedEditionId}/historical-projection?rootRecordId=local-root-a`, { cookie: adminCookie });
+expectStatus(rootedHistoricalProjection, 200);
+assert.equal(rootedHistoricalProjection.body.rootRecordId, "local-root-a");
+assert.equal(rootedHistoricalProjection.body.truncated, false);
+assert.deepEqual(new Set(rootedHistoricalProjection.body.projection.nodes.map((node) => node.sourceRecordId)), new Set(["local-root-a", "local-root-b", "local-root-c"]));
+assert.equal(rootedHistoricalProjection.body.relationClaims.every((claim) => ["local-root-a", "local-root-b", "local-root-c"].includes(claim.subject_record_id) && (claim.related_record_id === null || ["local-root-a", "local-root-b", "local-root-c"].includes(claim.related_record_id))), true);
 const hangingChart = await request(`/api/admin/lineages/${lineageId}/hanging-chart?rootPersonId=${personResult.body.person.id}`, { cookie: adminCookie });
 expectStatus(hangingChart, 200);
 assert.equal(hangingChart.body.view, "canonical");

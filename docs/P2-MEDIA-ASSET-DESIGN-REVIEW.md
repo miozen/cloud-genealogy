@@ -123,3 +123,9 @@ Cloudflare 的当前约束也支持“元数据优先”：D1 单查询最多 10
 - 新增管理员上传意图 API、完成校验 API 和 `/api/media-assets/:assetId` 私有读取 API。创建和完成均写审计；完成仅接受当前上传者的 `pending_upload` 意图，并以 R2 `head` 的大小、MIME 和 SHA-256 对照 D1 意图。
 - 本项不签发真实 presigned URL，也不配置 R2 S3 Secret；因此它不宣称已具备浏览器直传成功路径。完成校验会安全地将缺对象、过期或元数据不匹配的意图标记为 `failed`。
 - `npm run test:local-auth` 已在隔离 local Worker/D1/R2 实际验证：管理员创建意图、缺失 R2 对象被拒绝且不可读取、成员资产的匿名读取被拒绝、管理员经 Worker 读取 local R2 对象成功。未使用 `--remote`。
+
+## 11. 第 31 项实现状态
+
+- 新增独立的 R2 S3 Signature Version 4 presigned `PUT` URL 生成器：固定默认 5 分钟有效期，仅允许 `media/` 下的单一对象键，并把 `content-type` 与 `x-amz-checksum-sha256` 作为必需签名请求头。它不发起网络请求、不读写 R2，也不接入 HTTP API。
+- 输入中的 access key 与 secret key 只在内存中参与签名；模块不会记录、返回或写入它们。实际启用仍须由负责人单独创建并以 Worker Secret 注入仅限目标 bucket 的 R2 S3 凭据，同时配置 bucket CORS；不得把秘密提交、粘贴到对话或写入文档。
+- 单元测试以固定时间和示例凭据验证 URL 可重复、对象/过期/签名头被约束，并验证不安全路径、校验和和有效期在签名前被拒绝。尚未用真实凭据或 remote R2 验证。

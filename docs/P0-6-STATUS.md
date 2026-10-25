@@ -32,6 +32,12 @@
 | `npm run lint`、`npm run check`、`npm run build` | 通过：23 个测试文件、53 项测试；生产构建完成。 |
 | remote D1/R2、部署或恢复写入 | 未执行。 |
 
+## Preview 恢复演练（2026-10-25）
+
+- 已明确授权重建唯一远程测试 D1 `cloud-genealogy-preview`；新 ID 为 `aaaacbfb-762d-41b7-a424-aaa6e69ec563`，`wrangler.jsonc` 已同步。production 未操作。
+- 已对新 preview D1 应用 `0001` 至 `0015` 迁移，并恢复合成人物与合成 R2 对象。外键检查无结果、人物计数为 1、下载媒体与源对象字节一致。
+- 完整 schema+data SQL 不能直接导入已经由 Wrangler 初始化的 D1：其包含内部 `d1_migrations` 行。此次空白 preview 演练使用“先迁移、再导入移除内部迁移行的合成业务数据”的方式；这不是未来真实恢复的通用实现，仍需将该规则固化为受测工具后才可用于真实备份。
+
 ## 下一步（需确认后）
 
 已确认双人恢复确认、至少三个成功恢复点和测试环境优先的原则，并新增 `P0-6-TEST-RECOVERY-AUTHORIZATION.md`。下一步须在安全审批记录中补齐责任人身份、具体演练窗口、源包、测试资源与最小权限凭据，再由用户发出一次性 remote 测试环境执行授权。

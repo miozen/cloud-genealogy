@@ -106,6 +106,13 @@
 - 已有 local Worker/D1 回归继续覆盖真实 `change_request` API、退休依赖预览、成员迁出和审核/发布实时校验。前端纯函数与 Worker 回归分别覆盖浏览器内状态规则和服务端权威规则，不能互相替代。
 - `npm run check` 已实际通过：23 个测试文件、53 项测试；`npm run lint`、`npm run build`、`npm run test:local-auth`、`npm run test:local-core-model` 与 `npm run verify:local-branch-workbench-demo` 均已实际通过，全部只使用本机资源。
 
+## 已完成：草稿可审计废弃
+
+- `0015_change_request_discard.sql` 为 `change_request` 增加废弃时间和废弃操作者；不删除提案、条目、预览或审计记录，也不改写已发布 revision。
+- 仅创建者可按乐观版本号废弃尚未提交的 `draft`；其他操作者、重复废弃、已提交或任何后续提交均返回冲突或拒绝。废弃写入 `lineage.change_request_discarded` 审计日志。
+- 后台队列将其显示为 `discarded`，可继续只读查看，但不会再显示提交或再次废弃操作。
+- `npm run check`（23 个测试文件、53 项测试）、`npm run lint`、`npm run build`、`npm run test:local-auth`、`npm run test:local-core-model` 与 `npm run verify:local-branch-workbench-demo` 已实际通过；无远程迁移、部署或生产写入。
+
 ## 未完成与风险
 
 - 房支成员增删和房支 `create` / `rename` / `retire` 已有首个管理员编排界面，但父房移动、合并、拆分与对象级审批人策略仍不在本切片范围；当前 `branch` 范围仍仅使用已存在的基准 revision 快照，不能通过关系提案隐式变更成员归属。

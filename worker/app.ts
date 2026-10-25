@@ -77,7 +77,7 @@ interface PersonAnchorRow {
 }
 interface SuccessionRow { parent_person_id: string; child_person_id: string; }
 interface PublishedPointerRow { revision_id: string; version: number; }
-interface ChangeRequestRow { id: string; lineage_id: string; state: "draft" | "pending_review" | "approved" | "rejected" | "published" | "conflicted"; base_revision_id: string | null; base_pointer_version: number; created_by_account_id: string; version: number; }
+interface ChangeRequestRow { id: string; lineage_id: string; state: "draft" | "pending_review" | "approved" | "rejected" | "published" | "conflicted"; base_revision_id: string | null; base_pointer_version: number; created_by_account_id: string; version: number; discarded_at: string | null; }
 interface ReviewerAssignmentRow { id: string; reviewer_account_id: string; }
 interface ChangeItemRow { operation: ChangeItemCandidate["operation"]; subject_person_id: string; related_person_id: string; relation_kind: "biological_parent" | "adoptive_parent" | "successor_parent" | "spouse" | null; }
 interface MembershipRow { branch_id: string; person_id: string; membership_kind: BranchMembershipCandidate["membershipKind"]; }
@@ -769,7 +769,7 @@ export function createApp() {
 
   app.get("/api/admin/change-requests/:changeRequestId/preview", requireAuthentication, async (context) => {
     const auth = context.get("auth")!;
-    const request = await context.env.DB.prepare("SELECT id, lineage_id, state, base_revision_id, base_pointer_version, created_by_account_id, version FROM change_request WHERE id = ?").bind(context.req.param("changeRequestId")).first<ChangeRequestRow>();
+    const request = await context.env.DB.prepare("SELECT id, lineage_id, state, base_revision_id, base_pointer_version, created_by_account_id, version, discarded_at FROM change_request WHERE id = ?").bind(context.req.param("changeRequestId")).first<ChangeRequestRow>();
     if (!request) return context.json({ code: "change_request_not_found" }, 404);
     if (!hasPermission(auth.roles, "system.manage") && request.created_by_account_id !== auth.accountId) return context.json({ code: "forbidden" }, 403);
     const [edges, relations, items, memberships, membershipItems, structures, structureItems] = await context.env.DB.batch([
@@ -796,13 +796,30 @@ export function createApp() {
     return context.json({ changeRequest: request, preview: { ...preview, valid: preview.valid && structurePreview.valid && retirementIssues.length === 0, issues: [...preview.issues, ...structurePreview.issues, ...retirementIssues], branchStructure: structurePreview, retirementDependencies } });
   });
 
+  app.post("/api/admin/change-requests/:changeRequestId/discard", requireAuthentication, async (context) => {
+    const auth = context.get("auth")!;
+    const parsed = changeRequestVersionInput.safeParse(await context.req.json().catch(() => null));
+    if (!parsed.success) return context.json({ code: "validation_failed", message: validationMessage(parsed) }, 400);
+    const id = context.req.param("changeRequestId");
+    const request = await context.env.DB.prepare("SELECT id, state, created_by_account_id, version, discarded_at FROM change_request WHERE id = ?").bind(id).first<Pick<ChangeRequestRow, "id" | "state" | "created_by_account_id" | "version" | "discarded_at">>();
+    if (!request || request.state !== "draft" || request.discarded_at !== null || request.version !== parsed.data.version) return context.json({ code: "change_request_conflict" }, 409);
+    if (request.created_by_account_id !== auth.accountId) return context.json({ code: "forbidden" }, 403);
+    const timestamp = now();
+    const results = await context.env.DB.batch([
+      context.env.DB.prepare("UPDATE change_request SET discarded_at = ?, discarded_by_account_id = ?, version = version + 1 WHERE id = ? AND state = 'draft' AND discarded_at IS NULL AND version = ?").bind(timestamp, auth.accountId, id, parsed.data.version),
+      context.env.DB.prepare("INSERT INTO audit_log (id, actor_account_id, action, object_type, object_id, metadata_json, created_at) VALUES (?, ?, ?, ?, ?, ?, ?)").bind(crypto.randomUUID(), auth.accountId, "lineage.change_request_discarded", "change_request", id, JSON.stringify({ previousVersion: parsed.data.version }), timestamp),
+    ]);
+    if (results[0]?.meta.changes !== 1) return context.json({ code: "change_request_conflict" }, 409);
+    return context.json({ state: "discarded", version: parsed.data.version + 1 });
+  });
+
   app.post("/api/admin/change-requests/:changeRequestId/submit", requireAuthentication, async (context) => {
     const auth = context.get("auth")!;
     const parsed = changeRequestVersionInput.safeParse(await context.req.json().catch(() => null));
     if (!parsed.success) return context.json({ code: "validation_failed", message: validationMessage(parsed) }, 400);
     const id = context.req.param("changeRequestId"); const timestamp = now();
-    const request = await context.env.DB.prepare("SELECT id, lineage_id, state, base_revision_id, base_pointer_version, created_by_account_id, version FROM change_request WHERE id = ?").bind(id).first<ChangeRequestRow>();
-    if (!request || request.state !== "draft" || request.version !== parsed.data.version) return context.json({ code: "change_request_conflict" }, 409);
+    const request = await context.env.DB.prepare("SELECT id, lineage_id, state, base_revision_id, base_pointer_version, created_by_account_id, version, discarded_at FROM change_request WHERE id = ?").bind(id).first<ChangeRequestRow>();
+    if (!request || request.state !== "draft" || request.discarded_at !== null || request.version !== parsed.data.version) return context.json({ code: "change_request_conflict" }, 409);
     if (!hasPermission(auth.roles, "system.manage") && request.created_by_account_id !== auth.accountId) return context.json({ code: "forbidden" }, 403);
     const membershipItem = await context.env.DB.prepare("SELECT id FROM branch_membership_change_item WHERE change_request_id = ? LIMIT 1").bind(request.id).first();
     if (membershipItem && !hasPermission(auth.roles, "system.manage")) return context.json({ code: "membership_change_requires_admin" }, 403);
@@ -815,7 +832,7 @@ export function createApp() {
     const reviewers = await effectiveReviewerAssignments(context.env.DB, request.lineage_id, timestamp, request.created_by_account_id);
     if (reviewers.length === 0) return context.json({ code: "reviewer_assignment_required", message: "该世系没有有效的非创建者审核人指派。" }, 409);
     const results = await context.env.DB.batch([
-      context.env.DB.prepare("UPDATE change_request SET state = 'pending_review', submitted_at = ?, version = version + 1 WHERE id = ? AND state = 'draft' AND version = ?").bind(timestamp, id, parsed.data.version),
+      context.env.DB.prepare("UPDATE change_request SET state = 'pending_review', submitted_at = ?, version = version + 1 WHERE id = ? AND state = 'draft' AND discarded_at IS NULL AND version = ?").bind(timestamp, id, parsed.data.version),
       ...reviewers.map((reviewer) => context.env.DB.prepare("INSERT INTO change_request_reviewer_assignment (change_request_id, reviewer_assignment_id, reviewer_account_id, captured_at) VALUES (?, ?, ?, ?)").bind(id, reviewer.id, reviewer.reviewer_account_id, timestamp)),
       context.env.DB.prepare("INSERT INTO audit_log (id, actor_account_id, action, object_type, object_id, metadata_json, created_at) VALUES (?, ?, ?, ?, ?, ?, ?)").bind(crypto.randomUUID(), auth.accountId, "lineage.change_request_submitted", "change_request", id, JSON.stringify({ reviewerAssignmentIds: reviewers.map((reviewer) => reviewer.id) }), timestamp),
     ]);
@@ -997,8 +1014,8 @@ export function createApp() {
     if (!hasPermission(auth.roles, "system.manage")) return context.json({ code: "forbidden" }, 403);
     const lineageId = context.req.query("lineageId")?.trim();
     const rows = lineageId
-      ? await context.env.DB.prepare("SELECT id, lineage_id, state, base_revision_id, base_pointer_version, reason, created_by_account_id, reviewed_by_account_id, review_note, version, created_at, submitted_at, reviewed_at, published_at FROM change_request WHERE lineage_id = ? ORDER BY created_at DESC, id DESC LIMIT 100").bind(lineageId).all()
-      : await context.env.DB.prepare("SELECT id, lineage_id, state, base_revision_id, base_pointer_version, reason, created_by_account_id, reviewed_by_account_id, review_note, version, created_at, submitted_at, reviewed_at, published_at FROM change_request ORDER BY created_at DESC, id DESC LIMIT 100").all();
+      ? await context.env.DB.prepare("SELECT id, lineage_id, state, base_revision_id, base_pointer_version, reason, created_by_account_id, reviewed_by_account_id, review_note, version, created_at, submitted_at, reviewed_at, published_at, discarded_at, discarded_by_account_id FROM change_request WHERE lineage_id = ? ORDER BY created_at DESC, id DESC LIMIT 100").bind(lineageId).all()
+      : await context.env.DB.prepare("SELECT id, lineage_id, state, base_revision_id, base_pointer_version, reason, created_by_account_id, reviewed_by_account_id, review_note, version, created_at, submitted_at, reviewed_at, published_at, discarded_at, discarded_by_account_id FROM change_request ORDER BY created_at DESC, id DESC LIMIT 100").all();
     return context.json({ changeRequests: rows.results });
   });
 

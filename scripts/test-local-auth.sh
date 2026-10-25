@@ -514,6 +514,28 @@ expectStatus(changePublish, 201);
 const kinshipAfterChangeRequest = await request(`/api/admin/lineages/${lineageId}/kinship?personId=${secondPerson.body.person.id}`, { cookie: adminCookie });
 expectStatus(kinshipAfterChangeRequest, 200);
 assert.equal(kinshipAfterChangeRequest.body.relations.some((relation) => relation.relatedPersonId === adoptiveParent.body.person.id && relation.relationKind === "adoptive_parent"), true);
+const discardedChangeRequest = await request(`/api/admin/lineages/${lineageId}/change-requests`, {
+  method: "POST", cookie: adminCookie, csrf: adminCsrf,
+  body: { reason: "创建者放弃的草稿必须保留审计", items: [{ operation: "relation_remove", subjectPersonId: secondPerson.body.person.id, relatedPersonId: adoptiveParent.body.person.id, relationKind: "adoptive_parent" }] },
+});
+expectStatus(discardedChangeRequest, 201);
+const discardedByReviewer = await request(`/api/admin/change-requests/${discardedChangeRequest.body.changeRequest.id}/discard`, {
+  method: "POST", cookie: reviewerCookie, csrf: reviewerCsrf, body: { version: 1 },
+});
+expectStatus(discardedByReviewer, 403);
+const discarded = await request(`/api/admin/change-requests/${discardedChangeRequest.body.changeRequest.id}/discard`, {
+  method: "POST", cookie: adminCookie, csrf: adminCsrf, body: { version: 1 },
+});
+expectStatus(discarded, 200);
+assert.equal(discarded.body.state, "discarded");
+const discardedPreview = await request(`/api/admin/change-requests/${discardedChangeRequest.body.changeRequest.id}/preview`, { cookie: adminCookie });
+expectStatus(discardedPreview, 200);
+expectStatus(await request(`/api/admin/change-requests/${discardedChangeRequest.body.changeRequest.id}/submit`, {
+  method: "POST", cookie: adminCookie, csrf: adminCsrf, body: { version: discarded.body.version },
+}), 409);
+const discardedQueue = await request(`/api/admin/change-requests?lineageId=${lineageId}`, { cookie: adminCookie });
+expectStatus(discardedQueue, 200);
+assert.equal(discardedQueue.body.changeRequests.some((item) => item.id === discardedChangeRequest.body.changeRequest.id && item.state === "draft" && item.discarded_at && item.discarded_by_account_id), true);
 const invalidChangeRequest = await request(`/api/admin/lineages/${lineageId}/change-requests`, {
   method: "POST", cookie: adminCookie, csrf: adminCsrf,
   body: { reason: "成环候选不得通过审核", items: [{ operation: "succession_add", subjectPersonId: secondPerson.body.person.id, relatedPersonId: personResult.body.person.id }] },

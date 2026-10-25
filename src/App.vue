@@ -1,6 +1,7 @@
 <script setup lang="ts">
 import { computed, onMounted, ref } from "vue";
 import { chartViewBox, createChartViewport, panChartViewport } from "./chart-viewport";
+import { canSubmitBranchChange, previewRetirements as getPreviewRetirements, projectComposerBranches, type LocalStructureItem, type WorkbenchBranch } from "./branch-workbench-composer";
 import { layoutHistoricalRecords } from "./historical-record-layout";
 import { layoutKinship } from "./kinship-layout";
 
@@ -19,9 +20,9 @@ type Kinship = { centerPersonId: string; nodes: Array<{ id: string; displayName:
 type ChangeRequest = { id: string; lineage_id: string; state: "draft" | "pending_review" | "approved" | "rejected" | "published" | "conflicted"; reason: string; created_by_account_id: string; reviewed_by_account_id: string | null; review_note: string | null; version: number; created_at: string };
 type Reviewer = { id: string; username: string; display_name: string };
 type ReviewerAssignment = { id: string; reviewer_account_id: string; valid_from: string; valid_until: string; reason: string; revoked_at: string | null; version: number };
-type Branch = { branchId: string; parentBranchId: string | null; name: string; branchKind: "agnatic" | "migration" | "administrative"; retiredAt: string | null; membershipCount: number; accountScopeCount: number };
+type Branch = WorkbenchBranch;
 type BranchWorkbench = { lineageId: string; revisionId: string; pointerVersion: number; branches: Branch[]; memberships: Array<{ branchId: string; personId: string; personDisplayName: string; membershipKind: string }> };
-type StructureItem = { operation: "create" | "rename" | "retire"; branchId: string; parentBranchId: string | null; name: string; branchKind: "agnatic" | "migration" | "administrative" };
+type StructureItem = LocalStructureItem;
 type MembershipItem = { operation: "add" | "remove"; branchId: string; personId: string; membershipKind: "blood_primary" | "migration" | "administrative" };
 type ChangePreview = { changeRequest: ChangeRequest; preview: { valid: boolean; issues: Array<{ code: string }>; edges: unknown[]; relations: unknown[]; memberships: unknown[]; branchStructure: { branches: Array<{ branchId: string; name: string; retiredAt: string | null }> }; retirementDependencies: Array<{ branchId: string; membershipCount: number; accountScopeCount: number; blockingCodes: string[] }> } };
 const status = ref("正在检查 API…"), notice = ref(""), account = ref<Account | null>(null), csrfToken = ref("");
@@ -65,17 +66,9 @@ const chartViewBoxValue = computed(() => chartViewBox(chartViewport.value));
 const historicalLayout = computed(() => comparison.value ? layoutHistoricalRecords(comparison.value.projection.nodes, comparison.value.projection.parentChildEdges) : null);
 const historicalStatus = computed(() => new Map(comparison.value?.comparison.historicalEdges.map((edge) => [edge.claimId, edge.status])));
 const kinshipLayout = computed(() => kinship.value ? layoutKinship(kinship.value.centerPersonId, kinship.value.nodes, kinship.value.relations) : null);
-const composerBranches = computed(() => {
-  const branches = new Map((branchWorkbench.value?.branches ?? []).map((branch) => [branch.branchId, { ...branch }]));
-  for (const item of branchComposer.value.structureItems) {
-    if (item.operation === "create") branches.set(item.branchId, { branchId: item.branchId, parentBranchId: item.parentBranchId, name: item.name, branchKind: item.branchKind, retiredAt: null, membershipCount: 0, accountScopeCount: 0 });
-    if (item.operation === "rename" && branches.has(item.branchId)) branches.get(item.branchId)!.name = item.name;
-    if (item.operation === "retire" && branches.has(item.branchId)) branches.get(item.branchId)!.retiredAt = "__PROPOSED_RETIREMENT__";
-  }
-  return [...branches.values()].sort((left, right) => left.name.localeCompare(right.name));
-});
-const previewRetirements = computed(() => changePreview.value?.preview.branchStructure.branches.filter((branch) => branch.retiredAt === "__PROPOSED_RETIREMENT__") ?? []);
-const retirementsConfirmed = computed(() => previewRetirements.value.every((branch) => retirementConfirmations.value[branch.branchId]?.trim() === branch.name));
+const composerBranches = computed(() => projectComposerBranches(branchWorkbench.value?.branches ?? [], branchComposer.value.structureItems));
+const previewRetirements = computed(() => getPreviewRetirements(changePreview.value?.preview.branchStructure.branches ?? []));
+const retirementsConfirmed = computed(() => canSubmitBranchChange(true, previewRetirements.value, retirementConfirmations.value));
 
 async function request(path: string, options: RequestInit = {}) {
   const headers = new Headers(options.headers);
@@ -237,7 +230,7 @@ async function previewChangeRequest(id: string) {
 async function submitChangeRequest() {
   const item = selectedChangeRequest.value; if (!item) return;
   if (!changePreview.value?.preview.valid) return void (notice.value = "预览未通过，不能提交审核。");
-  if (!retirementsConfirmed.value) return void (notice.value = "请逐项输入待退休房支名称以确认高风险操作。");
+  if (!canSubmitBranchChange(changePreview.value.preview.valid, previewRetirements.value, retirementConfirmations.value)) return void (notice.value = "请逐项输入待退休房支名称以确认高风险操作。");
   const response = await request(`/api/admin/change-requests/${item.id}/submit`, { method: "POST", body: JSON.stringify({ version: item.version }) });
   notice.value = response.ok ? "提案已提交审核。" : await message(response); if (response.ok) { selectedChangeRequest.value = null; changePreview.value = null; await refreshWorkflowData(); }
 }

@@ -100,6 +100,12 @@
 - `npm run verify:local-branch-workbench-demo` 已实际通过，验证 fixture、Worker、Vite 与 `/api` 代理，并额外断言房支只读模型返回预期成员计数；全程不使用 `--remote`。
 - 本执行环境的 Windows 浏览器控制运行时不支持当前 WSL 工作目录，因此本轮没有实际浏览器点击验收；该项明确保留为可在任意接力电脑运行上述 demo 后完成的人工步骤，未写作“已通过”。
 
+## 已完成：无浏览器依赖的房支工作台安全回归
+
+- 前端将本地房支投影、退休名称确认和提交门槛收敛为纯 TypeScript 函数，不执行网络请求且不修改 published 模型；Vitest 覆盖本地编排不变异、无效 preview 阻止提交、错误确认阻止提交及精确名称确认放行。
+- 已有 local Worker/D1 回归继续覆盖真实 `change_request` API、退休依赖预览、成员迁出和审核/发布实时校验。前端纯函数与 Worker 回归分别覆盖浏览器内状态规则和服务端权威规则，不能互相替代。
+- `npm run check` 已实际通过：23 个测试文件、53 项测试；`npm run lint`、`npm run build`、`npm run test:local-auth`、`npm run test:local-core-model` 与 `npm run verify:local-branch-workbench-demo` 均已实际通过，全部只使用本机资源。
+
 ## 未完成与风险
 
 - 房支成员增删和房支 `create` / `rename` / `retire` 已有首个管理员编排界面，但父房移动、合并、拆分与对象级审批人策略仍不在本切片范围；当前 `branch` 范围仍仅使用已存在的基准 revision 快照，不能通过关系提案隐式变更成员归属。

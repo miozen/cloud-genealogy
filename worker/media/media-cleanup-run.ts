@@ -34,6 +34,25 @@ export type CancelledMediaCleanupRun = Omit<FrozenMediaCleanupRun, "state"> & {
   cancelledAt: string;
 };
 export type ExpiredMediaCleanupRun = Omit<FrozenMediaCleanupRun, "state"> & { state: "expired" };
+export type FrozenMediaCleanupItem = {
+  mediaAssetId: string;
+  expectedObjectKey: string;
+  expectedSha256: string;
+  expectedByteSize: number;
+  expectedRetiredAt: string;
+  expectedCleanupAfter: string;
+  expectedHistoricalLinkCount: number;
+};
+export type CurrentMediaCleanupAsset = {
+  state: string;
+  objectKey: string;
+  sha256: string;
+  byteSize: number;
+  retiredAt: string | null;
+  cleanupAfter: string | null;
+  activeReferenceCount: number;
+  historicalLinkCount: number;
+};
 
 function isSha256(value: string) { return /^[0-9a-f]{64}$/.test(value); }
 function isTimestamp(value: string) { return Number.isFinite(Date.parse(value)); }
@@ -100,4 +119,20 @@ export function cancelMediaCleanupRun(run: FrozenMediaCleanupRun, cancelledByAcc
 export function expireMediaCleanupRun(run: FrozenMediaCleanupRun, now: Date): ExpiredMediaCleanupRun {
   if (now.getTime() < Date.parse(run.expiresAt)) throw new Error("media_cleanup_run_not_expired");
   return { ...run, state: "expired" };
+}
+
+export function previewMediaCleanupItem(item: FrozenMediaCleanupItem, current: CurrentMediaCleanupAsset | null, now: Date) {
+  if (!current) return { status: "would_skip" as const, blockingCodes: ["media_asset_missing"] };
+  const blockingCodes = [
+    ...(current.state !== "retired" ? ["media_asset_not_retired"] : []),
+    ...(current.objectKey !== item.expectedObjectKey ? ["object_key_changed"] : []),
+    ...(current.sha256 !== item.expectedSha256 ? ["sha256_changed"] : []),
+    ...(current.byteSize !== item.expectedByteSize ? ["byte_size_changed"] : []),
+    ...(current.retiredAt !== item.expectedRetiredAt ? ["retired_at_changed"] : []),
+    ...(current.cleanupAfter !== item.expectedCleanupAfter ? ["cleanup_after_changed"] : []),
+    ...(current.cleanupAfter === null || Date.parse(current.cleanupAfter) > now.getTime() ? ["cleanup_not_due"] : []),
+    ...(current.activeReferenceCount !== 0 ? ["active_reference_exists"] : []),
+    ...(current.historicalLinkCount !== item.expectedHistoricalLinkCount ? ["historical_link_count_changed"] : []),
+  ];
+  return { status: blockingCodes.length === 0 ? "ready_for_future_execution" as const : "would_skip" as const, blockingCodes };
 }

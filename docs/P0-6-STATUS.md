@@ -47,6 +47,8 @@
 
 第 42 项补齐 local run 的取消和过期收敛：待确认批次可取消，过期确认会收敛为 `expired`；所有这些状态仍不调用 R2 或执行删除。
 
+第 43 项新增 local 清理批次的只读 D1 漂移预检：冻结元数据与当前状态或关联数不一致时只报告将跳过的原因，不写状态、不读 R2，也不开放执行。
+
 ## Preview 恢复演练（2026-10-25）
 
 - 已明确授权重建唯一远程测试 D1 `cloud-genealogy-preview`；新 ID 为 `aaaacbfb-762d-41b7-a424-aaa6e69ec563`，`wrangler.jsonc` 已同步。production 未操作。

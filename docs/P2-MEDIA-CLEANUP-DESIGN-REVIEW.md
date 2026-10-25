@@ -8,6 +8,8 @@
 
 第 42 项新增 development-only 取消 API；只有 `pending_confirmation` 批次可以取消。确认时发现已过期的待确认批次会被收敛为 `expired` 并审计，随后返回冲突；查询本身仍不写入状态。
 
+第 43 项新增 development-only 漂移预检：只读比较每个冻结项与当前 D1 元数据、状态和关联数，返回 `ready_for_future_execution` 或 `would_skip` 及原因码。它不更新 item、不中断或取消 run，不读 R2，且明确返回 `executionAvailable: false`。
+
 ## 1. 结论与边界
 
 现有 `GET /api/admin/media-assets/cleanup-preview` 只产生管理员可读的候选列表；它不读取 R2、不写 D1、不写审计、不删除对象。该端点不是删除授权，也不能作为稍后执行删除的稳定快照。

@@ -793,6 +793,19 @@ expectStatus(confirmedCleanupRun, 200);
 assert.equal(confirmedCleanupRun.body.cleanupRun.state, "confirmed");
 const cleanupAuditActions = JSON.parse(execFileSync("npx", ["wrangler", "d1", "execute", "DB", "--local", "--persist-to", ".wrangler/local-auth-integration", "--command", `SELECT COUNT(*) AS count FROM audit_log WHERE object_id = '${cleanupRun.body.cleanupRun.id}' AND action IN ('media.cleanup_run_frozen', 'media.cleanup_run_confirmed');`, "--json"], { encoding: "utf8" }))[0].results[0].count;
 assert.equal(cleanupAuditActions, 2);
+const cleanupPreflightAuditCountBefore = JSON.parse(execFileSync("npx", ["wrangler", "d1", "execute", "DB", "--local", "--persist-to", ".wrangler/local-auth-integration", "--command", "SELECT COUNT(*) AS count FROM audit_log;", "--json"], { encoding: "utf8" }))[0].results[0].count;
+const readyCleanupPreflight = await request(`/api/admin/media-cleanup-runs/${cleanupRun.body.cleanupRun.id}/preflight`, { cookie: adminCookie });
+expectStatus(readyCleanupPreflight, 200);
+assert.equal(readyCleanupPreflight.body.executionAvailable, false);
+assert.deepEqual(readyCleanupPreflight.body.items[0].blockingCodes, []);
+assert.equal(readyCleanupPreflight.body.items[0].status, "ready_for_future_execution");
+execFileSync("npx", ["wrangler", "d1", "execute", "DB", "--local", "--persist-to", ".wrangler/local-auth-integration", "--command", `UPDATE media_asset SET byte_size = 129 WHERE id = '${expiredCleanupAssetId}';`], { stdio: "pipe" });
+const driftedCleanupPreflight = await request(`/api/admin/media-cleanup-runs/${cleanupRun.body.cleanupRun.id}/preflight`, { cookie: adminCookie });
+expectStatus(driftedCleanupPreflight, 200);
+assert.equal(driftedCleanupPreflight.body.items[0].status, "would_skip");
+assert.equal(driftedCleanupPreflight.body.items[0].blockingCodes.includes("byte_size_changed"), true);
+const cleanupPreflightAuditCountAfter = JSON.parse(execFileSync("npx", ["wrangler", "d1", "execute", "DB", "--local", "--persist-to", ".wrangler/local-auth-integration", "--command", "SELECT COUNT(*) AS count FROM audit_log;", "--json"], { encoding: "utf8" }))[0].results[0].count;
+assert.equal(cleanupPreflightAuditCountAfter, cleanupPreflightAuditCountBefore);
 const cancellableCleanupRun = await request("/api/admin/media-cleanup-runs", {
   method: "POST", cookie: adminCookie, csrf: adminCsrf,
   body: { backupRecoveryPoint: "local-recovery-drill-2026-10-25-cancel", backupPackageSha256: "d".repeat(64) },

@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { cancelMediaCleanupRun, confirmMediaCleanupRun, expireMediaCleanupRun, freezeMediaCleanupRun, maximumMediaCleanupCandidates } from "../worker/media/media-cleanup-run";
+import { cancelMediaCleanupRun, confirmMediaCleanupRun, expireMediaCleanupRun, freezeMediaCleanupRun, maximumMediaCleanupCandidates, previewMediaCleanupItem } from "../worker/media/media-cleanup-run";
 
 const now = new Date("2026-10-25T00:00:00.000Z");
 const candidate = {
@@ -37,5 +37,13 @@ describe("media cleanup run state", () => {
     expect(() => cancelMediaCleanupRun(run, "", now)).toThrow("media_cleanup_canceller_invalid");
     expect(() => expireMediaCleanupRun(run, now)).toThrow("media_cleanup_run_not_expired");
     expect(expireMediaCleanupRun(run, new Date("2026-10-26T00:00:00.000Z"))).toMatchObject({ state: "expired" });
+  });
+
+  it("reports frozen-item drift without changing the item", () => {
+    const item = { mediaAssetId: candidate.mediaAssetId, expectedObjectKey: candidate.objectKey, expectedSha256: candidate.sha256, expectedByteSize: candidate.byteSize, expectedRetiredAt: candidate.retiredAt, expectedCleanupAfter: candidate.cleanupAfter, expectedHistoricalLinkCount: candidate.historicalLinkCount };
+    const current = { state: "retired", objectKey: candidate.objectKey, sha256: candidate.sha256, byteSize: candidate.byteSize, retiredAt: candidate.retiredAt, cleanupAfter: candidate.cleanupAfter, activeReferenceCount: 0, historicalLinkCount: 1 };
+    expect(previewMediaCleanupItem(item, current, now)).toEqual({ status: "ready_for_future_execution", blockingCodes: [] });
+    expect(previewMediaCleanupItem(item, { ...current, byteSize: 129, activeReferenceCount: 1 }, now)).toEqual({ status: "would_skip", blockingCodes: ["byte_size_changed", "active_reference_exists"] });
+    expect(previewMediaCleanupItem(item, null, now)).toEqual({ status: "would_skip", blockingCodes: ["media_asset_missing"] });
   });
 });

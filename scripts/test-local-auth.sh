@@ -793,6 +793,28 @@ expectStatus(confirmedCleanupRun, 200);
 assert.equal(confirmedCleanupRun.body.cleanupRun.state, "confirmed");
 const cleanupAuditActions = JSON.parse(execFileSync("npx", ["wrangler", "d1", "execute", "DB", "--local", "--persist-to", ".wrangler/local-auth-integration", "--command", `SELECT COUNT(*) AS count FROM audit_log WHERE object_id = '${cleanupRun.body.cleanupRun.id}' AND action IN ('media.cleanup_run_frozen', 'media.cleanup_run_confirmed');`, "--json"], { encoding: "utf8" }))[0].results[0].count;
 assert.equal(cleanupAuditActions, 2);
+const cancellableCleanupRun = await request("/api/admin/media-cleanup-runs", {
+  method: "POST", cookie: adminCookie, csrf: adminCsrf,
+  body: { backupRecoveryPoint: "local-recovery-drill-2026-10-25-cancel", backupPackageSha256: "d".repeat(64) },
+});
+expectStatus(cancellableCleanupRun, 201);
+const cancelledCleanupRun = await request(`/api/admin/media-cleanup-runs/${cancellableCleanupRun.body.cleanupRun.id}/cancel`, { method: "POST", cookie: adminCookie, csrf: adminCsrf });
+expectStatus(cancelledCleanupRun, 200);
+assert.equal(cancelledCleanupRun.body.cleanupRun.state, "cancelled");
+const cancelledCleanupConfirmation = await request(`/api/admin/media-cleanup-runs/${cancellableCleanupRun.body.cleanupRun.id}/confirm`, { method: "POST", cookie: reviewerCookie, csrf: reviewerCsrf });
+expectStatus(cancelledCleanupConfirmation, 409);
+assert.equal(cancelledCleanupConfirmation.body.code, "media_cleanup_run_not_pending");
+const expiredCleanupRunId = "efefefef-efef-4fef-8fef-efefefefefef";
+execFileSync("npx", ["wrangler", "d1", "execute", "DB", "--local", "--persist-to", ".wrangler/local-auth-integration", "--command", `
+  INSERT INTO media_cleanup_run (id, state, candidate_snapshot_sha256, candidate_count, backup_recovery_point, backup_package_sha256, created_by_account_id, created_at, expires_at)
+  SELECT '${expiredCleanupRunId}', 'pending_confirmation', '${"e".repeat(64)}', 1, 'local-expired-run', '${"f".repeat(64)}', id, '1999-01-01T00:00:00.000Z', '2000-01-01T00:00:00.000Z' FROM account WHERE username = 'local.admin';
+`], { stdio: "pipe" });
+const expiredCleanupConfirmation = await request(`/api/admin/media-cleanup-runs/${expiredCleanupRunId}/confirm`, { method: "POST", cookie: reviewerCookie, csrf: reviewerCsrf });
+expectStatus(expiredCleanupConfirmation, 409);
+assert.equal(expiredCleanupConfirmation.body.code, "media_cleanup_run_expired");
+const expiredCleanupRun = await request(`/api/admin/media-cleanup-runs/${expiredCleanupRunId}`, { cookie: adminCookie });
+expectStatus(expiredCleanupRun, 200);
+assert.equal(expiredCleanupRun.body.cleanupRun.state, "expired");
 
 const identity = await request("/api/me", { cookie: memberCookie });
 expectStatus(identity, 200);

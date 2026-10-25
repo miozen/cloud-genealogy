@@ -28,6 +28,12 @@ export type ConfirmedMediaCleanupRun = Omit<FrozenMediaCleanupRun, "state"> & {
   confirmedByAccountId: string;
   confirmedAt: string;
 };
+export type CancelledMediaCleanupRun = Omit<FrozenMediaCleanupRun, "state"> & {
+  state: "cancelled";
+  cancelledByAccountId: string;
+  cancelledAt: string;
+};
+export type ExpiredMediaCleanupRun = Omit<FrozenMediaCleanupRun, "state"> & { state: "expired" };
 
 function isSha256(value: string) { return /^[0-9a-f]{64}$/.test(value); }
 function isTimestamp(value: string) { return Number.isFinite(Date.parse(value)); }
@@ -84,4 +90,14 @@ export function confirmMediaCleanupRun(run: FrozenMediaCleanupRun, confirmedByAc
   if (now.getTime() >= Date.parse(run.expiresAt)) throw new Error("media_cleanup_run_expired");
   if (!confirmedByAccountId || confirmedByAccountId === run.createdByAccountId) throw new Error("media_cleanup_second_confirmer_invalid");
   return { ...run, state: "confirmed", confirmedByAccountId, confirmedAt: now.toISOString() };
+}
+
+export function cancelMediaCleanupRun(run: FrozenMediaCleanupRun, cancelledByAccountId: string, now: Date): CancelledMediaCleanupRun {
+  if (!cancelledByAccountId) throw new Error("media_cleanup_canceller_invalid");
+  return { ...run, state: "cancelled", cancelledByAccountId, cancelledAt: now.toISOString() };
+}
+
+export function expireMediaCleanupRun(run: FrozenMediaCleanupRun, now: Date): ExpiredMediaCleanupRun {
+  if (now.getTime() < Date.parse(run.expiresAt)) throw new Error("media_cleanup_run_not_expired");
+  return { ...run, state: "expired" };
 }

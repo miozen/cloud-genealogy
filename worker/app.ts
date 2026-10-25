@@ -42,7 +42,7 @@ import {
   validationMessage,
 } from "./auth/validation";
 import { createMediaUploadIntent, finalizeMediaUpload, retireMediaAsset } from "./media/media-asset";
-import { confirmMediaCleanupRun, freezeMediaCleanupRun, type FrozenMediaCleanupRun, type MediaCleanupCandidate } from "./media/media-cleanup-run";
+import { cancelMediaCleanupRun, confirmMediaCleanupRun, expireMediaCleanupRun, freezeMediaCleanupRun, type FrozenMediaCleanupRun, type MediaCleanupCandidate } from "./media/media-cleanup-run";
 import { createR2PresignedPut, getR2PresignConfiguration } from "./media/r2-presigned-put";
 import { previewSuccessionRevision } from "./lineage/revision-preview";
 import { publishSuccessionRevision, rollbackSuccessionRevision } from "./lineage/revision-publish";
@@ -96,7 +96,7 @@ interface BranchScopeCountRow { branch_id: string; account_scope_count: number; 
 interface MediaAssetRow { id: string; object_key: string; sha256: string; byte_size: number; mime_type: "image/jpeg" | "image/png" | "image/webp"; original_filename: string; visibility: "PUBLIC" | "MEMBER" | "ADMIN"; state: "pending_upload" | "active" | "failed" | "retired"; created_by_account_id: string; created_at: string; upload_expires_at: string; }
 interface MediaReadRow { id: string; object_key: string; mime_type: string; original_filename: string; visibility: "PUBLIC" | "MEMBER" | "ADMIN"; linked_visibility_rank: number | null; }
 interface MediaCleanupPreviewRow { id: string; object_key: string; original_filename: string; mime_type: string; byte_size: number; sha256: string; retired_at: string; cleanup_after: string; retired_link_count: number; }
-interface MediaCleanupRunRow { id: string; state: "pending_confirmation" | "confirmed" | "cancelled" | "expired"; candidate_snapshot_sha256: string; candidate_count: number; backup_recovery_point: string; backup_package_sha256: string; created_by_account_id: string; created_at: string; expires_at: string; confirmed_by_account_id: string | null; confirmed_at: string | null; }
+interface MediaCleanupRunRow { id: string; state: "pending_confirmation" | "confirmed" | "cancelled" | "expired"; candidate_snapshot_sha256: string; candidate_count: number; backup_recovery_point: string; backup_package_sha256: string; created_by_account_id: string; created_at: string; expires_at: string; confirmed_by_account_id: string | null; confirmed_at: string | null; cancelled_by_account_id: string | null; cancelled_at: string | null; }
 interface MediaCleanupItemRow { id: string; media_asset_id: string; expected_object_key: string; expected_sha256: string; expected_byte_size: number; expected_retired_at: string; expected_cleanup_after: string; expected_historical_link_count: number; state: string; }
 
 function now(): string {
@@ -1278,7 +1278,7 @@ export function createApp() {
     const auth = context.get("auth")!;
     if (!hasPermission(auth.roles, "system.manage")) return context.json({ code: "forbidden" }, 403);
     if (context.env.APP_ENV !== "development") return context.json({ code: "media_cleanup_local_only" }, 403);
-    const run = await context.env.DB.prepare("SELECT id, state, candidate_snapshot_sha256, candidate_count, backup_recovery_point, backup_package_sha256, created_by_account_id, created_at, expires_at, confirmed_by_account_id, confirmed_at FROM media_cleanup_run WHERE id = ?").bind(context.req.param("cleanupRunId")).first<MediaCleanupRunRow>();
+    const run = await context.env.DB.prepare("SELECT id, state, candidate_snapshot_sha256, candidate_count, backup_recovery_point, backup_package_sha256, created_by_account_id, created_at, expires_at, confirmed_by_account_id, confirmed_at, cancelled_by_account_id, cancelled_at FROM media_cleanup_run WHERE id = ?").bind(context.req.param("cleanupRunId")).first<MediaCleanupRunRow>();
     if (!run) return context.json({ code: "media_cleanup_run_not_found" }, 404);
     const items = await context.env.DB.prepare("SELECT id, media_asset_id, expected_object_key, expected_sha256, expected_byte_size, expected_retired_at, expected_cleanup_after, expected_historical_link_count, state FROM media_cleanup_item WHERE cleanup_run_id = ? ORDER BY expected_cleanup_after, media_asset_id").bind(run.id).all<MediaCleanupItemRow>();
     return context.json({ cleanupRun: run, items: items.results });
@@ -1288,11 +1288,20 @@ export function createApp() {
     const auth = context.get("auth")!;
     if (!hasPermission(auth.roles, "system.manage")) return context.json({ code: "forbidden" }, 403);
     if (context.env.APP_ENV !== "development") return context.json({ code: "media_cleanup_local_only" }, 403);
-    const row = await context.env.DB.prepare("SELECT id, state, candidate_snapshot_sha256, candidate_count, backup_recovery_point, backup_package_sha256, created_by_account_id, created_at, expires_at FROM media_cleanup_run WHERE id = ?").bind(context.req.param("cleanupRunId")).first<MediaCleanupRunRow>();
+    const row = await context.env.DB.prepare("SELECT id, state, candidate_snapshot_sha256, candidate_count, backup_recovery_point, backup_package_sha256, created_by_account_id, created_at, expires_at, confirmed_by_account_id, confirmed_at, cancelled_by_account_id, cancelled_at FROM media_cleanup_run WHERE id = ?").bind(context.req.param("cleanupRunId")).first<MediaCleanupRunRow>();
     if (!row) return context.json({ code: "media_cleanup_run_not_found" }, 404);
+    if (row.state !== "pending_confirmation") return context.json({ code: "media_cleanup_run_not_pending" }, 409);
+    const frozenRun: FrozenMediaCleanupRun = { id: row.id, state: "pending_confirmation", candidateSnapshotSha256: row.candidate_snapshot_sha256, candidateCount: row.candidate_count, backupRecoveryPoint: row.backup_recovery_point, backupPackageSha256: row.backup_package_sha256, createdByAccountId: row.created_by_account_id, createdAt: row.created_at, expiresAt: row.expires_at };
+    const timestamp = new Date();
+    if (timestamp.getTime() >= Date.parse(frozenRun.expiresAt)) {
+      expireMediaCleanupRun(frozenRun, timestamp);
+      const expired = await context.env.DB.prepare("UPDATE media_cleanup_run SET state = 'expired' WHERE id = ? AND state = 'pending_confirmation' AND expires_at <= ?").bind(frozenRun.id, timestamp.toISOString()).run();
+      if (expired.meta.changes === 1) await writeAudit(context.env.DB, auth.accountId, "media.cleanup_run_expired", "media_cleanup_run", frozenRun.id, { localOnly: true });
+      return context.json({ code: "media_cleanup_run_expired" }, 409);
+    }
     let confirmed: ReturnType<typeof confirmMediaCleanupRun>;
     try {
-      confirmed = confirmMediaCleanupRun({ id: row.id, state: row.state as FrozenMediaCleanupRun["state"], candidateSnapshotSha256: row.candidate_snapshot_sha256, candidateCount: row.candidate_count, backupRecoveryPoint: row.backup_recovery_point, backupPackageSha256: row.backup_package_sha256, createdByAccountId: row.created_by_account_id, createdAt: row.created_at, expiresAt: row.expires_at }, auth.accountId, new Date());
+      confirmed = confirmMediaCleanupRun(frozenRun, auth.accountId, timestamp);
     } catch (error) {
       return context.json({ code: error instanceof Error ? error.message : "media_cleanup_confirmation_invalid" }, 409);
     }
@@ -1300,6 +1309,20 @@ export function createApp() {
     if (result.meta.changes !== 1) return context.json({ code: "media_cleanup_run_not_pending" }, 409);
     await writeAudit(context.env.DB, auth.accountId, "media.cleanup_run_confirmed", "media_cleanup_run", confirmed.id, { candidateSnapshotSha256: confirmed.candidateSnapshotSha256, confirmedByAccountId: auth.accountId, localOnly: true });
     return context.json({ cleanupRun: confirmed });
+  });
+
+  app.post("/api/admin/media-cleanup-runs/:cleanupRunId/cancel", requireAuthentication, async (context) => {
+    const auth = context.get("auth")!;
+    if (!hasPermission(auth.roles, "system.manage")) return context.json({ code: "forbidden" }, 403);
+    if (context.env.APP_ENV !== "development") return context.json({ code: "media_cleanup_local_only" }, 403);
+    const row = await context.env.DB.prepare("SELECT id, state, candidate_snapshot_sha256, candidate_count, backup_recovery_point, backup_package_sha256, created_by_account_id, created_at, expires_at, confirmed_by_account_id, confirmed_at, cancelled_by_account_id, cancelled_at FROM media_cleanup_run WHERE id = ?").bind(context.req.param("cleanupRunId")).first<MediaCleanupRunRow>();
+    if (!row) return context.json({ code: "media_cleanup_run_not_found" }, 404);
+    if (row.state !== "pending_confirmation") return context.json({ code: "media_cleanup_run_not_pending" }, 409);
+    const cancelled = cancelMediaCleanupRun({ id: row.id, state: "pending_confirmation", candidateSnapshotSha256: row.candidate_snapshot_sha256, candidateCount: row.candidate_count, backupRecoveryPoint: row.backup_recovery_point, backupPackageSha256: row.backup_package_sha256, createdByAccountId: row.created_by_account_id, createdAt: row.created_at, expiresAt: row.expires_at }, auth.accountId, new Date());
+    const result = await context.env.DB.prepare("UPDATE media_cleanup_run SET state = 'cancelled', cancelled_by_account_id = ?, cancelled_at = ? WHERE id = ? AND state = 'pending_confirmation' AND confirmed_by_account_id IS NULL").bind(cancelled.cancelledByAccountId, cancelled.cancelledAt, cancelled.id).run();
+    if (result.meta.changes !== 1) return context.json({ code: "media_cleanup_run_not_pending" }, 409);
+    await writeAudit(context.env.DB, auth.accountId, "media.cleanup_run_cancelled", "media_cleanup_run", cancelled.id, { localOnly: true });
+    return context.json({ cleanupRun: cancelled });
   });
 
   app.post("/api/admin/persons", requireAuthentication, async (context) => {

@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { confirmMediaCleanupRun, freezeMediaCleanupRun, maximumMediaCleanupCandidates } from "../worker/media/media-cleanup-run";
+import { cancelMediaCleanupRun, confirmMediaCleanupRun, expireMediaCleanupRun, freezeMediaCleanupRun, maximumMediaCleanupCandidates } from "../worker/media/media-cleanup-run";
 
 const now = new Date("2026-10-25T00:00:00.000Z");
 const candidate = {
@@ -29,5 +29,13 @@ describe("media cleanup run state", () => {
     expect(() => confirmMediaCleanupRun(run, "admin-a", now)).toThrow("media_cleanup_second_confirmer_invalid");
     expect(() => confirmMediaCleanupRun(run, "admin-b", new Date("2026-10-26T00:00:00.000Z"))).toThrow("media_cleanup_run_expired");
     expect(confirmMediaCleanupRun(run, "admin-b", new Date("2026-10-25T01:00:00.000Z"))).toMatchObject({ state: "confirmed", confirmedByAccountId: "admin-b" });
+  });
+
+  it("allows a pending run to be cancelled or explicitly converged to expired", async () => {
+    const { run } = await freezeMediaCleanupRun(input, now);
+    expect(cancelMediaCleanupRun(run, "admin-b", now)).toMatchObject({ state: "cancelled", cancelledByAccountId: "admin-b" });
+    expect(() => cancelMediaCleanupRun(run, "", now)).toThrow("media_cleanup_canceller_invalid");
+    expect(() => expireMediaCleanupRun(run, now)).toThrow("media_cleanup_run_not_expired");
+    expect(expireMediaCleanupRun(run, new Date("2026-10-26T00:00:00.000Z"))).toMatchObject({ state: "expired" });
   });
 });

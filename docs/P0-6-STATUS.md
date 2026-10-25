@@ -45,6 +45,8 @@
 
 第 41 项仅在 local development 环境开放管理员冻结、查询和不同第二管理员确认清理 run；preview/production 会拒绝，且没有 R2/D1 删除执行路径。local 恢复点字段只用于协议演练，不得被表述为真实 remote 备份证明。
 
+第 42 项补齐 local run 的取消和过期收敛：待确认批次可取消，过期确认会收敛为 `expired`；所有这些状态仍不调用 R2 或执行删除。
+
 ## Preview 恢复演练（2026-10-25）
 
 - 已明确授权重建唯一远程测试 D1 `cloud-genealogy-preview`；新 ID 为 `aaaacbfb-762d-41b7-a424-aaa6e69ec563`，`wrangler.jsonc` 已同步。production 未操作。

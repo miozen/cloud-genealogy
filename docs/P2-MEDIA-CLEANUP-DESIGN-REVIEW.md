@@ -6,6 +6,8 @@
 
 第 41 项仅在 `APP_ENV=development` 开放管理员创建、查询和第二人确认 run 的 API；服务端重新查询候选、冻结恢复点/包哈希并写审计。preview 与 production 均拒绝这些接口，且仍没有任何执行或删除端点。
 
+第 42 项新增 development-only 取消 API；只有 `pending_confirmation` 批次可以取消。确认时发现已过期的待确认批次会被收敛为 `expired` 并审计，随后返回冲突；查询本身仍不写入状态。
+
 ## 1. 结论与边界
 
 现有 `GET /api/admin/media-assets/cleanup-preview` 只产生管理员可读的候选列表；它不读取 R2、不写 D1、不写审计、不删除对象。该端点不是删除授权，也不能作为稍后执行删除的稳定快照。

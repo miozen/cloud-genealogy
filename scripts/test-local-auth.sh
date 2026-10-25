@@ -760,6 +760,21 @@ expectStatus(linksAfterRetirement, 200);
 assert.equal(linksAfterRetirement.body.personMedia.length, 0);
 expectStatus(await request(`/api/media-assets/${localMediaAssetId}`, { cookie: adminCookie }), 404);
 
+const expiredCleanupAssetId = "abababab-abab-4bab-8bab-abababababab";
+const cleanupAuditCountBefore = JSON.parse(execFileSync("npx", ["wrangler", "d1", "execute", "DB", "--local", "--persist-to", ".wrangler/local-auth-integration", "--command", "SELECT COUNT(*) AS count FROM audit_log;", "--json"], { encoding: "utf8" }))[0].results[0].count;
+execFileSync("npx", ["wrangler", "d1", "execute", "DB", "--local", "--persist-to", ".wrangler/local-auth-integration", "--command", `
+  INSERT INTO media_asset (id, object_key, sha256, byte_size, mime_type, original_filename, visibility, state, created_by_account_id, created_at, upload_expires_at, finalized_at, retired_at, cleanup_after)
+  SELECT '${expiredCleanupAssetId}', 'media/expired-cleanup-preview-fixture', '${"b".repeat(64)}', 128, 'image/jpeg', 'expired-preview.jpg', 'MEMBER', 'retired', id, '2026-01-01T00:00:00.000Z', '2026-01-01T00:05:00.000Z', '2026-01-01T00:00:00.000Z', '2026-01-02T00:00:00.000Z', '2000-01-01T00:00:00.000Z' FROM account WHERE username = 'local.admin';
+  INSERT INTO person_media (id, person_id, media_asset_id, role, display_order, created_by_account_id, created_at, retired_at)
+  SELECT 'cdcdcdcd-cdcd-4dcd-8dcd-cdcdcdcdcdcd', '${protectedMediaPerson.body.person.id}', '${expiredCleanupAssetId}', 'document', 0, id, '2026-01-01T00:00:00.000Z', '2026-01-02T00:00:00.000Z' FROM account WHERE username = 'local.admin';
+`], { stdio: "pipe" });
+const cleanupPreview = await request("/api/admin/media-assets/cleanup-preview", { cookie: adminCookie });
+expectStatus(cleanupPreview, 200);
+assert.equal(cleanupPreview.body.candidates.some((asset) => asset.id === expiredCleanupAssetId && asset.retired_link_count === 1), true);
+assert.equal(cleanupPreview.body.candidates.some((asset) => asset.id === localMediaAssetId), false);
+const cleanupAuditCountAfter = JSON.parse(execFileSync("npx", ["wrangler", "d1", "execute", "DB", "--local", "--persist-to", ".wrangler/local-auth-integration", "--command", "SELECT COUNT(*) AS count FROM audit_log;", "--json"], { encoding: "utf8" }))[0].results[0].count;
+assert.equal(cleanupAuditCountAfter, cleanupAuditCountBefore);
+
 const identity = await request("/api/me", { cookie: memberCookie });
 expectStatus(identity, 200);
 assert.deepEqual(identity.body.account.roles.sort(), ["editor", "member"]);

@@ -93,6 +93,7 @@ interface BranchMembershipSnapshotRow extends MembershipRow { display_name: stri
 interface BranchScopeCountRow { branch_id: string; account_scope_count: number; }
 interface MediaAssetRow { id: string; object_key: string; sha256: string; byte_size: number; mime_type: "image/jpeg" | "image/png" | "image/webp"; original_filename: string; visibility: "PUBLIC" | "MEMBER" | "ADMIN"; state: "pending_upload" | "active" | "failed" | "retired"; created_by_account_id: string; created_at: string; upload_expires_at: string; }
 interface MediaReadRow { id: string; object_key: string; mime_type: string; original_filename: string; visibility: "PUBLIC" | "MEMBER" | "ADMIN"; linked_visibility_rank: number | null; }
+interface MediaCleanupPreviewRow { id: string; object_key: string; original_filename: string; mime_type: string; byte_size: number; sha256: string; retired_at: string; cleanup_after: string; retired_link_count: number; }
 
 function now(): string {
   return new Date().toISOString();
@@ -1213,6 +1214,25 @@ export function createApp() {
        ORDER BY asset.finalized_at DESC, asset.id DESC LIMIT 100`,
     ).all();
     return context.json({ mediaAssets: assets.results });
+  });
+
+  // This endpoint deliberately has no R2 operation, audit write, or state
+  // transition. It is a bounded review list for a separately approved cleanup.
+  app.get("/api/admin/media-assets/cleanup-preview", requireAuthentication, async (context) => {
+    const auth = context.get("auth")!;
+    if (!hasPermission(auth.roles, "system.manage")) return context.json({ code: "forbidden" }, 403);
+    const timestamp = now();
+    const candidates = await context.env.DB.prepare(
+      `SELECT asset.id, asset.object_key, asset.original_filename, asset.mime_type, asset.byte_size, asset.sha256, asset.retired_at, asset.cleanup_after,
+        COUNT(history.id) AS retired_link_count
+       FROM media_asset AS asset
+       LEFT JOIN person_media AS history ON history.media_asset_id = asset.id AND history.retired_at IS NOT NULL
+       WHERE asset.state = 'retired' AND asset.cleanup_after IS NOT NULL AND asset.cleanup_after <= ?
+         AND NOT EXISTS (SELECT 1 FROM person_media AS active_link WHERE active_link.media_asset_id = asset.id AND active_link.retired_at IS NULL)
+       GROUP BY asset.id, asset.object_key, asset.original_filename, asset.mime_type, asset.byte_size, asset.sha256, asset.retired_at, asset.cleanup_after
+       ORDER BY asset.cleanup_after ASC, asset.id ASC LIMIT 100`,
+    ).bind(timestamp).all<MediaCleanupPreviewRow>();
+    return context.json({ asOf: timestamp, candidates: candidates.results });
   });
 
   app.post("/api/admin/persons", requireAuthentication, async (context) => {

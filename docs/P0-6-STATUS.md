@@ -37,6 +37,8 @@
 
 第 37 项进一步加入 `retired media_asset → 已退休 person_media → R2` 夹具：其 `cleanup_after` 仍在 30 天保留窗口内、活动引用数为零。演练验证该资产仍进入 v2 清单和离线包，并在新 local 目标恢复其退休状态、保留截止、历史关联和对象字节；未删除任何对象，也未实现到期清理。
 
+第 38 项新增仅管理员可读的 `GET /api/admin/media-assets/cleanup-preview`：它只报告已过 `cleanup_after` 且不存在活动人物关联的退休资产（最多 100 条），不读取 R2、不写 D1 或审计，也不删除对象。真实清理仍需独立设计、授权与恢复前置验证。
+
 ## Preview 恢复演练（2026-10-25）
 
 - 已明确授权重建唯一远程测试 D1 `cloud-genealogy-preview`；新 ID 为 `aaaacbfb-762d-41b7-a424-aaa6e69ec563`，`wrangler.jsonc` 已同步。production 未操作。

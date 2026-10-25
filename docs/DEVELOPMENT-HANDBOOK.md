@@ -61,6 +61,12 @@ npm run dev:worker
 
 前端默认端口由 Vite 分配；前端的 `/api` 请求代理至 `http://127.0.0.1:8787`。Worker 本地运行使用 Wrangler local bindings，绝不接触远程 D1 或 R2。
 
+### 本地房支工作台演示
+
+`npm run demo:local-branch-workbench` 会在独立 local D1 状态中创建两名本地管理员、一个已发布世系、两级房支及成员归属，再启动 Worker 和 Vite。它只用于人工检查“本地编排不落库、依赖阻止退休、成员移除加退休、退休名称确认”的前端流程；按 `Ctrl+C` 会清理整个演示状态。测试账号和密码只属于该临时本地环境，不得用于任何远程环境。
+
+若只需检查演示 fixture、Worker、Vite 和 API 代理，运行 `npm run verify:local-branch-workbench-demo`；该命令自动退出并清理状态，不执行浏览器交互。
+
 常用检查：
 
 ```bash

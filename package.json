@@ -11,6 +11,8 @@
     "dev:worker": "wrangler dev --local",
     "demo:local-chart": "bash scripts/demo-local-chart.sh",
     "verify:local-chart-demo": "LOCAL_CHART_DEMO_VERIFY_ONLY=1 bash scripts/demo-local-chart.sh",
+    "demo:local-branch-workbench": "bash scripts/demo-local-branch-workbench.sh",
+    "verify:local-branch-workbench-demo": "LOCAL_BRANCH_WORKBENCH_DEMO_VERIFY_ONLY=1 bash scripts/demo-local-branch-workbench.sh",
     "build": "npm run typecheck && vite build",
     "test": "vitest run",
     "test:local-auth": "bash scripts/test-local-auth.sh",

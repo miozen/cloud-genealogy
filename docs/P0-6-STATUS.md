@@ -1,16 +1,16 @@
 # P0-6 状态：备份与恢复
 
-状态：local 基线、D1 数据导入准备工具与 preview 合成恢复演练已完成；真实 remote 备份、媒体引用校验与灾难切换尚未开始。最后更新：2026-10-25。
+状态：local 基线、媒体引用恢复核验、D1 数据导入准备工具与 preview 合成恢复演练已完成；真实 remote 备份、远程媒体引用校验与灾难切换尚未开始。最后更新：2026-10-25。
 
 ## 已完成
 
 - 基于实际 migrations、Worker/R2 使用情况、Wrangler 环境配置和现有本地验证脚本完成备份恢复审查。
 - 复核当前 Cloudflare 官方 D1 导入导出、R2 S3 API 与 Workers 限制文档，并在 [设计审查](/home/mio/projects/cloud-genealogy/docs/P0-6-BACKUP-RECOVERY-DESIGN-REVIEW.md) 中固化限制与推荐方案。
-- 确认本切片前没有既有 backup/restore 工具；当前仍没有 `backup_record` 物理表、媒体元数据表、R2 业务写入代码或 CI 工作流，因此没有宣称未发生的 remote 备份、恢复或演练。
+- 确认本切片开始前没有既有 backup/restore 工具；当前仍没有 `backup_record` 物理表、远程备份/恢复命令或 CI 工作流，因此没有宣称未发生的 remote 备份、恢复或演练。
 - 新增 `scripts/backup-package.mjs`：只处理已落在本地目录的离线包，生成带 D1 SQL、R2 对象、迁移基线、计数与 SHA-256 的 `manifest.json`，并在任何导入前执行只读预检。它不含 remote 命令、凭据读取、加密或恢复写入。
 - 新增 `npm run test:local-backup-recovery`：在一次性临时目录中使用 Wrangler local D1/R2 完成导出、对象取回、manifest 生成/预检、全新目标恢复和对象内容比对；篡改对象后预检会失败，恢复命令不会执行。
-- 新增 `scripts/backup-counts.mjs` 与 `npm run collect:local-backup-counts -- ...`：它只接受显式 local Wrangler 可执行文件、local 工作目录和输出文件，实际查询账号/权限、人物、谱书、来源、revision、关系、房支和审计共 16 项 D1 计数；`backup-package.mjs --counts-file` 只接受该采集器产生的计数文件。
-- local R2 演练对象会在 manifest 中标记为 `local_fixture`。非 local 包如包含 R2 对象，预检要求每个对象提供 `mediaAssetId`；当前尚无媒体元数据表，故工具会拒绝把测试夹具误用为远程媒体备份。
+- 新增 `scripts/backup-counts.mjs` 与 `npm run collect:local-backup-counts -- ...`：它只接受显式 local Wrangler 可执行文件、local 工作目录和输出文件，实际查询账号/权限、人物、谱书、来源、revision、关系、房支、媒体和审计 D1 计数；同时输出活动及保留期内退休媒体的稳定 ID、对象键、哈希、大小、MIME、状态与活动引用数。`backup-package.mjs --counts-file` 只接受该采集器产生的 v2 清单。
+- local R2 演练对象会在 manifest 中标记为 `local_fixture`，但必须逐一绑定 D1 媒体清单；未登记对象、缺对象或哈希/大小/MIME 不符均会在生成或预检失败。该能力仅证明隔离 local 演练，不能把测试夹具误用为 remote 备份。
 - 新增 `scripts/backup-crypt.mjs` 与 `npm run crypt:backup -- ...`：对完整离线归档进行 AES-256-GCM 加密和认证解密，使用随机 salt/IV 与 Node 内建 scrypt；拒绝覆盖输出，认证失败不留下输出文件。真实密钥保管流程见 `P0-6-KEY-RECOVERY-DESIGN.md`。
 - 新增 `P0-6-ADMIN-RUNBOOK.md`：将 local 演练、remote 备份前置条件、恢复预检、测试环境演练和生产恢复的授权边界固化为管理员清单；不含任何真实秘密或远程资源标识。
 - 新增 `P0-6-TEST-RECOVERY-AUTHORIZATION.md`：固化测试环境演练的成功标准、一次性授权范围、禁止事项和待安全审批记录补齐的事实。
@@ -21,7 +21,7 @@
 - 本地基线采用管理员受控命令、至少保留三个成功点、恢复到新资源而非覆盖的推荐默认值；真正 remote 执行仍须在加密与密钥保管责任、保留节奏、写冻结体验及资源切换细节确认后另行授权。
 - 生产资源仍未创建/使用；production D1 ID 为占位值。任何远程 D1/R2 导出、测试恢复、资源创建、Secret 写入或部署都需要独立明确授权。
 - D1 与 R2 不具备跨服务原子快照；媒体上线前必须实现可审计写冻结及以媒体元数据为准的对象清单，不能依赖全桶盲扫。
-- preview 已完成一次合成 D1/R2 恢复演练；尚无真实备份包的 remote 测试、真实媒体元数据引用校验、Worker 已部署后的授权冒烟检查或灾难切换测试。
+- preview 已完成一次合成 D1/R2 恢复演练；尚无真实备份包的 remote 测试、真实远程媒体引用校验、Worker 已部署后的授权冒烟检查或灾难切换测试。
 
 ## 本切片验证
 
@@ -30,8 +30,10 @@
 | 本地源码、迁移、运行配置与脚本审计 | 已执行；确认没有既有备份/恢复实现或 CI 工作流。 |
 | Cloudflare 官方文档复核 | 已执行；D1 SQL 导出/导入、R2 S3 访问及 Workers 限制与设计一致。 |
 | `npm run test:local-backup-recovery` | 通过：仅临时 local D1/R2，验证业务计数采集、导出、只读预检、D1 data-only 准备的拒绝路径和已迁移空目标导入、加密认证解密、错误口令/篡改拦截、隔离恢复及对象内容比对。 |
-| `npm run lint`、`npm run check`、`npm run build` | 通过：23 个测试文件、53 项测试；生产构建完成。 |
+| `npm run lint`、`npm run check`、`npm run build` | 通过：27 个测试文件、66 项测试；生产构建完成。 |
 | preview D1/R2 合成恢复演练 | 通过：已重建 preview、应用 15 项迁移、恢复合成人物与媒体并完成外键/字节校验；未部署 Worker。 |
+
+第 36 项已扩展 local 演练：fixture 现有真实 `active media_asset → person_media → R2` 链；包格式 v2 将 R2 文件逐一绑定媒体 ID/哈希/大小/MIME/状态/引用数，恢复后核验资产元数据、关联行和对象字节。未访问 preview 或 production。
 
 ## Preview 恢复演练（2026-10-25）
 

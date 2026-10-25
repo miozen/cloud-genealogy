@@ -4,7 +4,7 @@
 
 ## 1. 本次审查结论
 
-P0-6 是上线阻断项。当前已具备仅面向本地落盘包的 `scripts/backup-package.mjs` 与 `npm run test:local-backup-recovery`：它们验证 D1 SQL、R2 对象、SHA-256 manifest、迁移基线和隔离 local D1/R2 恢复，但**不能**对 remote D1/R2 执行备份或恢复。仓库仍没有 `backup_record` 物理表、媒体元数据表、R2 业务读写代码或 CI 工作流。`wrangler.jsonc` 仅声明 local、preview、production 的 D1/R2 binding；其中 production 资源 ID 仍为占位值。因此不能将本地演练描述为已完成远程备份、远程演练或生产可恢复证明。
+P0-6 是上线阻断项。当前已具备仅面向本地落盘包的 `scripts/backup-package.mjs` 与 `npm run test:local-backup-recovery`：它们验证 D1 SQL、R2 对象、SHA-256 manifest、迁移基线、媒体元数据引用和隔离 local D1/R2 恢复，但**不能**对 remote D1/R2 执行备份或恢复。仓库仍没有 `backup_record` 物理表、远程备份/恢复命令或 CI 工作流。`wrangler.jsonc` 仅声明 local、preview、production 的 D1/R2 binding；其中 production 资源 ID 仍为占位值。因此不能将本地演练描述为已完成远程备份、远程演练或生产可恢复证明。
 
 已确认的技术事实：
 
@@ -55,9 +55,9 @@ D1 与 R2 不提供跨服务原子快照。仅“先导出 SQL、再下载整个
 3. 对 SQL、对象、迁移基线和计数做本地校验；失败即标记备份失败并解除冻结，不产生“成功”记录。
 4. 仅在校验成功后，生成 manifest、加密归档、复制到 Cloudflare 账户外的保管位置，并解除冻结。
 
-当前尚无媒体表或上传流程，故该方案不能现在实现“按引用对象”枚举；P2 媒体模型必须提供稳定对象键、内容哈希、大小、MIME 与 retired/deleted 状态，P0-6 实施才可接入。若备份先于媒体功能落地，R2 段应明确记录为“空对象集”，不得伪称覆盖未来媒体。
+P2 已提供媒体表、上传流程与稳定对象键、内容哈希、大小、MIME、状态及人物关联。P0-6 local 演练已据此实现“按引用对象”清单与恢复核验；remote 导出仍未实现，在取得独立授权前不得对 preview 或 production 运行该路径。
 
-当前 local 基线已额外实现 16 项核心业务计数的实际 D1 采集；该采集器只接受 `--local`，不能被误用为 remote 导出前置。local R2 夹具对象显式标记为 `local_fixture`。任何非 local 包若含 R2 文件而没有 `mediaAssetId`，manifest 预检都会失败；在媒体模型落地前，不存在可通过预检的真实远程媒体包。
+当前 local 基线已额外实现核心业务计数与 `media_asset`/`person_media` 的实际 D1 采集；该采集器只接受 `--local`，不能被误用为 remote 导出前置。它同时输出活动及仍在保留期内退休媒体的稳定 ID、对象键、SHA-256、大小、MIME、状态及活动引用数。local R2 夹具对象显式标记为 `local_fixture`，但也必须逐一匹配该媒体清单；未登记对象、缺对象或元数据不符都会在包生成或预检失败。remote 备份仍未实现，不能因此宣称真实远程媒体包已经可用。
 
 不推荐把备份循环实现在 Worker/Cron：它会受免费计划的 CPU、子请求、Cron 数量和执行限制影响，也会把高权限读取凭据置于运行时。推荐由管理员受控的本地命令执行 D1 导出与 R2 S3 拉取；未来如采用 CI，必须先单独确认最小权限 token、加密密钥托管、日志脱敏和保管责任。
 

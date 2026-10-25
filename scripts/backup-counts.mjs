@@ -21,7 +21,18 @@ const countQuery = `
     (SELECT COUNT(*) FROM canonical_relation_snapshot) AS canonical_relation_snapshot,
     (SELECT COUNT(*) FROM branch) AS branch,
     (SELECT COUNT(*) FROM branch_membership_snapshot) AS branch_membership_snapshot,
+    (SELECT COUNT(*) FROM media_asset) AS media_asset,
+    (SELECT COUNT(*) FROM person_media) AS person_media,
     (SELECT COUNT(*) FROM audit_log) AS audit_log
+`;
+const mediaInventoryQuery = `
+  SELECT asset.id AS media_asset_id, asset.object_key, asset.sha256, asset.byte_size, asset.mime_type, asset.state,
+    COUNT(link.id) AS active_reference_count
+  FROM media_asset AS asset
+  LEFT JOIN person_media AS link ON link.media_asset_id = asset.id AND link.retired_at IS NULL
+  WHERE asset.state IN ('active', 'retired')
+  GROUP BY asset.id, asset.object_key, asset.sha256, asset.byte_size, asset.mime_type, asset.state
+  ORDER BY asset.object_key, asset.id
 `;
 
 function usage() {
@@ -54,8 +65,18 @@ try {
     if (!Number.isSafeInteger(value) || value < 0) throw new Error(`Local D1 count query returned an invalid value for ${name}.`);
     counts[name] = value;
   }
-  await writeFile(path.resolve(values.get("output")), `${JSON.stringify({ formatVersion: 1, collectedAt: new Date().toISOString(), source: "local_d1", counts }, null, 2)}\n`, "utf8");
-  console.log(JSON.stringify({ ok: true, counts }, null, 2));
+  const rawMedia = execFileSync(values.get("wrangler"), ["d1", "execute", "DB", "--local", "--command", mediaInventoryQuery, "--json"], {
+    cwd: path.resolve(values.get("cwd")), encoding: "utf8", stdio: ["ignore", "pipe", "inherit"],
+  });
+  const mediaPayload = JSON.parse(rawMedia);
+  const mediaRows = mediaPayload?.[0]?.results;
+  if (!Array.isArray(mediaRows)) throw new Error("Local D1 media inventory query did not return rows.");
+  const mediaAssets = mediaRows.map((row) => {
+    if (!row || typeof row !== "object" || typeof row.media_asset_id !== "string" || typeof row.object_key !== "string" || typeof row.sha256 !== "string" || !Number.isSafeInteger(row.byte_size) || typeof row.mime_type !== "string" || typeof row.state !== "string" || !Number.isSafeInteger(row.active_reference_count)) throw new Error("Local D1 media inventory contains an invalid row.");
+    return { mediaAssetId: row.media_asset_id, objectKey: row.object_key, sha256: row.sha256, byteSize: row.byte_size, mimeType: row.mime_type, state: row.state, activeReferenceCount: row.active_reference_count };
+  });
+  await writeFile(path.resolve(values.get("output")), `${JSON.stringify({ formatVersion: 2, collectedAt: new Date().toISOString(), source: "local_d1", counts, mediaAssets }, null, 2)}\n`, "utf8");
+  console.log(JSON.stringify({ ok: true, counts, mediaAssets }, null, 2));
 } catch (error) {
   if (error && typeof error === "object" && "stderr" in error && typeof error.stderr === "string" && error.stderr) console.error(error.stderr);
   console.error(error instanceof Error ? error.message : String(error));

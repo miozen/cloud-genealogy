@@ -37,7 +37,7 @@ npm run test:local-backup-recovery
 
 1. 启用经过实现和审计的逻辑写冻结；确认所有写 API 与上传均返回可解释的拒绝状态，读取不受影响。
 2. 导出 D1 SQL；记录导出开始/结束时间和 migration 基线。不得把导出文件直接导入现有 remote 数据库。
-3. 依据未来 `media_asset` 元数据清单下载 R2 对象；逐项核验对象键、SHA-256、大小、MIME 和稳定媒体 ID。当前无该表，故不得执行真实媒体备份。
+3. 依据 `media_asset` 元数据清单下载 R2 对象；逐项核验对象键、SHA-256、大小、MIME 和稳定媒体 ID。local 工具已覆盖此契约；真实 remote 备份仍须另行授权并配置最小权限凭据。
 4. 采集业务计数，生成 manifest，执行只读预检；任何哈希、计数、迁移或引用失败都应删除不完整临时包并解除冻结。
 5. 将完整包归档并用 `npm run crypt:backup -- encrypt ...` 加密；真实口令不进入仓库或 shell history。复制包到 Cloudflare 账户外的独立保管位置。
 6. 记录成功 backup ID、包 SHA-256、保管位置标识与写冻结解除时间；不记录秘密。

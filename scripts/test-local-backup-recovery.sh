@@ -44,8 +44,14 @@ printf '%s\n' \
   cd "$fixture_root"
   "$project_root/node_modules/.bin/wrangler" d1 migrations apply DB --local >/dev/null
   "$project_root/node_modules/.bin/wrangler" d1 execute DB --local --command "
+  INSERT INTO account (id, username, display_name, password_scheme, password_hash, status, created_at, updated_at)
+  VALUES ('aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa', 'backup.fixture', '备份演练操作人', 'fixture', 'fixture', 'active', '2026-10-25T00:00:00Z', '2026-10-25T00:00:00Z');
   INSERT INTO person (id, display_name, visibility, created_at, updated_at)
   VALUES ('backup-fixture-person', '备份演练人物', 'MEMBER', '2026-10-25T00:00:00Z', '2026-10-25T00:00:00Z');
+  INSERT INTO media_asset (id, object_key, sha256, byte_size, mime_type, original_filename, visibility, state, created_by_account_id, created_at, upload_expires_at, finalized_at)
+  VALUES ('bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb', 'media/fixture.txt', 'ebfad43a2975422358db27951444e12ca0465dca77cfc2725ae272eab13e2b30', 27, 'image/jpeg', 'fixture.jpg', 'MEMBER', 'active', 'aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa', '2026-10-25T00:00:00Z', '2026-10-25T00:05:00Z', '2026-10-25T00:00:00Z');
+  INSERT INTO person_media (id, person_id, media_asset_id, role, display_order, created_by_account_id, created_at)
+  VALUES ('cccccccc-cccc-4ccc-8ccc-cccccccccccc', 'backup-fixture-person', 'bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb', 'document', 3, 'aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa', '2026-10-25T00:00:00Z');
 " >/dev/null
   "$project_root/node_modules/.bin/wrangler" d1 export DB --local --output "$package_dir/d1/schema-and-data.sql" >/dev/null
 
@@ -58,6 +64,9 @@ node "$project_root/scripts/backup-counts.mjs" \
   --cwd "$fixture_root" \
   --output "$fixture_root/counts.json" >/dev/null
 rg -q '"person": 1' "$fixture_root/counts.json"
+rg -q '"media_asset": 1' "$fixture_root/counts.json"
+rg -q '"person_media": 1' "$fixture_root/counts.json"
+rg -q '"mediaAssetId": "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb"' "$fixture_root/counts.json"
 
 node scripts/backup-package.mjs create \
   --package "$package_dir" \
@@ -110,8 +119,12 @@ test ! -e "$fixture_root/wrong-passphrase.tar.gz"
 npx wrangler d1 execute DB --local --persist-to "$target_state" --file "$package_dir/d1/schema-and-data.sql" >/dev/null
 npx wrangler d1 execute DB --local --persist-to "$target_state" --command "
   SELECT COUNT(*) AS people FROM person WHERE id = 'backup-fixture-person';
+  SELECT asset.state, asset.sha256, asset.byte_size, COUNT(link.id) AS active_links FROM media_asset AS asset LEFT JOIN person_media AS link ON link.media_asset_id = asset.id AND link.retired_at IS NULL WHERE asset.id = 'bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb' GROUP BY asset.id, asset.state, asset.sha256, asset.byte_size;
 " > "$fixture_root/restore-result.json"
 rg -q '"people":\s*1' "$fixture_root/restore-result.json"
+rg -q '"state":\s*"active"' "$fixture_root/restore-result.json"
+rg -q '"sha256":\s*"ebfad43a2975422358db27951444e12ca0465dca77cfc2725ae272eab13e2b30"' "$fixture_root/restore-result.json"
+rg -q '"active_links":\s*1' "$fixture_root/restore-result.json"
 
 npx wrangler r2 object put cloud-genealogy-local/media/fixture.txt --local --persist-to "$target_state" --file "$package_dir/r2/media/fixture.txt" >/dev/null
 npx wrangler r2 object get cloud-genealogy-local/media/fixture.txt --local --persist-to "$target_state" --file "$restored_media"

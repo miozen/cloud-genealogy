@@ -15,6 +15,8 @@ decrypted_file="$fixture_root/backup-package-restored.tar.gz"
 decrypted_dir="$fixture_root/decrypted"
 source_media="$fixture_root/source-media.txt"
 restored_media="$fixture_root/restored-media.txt"
+source_retired_media="$fixture_root/source-retired-media.txt"
+restored_retired_media="$fixture_root/restored-retired-media.txt"
 passphrase_file="$fixture_root/recovery-passphrase"
 wrong_passphrase_file="$fixture_root/wrong-recovery-passphrase"
 export XDG_CONFIG_HOME="$fixture_root/config"
@@ -31,6 +33,7 @@ trap cleanup EXIT
 
 mkdir -p "$package_dir/d1" "$package_dir/r2/media"
 printf 'local backup media fixture\n' > "$source_media"
+printf 'local retired backup media fixture\n' > "$source_retired_media"
 cp -R "$project_root/migrations" "$fixture_root/migrations"
 printf '%s\n' \
   '{' \
@@ -52,11 +55,17 @@ printf '%s\n' \
   VALUES ('bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb', 'media/fixture.txt', 'ebfad43a2975422358db27951444e12ca0465dca77cfc2725ae272eab13e2b30', 27, 'image/jpeg', 'fixture.jpg', 'MEMBER', 'active', 'aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa', '2026-10-25T00:00:00Z', '2026-10-25T00:05:00Z', '2026-10-25T00:00:00Z');
   INSERT INTO person_media (id, person_id, media_asset_id, role, display_order, created_by_account_id, created_at)
   VALUES ('cccccccc-cccc-4ccc-8ccc-cccccccccccc', 'backup-fixture-person', 'bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb', 'document', 3, 'aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa', '2026-10-25T00:00:00Z');
+  INSERT INTO media_asset (id, object_key, sha256, byte_size, mime_type, original_filename, visibility, state, created_by_account_id, created_at, upload_expires_at, finalized_at, retired_at, cleanup_after)
+  VALUES ('dddddddd-dddd-4ddd-8ddd-dddddddddddd', 'media/retired-fixture.txt', 'ba9a49a050dc9257983495b421ccea278964776d5aba10b1654b7f3052ce91c6', 35, 'image/jpeg', 'retired-fixture.jpg', 'MEMBER', 'retired', 'aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa', '2026-10-25T00:00:00Z', '2026-10-25T00:05:00Z', '2026-10-25T00:00:00Z', '2026-10-25T00:10:00Z', '2026-11-24T00:10:00Z');
+  INSERT INTO person_media (id, person_id, media_asset_id, role, display_order, created_by_account_id, created_at, retired_at)
+  VALUES ('eeeeeeee-eeee-4eee-8eee-eeeeeeeeeeee', 'backup-fixture-person', 'dddddddd-dddd-4ddd-8ddd-dddddddddddd', 'document', 4, 'aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa', '2026-10-25T00:00:00Z', '2026-10-25T00:10:00Z');
 " >/dev/null
   "$project_root/node_modules/.bin/wrangler" d1 export DB --local --output "$package_dir/d1/schema-and-data.sql" >/dev/null
 
   "$project_root/node_modules/.bin/wrangler" r2 object put cloud-genealogy-local/media/fixture.txt --local --file "$source_media" >/dev/null
   "$project_root/node_modules/.bin/wrangler" r2 object get cloud-genealogy-local/media/fixture.txt --local --file "$package_dir/r2/media/fixture.txt" >/dev/null
+  "$project_root/node_modules/.bin/wrangler" r2 object put cloud-genealogy-local/media/retired-fixture.txt --local --file "$source_retired_media" >/dev/null
+  "$project_root/node_modules/.bin/wrangler" r2 object get cloud-genealogy-local/media/retired-fixture.txt --local --file "$package_dir/r2/media/retired-fixture.txt" >/dev/null
 )
 
 node "$project_root/scripts/backup-counts.mjs" \
@@ -64,9 +73,12 @@ node "$project_root/scripts/backup-counts.mjs" \
   --cwd "$fixture_root" \
   --output "$fixture_root/counts.json" >/dev/null
 rg -q '"person": 1' "$fixture_root/counts.json"
-rg -q '"media_asset": 1' "$fixture_root/counts.json"
-rg -q '"person_media": 1' "$fixture_root/counts.json"
+rg -q '"media_asset": 2' "$fixture_root/counts.json"
+rg -q '"person_media": 2' "$fixture_root/counts.json"
 rg -q '"mediaAssetId": "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb"' "$fixture_root/counts.json"
+rg -q '"mediaAssetId": "dddddddd-dddd-4ddd-8ddd-dddddddddddd"' "$fixture_root/counts.json"
+rg -q '"state": "retired"' "$fixture_root/counts.json"
+rg -q '"activeReferenceCount": 0' "$fixture_root/counts.json"
 
 node scripts/backup-package.mjs create \
   --package "$package_dir" \
@@ -120,15 +132,24 @@ npx wrangler d1 execute DB --local --persist-to "$target_state" --file "$package
 npx wrangler d1 execute DB --local --persist-to "$target_state" --command "
   SELECT COUNT(*) AS people FROM person WHERE id = 'backup-fixture-person';
   SELECT asset.state, asset.sha256, asset.byte_size, COUNT(link.id) AS active_links FROM media_asset AS asset LEFT JOIN person_media AS link ON link.media_asset_id = asset.id AND link.retired_at IS NULL WHERE asset.id = 'bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb' GROUP BY asset.id, asset.state, asset.sha256, asset.byte_size;
+  SELECT asset.state, asset.sha256, asset.byte_size, asset.cleanup_after, COUNT(link.id) AS active_links, (SELECT COUNT(*) FROM person_media WHERE media_asset_id = asset.id AND retired_at IS NOT NULL) AS retired_links FROM media_asset AS asset LEFT JOIN person_media AS link ON link.media_asset_id = asset.id AND link.retired_at IS NULL WHERE asset.id = 'dddddddd-dddd-4ddd-8ddd-dddddddddddd' GROUP BY asset.id, asset.state, asset.sha256, asset.byte_size, asset.cleanup_after;
 " > "$fixture_root/restore-result.json"
 rg -q '"people":\s*1' "$fixture_root/restore-result.json"
 rg -q '"state":\s*"active"' "$fixture_root/restore-result.json"
 rg -q '"sha256":\s*"ebfad43a2975422358db27951444e12ca0465dca77cfc2725ae272eab13e2b30"' "$fixture_root/restore-result.json"
 rg -q '"active_links":\s*1' "$fixture_root/restore-result.json"
+rg -q '"state":\s*"retired"' "$fixture_root/restore-result.json"
+rg -q '"sha256":\s*"ba9a49a050dc9257983495b421ccea278964776d5aba10b1654b7f3052ce91c6"' "$fixture_root/restore-result.json"
+rg -q '"cleanup_after":\s*"2026-11-24T00:10:00Z"' "$fixture_root/restore-result.json"
+rg -q '"active_links":\s*0' "$fixture_root/restore-result.json"
+rg -q '"retired_links":\s*1' "$fixture_root/restore-result.json"
 
 npx wrangler r2 object put cloud-genealogy-local/media/fixture.txt --local --persist-to "$target_state" --file "$package_dir/r2/media/fixture.txt" >/dev/null
 npx wrangler r2 object get cloud-genealogy-local/media/fixture.txt --local --persist-to "$target_state" --file "$restored_media"
 cmp -- "$source_media" "$restored_media"
+npx wrangler r2 object put cloud-genealogy-local/media/retired-fixture.txt --local --persist-to "$target_state" --file "$package_dir/r2/media/retired-fixture.txt" >/dev/null
+npx wrangler r2 object get cloud-genealogy-local/media/retired-fixture.txt --local --persist-to "$target_state" --file "$restored_retired_media"
+cmp -- "$source_retired_media" "$restored_retired_media"
 
 # A changed payload must fail before any target restore command is allowed.
 tampered_package_dir="$fixture_root/tampered-backup-package"

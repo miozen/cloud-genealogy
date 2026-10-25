@@ -158,4 +158,9 @@ Cloudflare 的当前约束也支持“元数据优先”：D1 单查询最多 10
 
 - P0-6 local 备份恢复演练已接入 `media_asset` 与 `person_media`：计数采集器输出活动及保留期内退休资产的稳定 ID、对象键、SHA-256、大小、MIME、状态和活动引用数；备份包 v2 要求每个 R2 文件逐一匹配该清单。
 - 隔离 fixture 实际恢复 `active media_asset → person_media → R2`，并核验恢复后的资产元数据、活动关联数及对象字节。未登记对象、缺对象或元数据不一致会在包生成或只读预检失败。
+
+## 17. 第 37 项实现状态
+
+- local 恢复演练新增 `retired media_asset → 已退休 person_media → R2` 夹具。该资产具有未来 `cleanup_after`、零活动引用和一条历史关联，证明其仍在 30 天保留窗口内。
+- 演练同时核验其已进入 v2 媒体清单和离线包，并在全新 local 目标恢复退休状态、保留截止、历史关联与对象字节。没有实现或触发任何到期清理，也没有访问远端资源。
 - 此项仅验证 local 夹具；不产生 remote 备份包、不读取 preview/production R2，亦不等同于远程恢复证明。

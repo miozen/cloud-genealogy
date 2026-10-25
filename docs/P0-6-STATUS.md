@@ -35,6 +35,8 @@
 
 第 36 项已扩展 local 演练：fixture 现有真实 `active media_asset → person_media → R2` 链；包格式 v2 将 R2 文件逐一绑定媒体 ID/哈希/大小/MIME/状态/引用数，恢复后核验资产元数据、关联行和对象字节。未访问 preview 或 production。
 
+第 37 项进一步加入 `retired media_asset → 已退休 person_media → R2` 夹具：其 `cleanup_after` 仍在 30 天保留窗口内、活动引用数为零。演练验证该资产仍进入 v2 清单和离线包，并在新 local 目标恢复其退休状态、保留截止、历史关联和对象字节；未删除任何对象，也未实现到期清理。
+
 ## Preview 恢复演练（2026-10-25）
 
 - 已明确授权重建唯一远程测试 D1 `cloud-genealogy-preview`；新 ID 为 `aaaacbfb-762d-41b7-a424-aaa6e69ec563`，`wrangler.jsonc` 已同步。production 未操作。

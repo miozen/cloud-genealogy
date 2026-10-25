@@ -39,6 +39,8 @@
 
 第 38 项新增仅管理员可读的 `GET /api/admin/media-assets/cleanup-preview`：它只报告已过 `cleanup_after` 且不存在活动人物关联的退休资产（最多 100 条），不读取 R2、不写 D1 或审计，也不删除对象。真实清理仍需独立设计、授权与恢复前置验证。
 
+第 39 项已将真实清理的备份门槛、候选冻结、双人确认、逐项重核验、R2/D1 半完成状态和 D1 墓碑策略写入 [媒体到期清理安全协议](/home/mio/projects/cloud-genealogy/docs/P2-MEDIA-CLEANUP-DESIGN-REVIEW.md)。在 remote 备份恢复点与对应授权尚未具备前，任何真实 R2/D1 清理仍被明确禁止。
+
 ## Preview 恢复演练（2026-10-25）
 
 - 已明确授权重建唯一远程测试 D1 `cloud-genealogy-preview`；新 ID 为 `aaaacbfb-762d-41b7-a424-aaa6e69ec563`，`wrangler.jsonc` 已同步。production 未操作。

@@ -19,9 +19,11 @@
 14. `P0-5-BRANCH-STRUCTURE-DESIGN-REVIEW.md` 房支结构变更的待确认边界
 15. `P0-5-REVIEWER-ASSIGNMENT-DESIGN-REVIEW.md` 对象级审批人、代理与失效规则的待确认设计
 16. `P0-5-BRANCH-WORKBENCH-DESIGN-REVIEW.md` 房支成员与结构工作台的待确认交互边界
-17. `DEVELOPMENT-HANDBOOK.md` 接力电脑的环境、Git、SSH、验证与部署流程
-18. `AGENTS.md` Codex 工作约束
-19. `CODEX_START.md` 首轮可复制提示词
+17. `P2-MEDIA-ASSET-DESIGN-REVIEW.md` 媒体资产、上传、关联、恢复与当前实施状态
+18. `P2-MEDIA-CLEANUP-DESIGN-REVIEW.md` 媒体到期清理的待确认安全协议
+19. `DEVELOPMENT-HANDBOOK.md` 接力电脑的环境、Git、SSH、验证与部署流程
+20. `AGENTS.md` Codex 工作约束
+21. `CODEX_START.md` 首轮可复制提示词
 
 ## 不可随意变更的已确认决策
 - 单一家族，多房支、多本谱书、多座云祠；不是 SaaS 多租户。

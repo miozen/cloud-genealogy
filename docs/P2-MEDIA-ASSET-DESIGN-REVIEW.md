@@ -170,3 +170,9 @@ Cloudflare 的当前约束也支持“元数据优先”：D1 单查询最多 10
 - 新增仅管理员可读的 `GET /api/admin/media-assets/cleanup-preview`。它只列出已过 `cleanup_after`、没有活动人物关联的 `retired` 资产，按截止时间和 ID 稳定排序，最多 100 条；返回对象键、哈希、大小、退休时间、截止时间及历史人物关联数，供人工审阅。
 - 该端点没有 R2 `get`、`head`、`delete` 操作，也不写 D1 或 `audit_log`；local 集成测试确认一条过期退休夹具会出现、仍在保留期的退休资产不会出现，且调用前后审计记录数不变。
 - 真正删除 R2 对象或 D1 元数据仍未实现，必须在单独确认候选冻结、二次确认、审计、失败恢复与备份校验后进行。
+
+## 19. 第 39 项设计审查
+
+- 已完成 [媒体到期清理安全协议](/home/mio/projects/cloud-genealogy/docs/P2-MEDIA-CLEANUP-DESIGN-REVIEW.md)：建议冻结候选批次、两位不同管理员确认、逐项重新核验、R2 删除后 D1 墓碑收尾和明确的半完成重试状态。
+- 审查确认现有远程备份/恢复证明不足，且历史 `person_media` 外键不适合物理删除 `media_asset`。因此推荐新增 `purge_pending` / `purged` 墓碑状态及清理 run/item 记录，而非直接删除 D1 行。
+- 本项没有新增清理执行代码、迁移、Cron、R2 删除或远端操作；协议仍待项目负责人逐项确认。

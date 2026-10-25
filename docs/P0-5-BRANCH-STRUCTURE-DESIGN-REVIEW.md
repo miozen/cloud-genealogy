@@ -4,7 +4,7 @@
 
 ## 已验证现状
 
-- `branch` 是以稳定 ID 表示的当前结构表，包含 `lineage_id`、可空的 `parent_branch_id`、名称、类型及 `retired_at`；当前没有写入 API、版本号、同世系父房校验或无环约束。
+- `branch` 是以稳定 ID 表示的当前结构表，包含 `lineage_id`、可空的 `parent_branch_id`、名称、类型及 `retired_at`。本文初稿时没有写入 API；当前已通过受控提案支持 create / rename / retire，仍未开放移动、合并、拆分或类型修改。
 - `branch_membership_snapshot` 已按 `lineage_revision` 完整快照，但它只保存 `branch_id`，不保存房支的名称、父房或类型。现有 published revision 因而不能自行重建历史房支结构。
 - `account_scope` 可引用房支。权限只认提案基准 revision 中精确房支的 `blood_primary` 成员；不递归子房，也不从承谱关系推导。
 - 当前成员增删提案会在完整 revision snapshot 中原子发布，且回退能生成成员差异；它不适合承载房支创建、改名、父房移动、合并或退休。

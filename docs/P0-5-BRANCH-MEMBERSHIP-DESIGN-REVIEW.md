@@ -6,7 +6,7 @@
 
 - `branch_membership_snapshot` 已随 `lineage_revision` 不可变保存，并有“每人每 revision 至多一个 `blood_primary`”约束；`migration` 和 `administrative` 成员可并存。
 - 关系提案发布仅复制基准房支快照，不推导或修改成员归属。现有 `change_item` 只能表示承谱边和 canonical 亲属关系，不能承载房支、成员类型及成员变更语义。
-- 当前没有房支创建/退休、成员来源依据或对象级审批人的写入模型。房支成员增删已由独立条目和 revision 快照支持；结构变更仍见 `P0-5-BRANCH-STRUCTURE-DESIGN-REVIEW.md`。
+- 本文初稿时没有房支创建/退休写入模型；当前成员增删已由独立条目和 revision 快照支持，最小结构变更见 `P0-5-BRANCH-STRUCTURE-DESIGN-REVIEW.md`。成员来源依据和对象级审批人仍未建立写入模型。
 
 ## 推荐的首个成员变更切片
 

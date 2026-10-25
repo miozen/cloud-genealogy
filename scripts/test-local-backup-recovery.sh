@@ -19,7 +19,13 @@ wrong_passphrase_file="$fixture_root/wrong-recovery-passphrase"
 export XDG_CONFIG_HOME="$fixture_root/config"
 export WRANGLER_SEND_METRICS=false
 
-cleanup() { rm -rf "$fixture_root"; }
+cleanup() {
+  if [[ "${KEEP_LOCAL_BACKUP_FIXTURE:-}" == "1" ]]; then
+    echo "本地备份演练夹具保留于：$fixture_root"
+  else
+    rm -rf "$fixture_root"
+  fi
+}
 trap cleanup EXIT
 
 mkdir -p "$package_dir/d1" "$package_dir/r2/media"
@@ -89,8 +95,10 @@ npx wrangler r2 object get cloud-genealogy-local/media/fixture.txt --local --per
 cmp -- "$source_media" "$restored_media"
 
 # A changed payload must fail before any target restore command is allowed.
-printf 'tampered\n' >> "$package_dir/r2/media/fixture.txt"
-if node scripts/backup-package.mjs verify --package "$package_dir" --migration-dir "$project_root/migrations" >/dev/null 2>&1; then
+tampered_package_dir="$fixture_root/tampered-backup-package"
+cp -R "$package_dir" "$tampered_package_dir"
+printf 'tampered\n' >> "$tampered_package_dir/r2/media/fixture.txt"
+if node scripts/backup-package.mjs verify --package "$tampered_package_dir" --migration-dir "$project_root/migrations" >/dev/null 2>&1; then
   echo "被篡改的备份包通过了预检。" >&2
   exit 1
 fi

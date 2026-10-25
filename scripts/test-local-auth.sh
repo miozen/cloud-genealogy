@@ -70,7 +70,11 @@ npx wrangler d1 migrations apply DB --local --persist-to "$state_dir" >/dev/null
 clean_test_rows
 npx wrangler dev --local --port "$port" --persist-to "$state_dir" \
   --var AUTH_RATE_LIMIT_SECRET:local-integration-rate-limit-secret \
-  --var BOOTSTRAP_SECRET:local-integration-bootstrap-secret >"$log_file" 2>&1 &
+  --var BOOTSTRAP_SECRET:local-integration-bootstrap-secret \
+  --var R2_S3_ACCOUNT_ID:0123456789abcdef0123456789abcdef \
+  --var R2_S3_BUCKET:cloud-genealogy-local \
+  --var R2_S3_ACCESS_KEY_ID:local-integration-access-key \
+  --var R2_S3_SECRET_ACCESS_KEY:local-integration-secret-key >"$log_file" 2>&1 &
 worker_pid="$!"
 
 for _ in {1..40}; do
@@ -174,6 +178,9 @@ const mediaIntent = await request("/api/admin/media-assets/upload-intents", {
 });
 expectStatus(mediaIntent, 201);
 assert.match(mediaIntent.body.mediaAsset.objectKey, /^media\/[0-9a-f-]{36}$/);
+assert.match(mediaIntent.body.upload.url, /^https:\/\/cloud-genealogy-local\.0123456789abcdef0123456789abcdef\.r2\.cloudflarestorage\.com\/media\//);
+assert.equal(mediaIntent.body.upload.requiredHeaders["content-type"], "image/jpeg");
+assert.ok(mediaIntent.body.upload.requiredHeaders["x-amz-checksum-sha256"]);
 const missingMediaCompletion = await request(`/api/admin/media-assets/${mediaIntent.body.mediaAsset.id}/complete`, { method: "POST", cookie: adminCookie, csrf: adminCsrf });
 expectStatus(missingMediaCompletion, 409);
 assert.equal(missingMediaCompletion.body.code, "media_upload_verification_failed");

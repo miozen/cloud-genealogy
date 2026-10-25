@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { createR2PresignedPut, mediaUploadUrlLifetimeSeconds } from "../worker/media/r2-presigned-put";
+import { createR2PresignedPut, getR2PresignConfiguration, mediaUploadUrlLifetimeSeconds } from "../worker/media/r2-presigned-put";
 
 const input = {
   accountId: "0123456789abcdef0123456789abcdef",
@@ -32,5 +32,10 @@ describe("R2 presigned PUT", () => {
     await expect(createR2PresignedPut({ ...input, objectKey: "media/../other" })).rejects.toThrow("r2_presign_key_invalid");
     await expect(createR2PresignedPut({ ...input, sha256: "not-a-checksum" })).rejects.toThrow("r2_presign_checksum_invalid");
     await expect(createR2PresignedPut({ ...input, expiresInSeconds: 0 })).rejects.toThrow("r2_presign_expiry_invalid");
+  });
+
+  it("requires the complete runtime configuration before an API can persist an upload intent", () => {
+    expect(getR2PresignConfiguration({ R2_S3_ACCOUNT_ID: input.accountId, R2_S3_BUCKET: input.bucket, R2_S3_ACCESS_KEY_ID: input.accessKeyId })).toBeNull();
+    expect(getR2PresignConfiguration({ R2_S3_ACCOUNT_ID: ` ${input.accountId} `, R2_S3_BUCKET: ` ${input.bucket} `, R2_S3_ACCESS_KEY_ID: ` ${input.accessKeyId} `, R2_S3_SECRET_ACCESS_KEY: input.secretAccessKey })).toEqual({ accountId: input.accountId, bucket: input.bucket, accessKeyId: input.accessKeyId, secretAccessKey: input.secretAccessKey });
   });
 });

@@ -39,6 +39,7 @@ import {
   validationMessage,
 } from "./auth/validation";
 import { createMediaUploadIntent, finalizeMediaUpload } from "./media/media-asset";
+import { createR2PresignedPut, getR2PresignConfiguration } from "./media/r2-presigned-put";
 import { previewSuccessionRevision } from "./lineage/revision-preview";
 import { publishSuccessionRevision, rollbackSuccessionRevision } from "./lineage/revision-publish";
 import { buildPublishedHangingChart } from "./lineage/hanging-chart-service";
@@ -286,12 +287,20 @@ export function createApp() {
     if (!hasPermission(auth.roles, "system.manage")) return context.json({ code: "forbidden" }, 403);
     const parsed = mediaUploadIntentInput.safeParse(await context.req.json().catch(() => null));
     if (!parsed.success) return context.json({ code: "validation_failed", message: validationMessage(parsed) }, 400);
+    const signingConfiguration = getR2PresignConfiguration(context.env);
+    if (!signingConfiguration) return context.json({ code: "media_direct_upload_unavailable" }, 503);
     const intent = createMediaUploadIntent({ id: crypto.randomUUID(), createdByAccountId: auth.accountId, ...parsed.data }, new Date());
+    let upload: Awaited<ReturnType<typeof createR2PresignedPut>>;
+    try {
+      upload = await createR2PresignedPut({ ...signingConfiguration, objectKey: intent.objectKey, mimeType: intent.mimeType, sha256: intent.sha256, issuedAt: new Date() });
+    } catch {
+      return context.json({ code: "media_direct_upload_unavailable" }, 503);
+    }
     await context.env.DB.batch([
       context.env.DB.prepare("INSERT INTO media_asset (id, object_key, sha256, byte_size, mime_type, original_filename, visibility, state, created_by_account_id, created_at, upload_expires_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)").bind(intent.id, intent.objectKey, intent.sha256, intent.byteSize, intent.mimeType, intent.originalFilename, intent.visibility, intent.state, intent.createdByAccountId, intent.createdAt, intent.uploadExpiresAt),
       context.env.DB.prepare("INSERT INTO audit_log (id, actor_account_id, action, object_type, object_id, metadata_json, created_at) VALUES (?, ?, ?, ?, ?, ?, ?)").bind(crypto.randomUUID(), auth.accountId, "media.upload_intent_created", "media_asset", intent.id, JSON.stringify({ mimeType: intent.mimeType, byteSize: intent.byteSize, visibility: intent.visibility }), intent.createdAt),
     ]);
-    return context.json({ mediaAsset: intent }, 201);
+    return context.json({ mediaAsset: intent, upload }, 201);
   });
 
   app.post("/api/admin/media-assets/:assetId/complete", requireAuthentication, async (context) => {

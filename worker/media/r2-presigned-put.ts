@@ -24,6 +24,22 @@ export type R2PresignedPut = {
   requiredHeaders: { "content-type": MediaMimeType; "x-amz-checksum-sha256": string };
 };
 
+export type R2PresignConfiguration = {
+  R2_S3_ACCOUNT_ID?: string;
+  R2_S3_BUCKET?: string;
+  R2_S3_ACCESS_KEY_ID?: string;
+  R2_S3_SECRET_ACCESS_KEY?: string;
+};
+
+export function getR2PresignConfiguration(environment: R2PresignConfiguration) {
+  const accountId = environment.R2_S3_ACCOUNT_ID?.trim();
+  const bucket = environment.R2_S3_BUCKET?.trim();
+  const accessKeyId = environment.R2_S3_ACCESS_KEY_ID?.trim();
+  const secretAccessKey = environment.R2_S3_SECRET_ACCESS_KEY;
+  if (!accountId || !bucket || !accessKeyId || !secretAccessKey) return null;
+  return { accountId, bucket, accessKeyId, secretAccessKey };
+}
+
 /**
  * Creates a single-object R2 S3-compatible presigned PUT URL without making a
  * network request. The caller must keep the S3 secret in a Worker Secret.

@@ -129,3 +129,9 @@ Cloudflare 的当前约束也支持“元数据优先”：D1 单查询最多 10
 - 新增独立的 R2 S3 Signature Version 4 presigned `PUT` URL 生成器：固定默认 5 分钟有效期，仅允许 `media/` 下的单一对象键，并把 `content-type` 与 `x-amz-checksum-sha256` 作为必需签名请求头。它不发起网络请求、不读写 R2，也不接入 HTTP API。
 - 输入中的 access key 与 secret key 只在内存中参与签名；模块不会记录、返回或写入它们。实际启用仍须由负责人单独创建并以 Worker Secret 注入仅限目标 bucket 的 R2 S3 凭据，同时配置 bucket CORS；不得把秘密提交、粘贴到对话或写入文档。
 - 单元测试以固定时间和示例凭据验证 URL 可重复、对象/过期/签名头被约束，并验证不安全路径、校验和和有效期在签名前被拒绝。尚未用真实凭据或 remote R2 验证。
+
+## 12. 第 32 项实现状态
+
+- 管理员创建上传意图 API 已接入签名器。仅当运行环境同时提供 R2 account ID、bucket、access key ID 与 secret access key 时，才会先生成上传 URL、再原子写入 `pending_upload` 资产和审计记录；响应只含 URL、到期时间与浏览器必须带上的签名请求头，绝不含访问密钥。
+- 缺少任一配置或配置不合法时，API 返回 `503 media_direct_upload_unavailable`，且不会写入待上传资产，避免生成无法使用或无法完成的意图。四项配置仍不写入 `wrangler.jsonc`；实际环境的 access/secret 必须以 Worker Secret 提供。
+- `test:local-auth` 只对一次性隔离 local Worker 注入无效示例签名配置，验证受权意图响应含受限 URL 和必需请求头；它没有访问 S3 API、没有上传对象，随后仍验证缺对象完成被拒绝。

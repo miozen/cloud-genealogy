@@ -12,6 +12,7 @@
 - 新增 `scripts/backup-counts.mjs` 与 `npm run collect:local-backup-counts -- ...`：它只接受显式 local Wrangler 可执行文件、local 工作目录和输出文件，实际查询账号/权限、人物、谱书、来源、revision、关系、房支和审计共 16 项 D1 计数；`backup-package.mjs --counts-file` 只接受该采集器产生的计数文件。
 - local R2 演练对象会在 manifest 中标记为 `local_fixture`。非 local 包如包含 R2 对象，预检要求每个对象提供 `mediaAssetId`；当前尚无媒体元数据表，故工具会拒绝把测试夹具误用为远程媒体备份。
 - 新增 `scripts/backup-crypt.mjs` 与 `npm run crypt:backup -- ...`：对完整离线归档进行 AES-256-GCM 加密和认证解密，使用随机 salt/IV 与 Node 内建 scrypt；拒绝覆盖输出，认证失败不留下输出文件。真实密钥保管流程见 `P0-6-KEY-RECOVERY-DESIGN.md`。
+- 新增 `P0-6-ADMIN-RUNBOOK.md`：将 local 演练、remote 备份前置条件、恢复预检、测试环境演练和生产恢复的授权边界固化为管理员清单；不含任何真实秘密或远程资源标识。
 
 ## 当前风险与未完成项
 
@@ -32,4 +33,4 @@
 
 ## 下一步（需确认后）
 
-下一切片应形成不含秘密的管理员备份/恢复操作清单，并由用户确认真实密钥保管责任、归档保留周期与测试环境恢复窗口；仍不连接 remote。完成后，才单独申请测试环境恢复演练授权。
+管理员操作清单已完成。下一步需要用户确认真实密钥保管责任、加密归档保留周期与测试环境恢复窗口；确认后，才能单独申请 remote 测试环境恢复演练授权。

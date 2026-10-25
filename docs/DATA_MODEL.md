@@ -6,6 +6,7 @@
 - `person_fact`: 生卒、地点、事迹等事实的标准化值、原始文本、精度、来源、可见级别。
 - `place`: 地名及历史地名信息。
 - `media_asset`: R2 对象键、文件哈希、MIME、尺寸、大小、隐私。
+- `media_cleanup_run` / `media_cleanup_item`: 到期媒体清理的冻结候选、备份恢复点和双人确认；不等同于删除执行记录。
 - `person_media`: 人物与附件关联。
 - `account`：用户名（唯一）与族谱姓名（可重名）分开保存；注册填写的房支、父辈/祖辈名称仅为待核验线索。账号状态为 `pending`、`active`、`disabled`、`rejected`。
 - `account_person_link`：仅管理员人工审核后建立的账号与具体人物关联；不按姓名自动匹配，不等同于对人物资料的编辑权。

@@ -41,6 +41,8 @@
 
 第 39 项已将真实清理的备份门槛、候选冻结、双人确认、逐项重核验、R2/D1 半完成状态和 D1 墓碑策略写入 [媒体到期清理安全协议](/home/mio/projects/cloud-genealogy/docs/P2-MEDIA-CLEANUP-DESIGN-REVIEW.md)。在 remote 备份恢复点与对应授权尚未具备前，任何真实 R2/D1 清理仍被明确禁止。
 
+第 40 项仅加入 local 清理 run/item 模型及纯冻结/双人确认规则，恢复点标识和包哈希为必填；没有 HTTP 入口或执行能力。它不能替代 P0-6 remote 备份与恢复证明，也没有解除真实清理禁令。
+
 ## Preview 恢复演练（2026-10-25）
 
 - 已明确授权重建唯一远程测试 D1 `cloud-genealogy-preview`；新 ID 为 `aaaacbfb-762d-41b7-a424-aaa6e69ec563`，`wrangler.jsonc` 已同步。production 未操作。

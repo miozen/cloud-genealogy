@@ -36,6 +36,7 @@ import {
   publishChangeRequestInput,
   rollbackChangeRequestInput,
   mediaUploadIntentInput,
+  personMediaInput,
   validationMessage,
 } from "./auth/validation";
 import { createMediaUploadIntent, finalizeMediaUpload } from "./media/media-asset";
@@ -90,6 +91,7 @@ interface StructureChangeItemRow { operation: BranchStructureChangeItemCandidate
 interface BranchMembershipSnapshotRow extends MembershipRow { display_name: string; }
 interface BranchScopeCountRow { branch_id: string; account_scope_count: number; }
 interface MediaAssetRow { id: string; object_key: string; sha256: string; byte_size: number; mime_type: "image/jpeg" | "image/png" | "image/webp"; original_filename: string; visibility: "PUBLIC" | "MEMBER" | "ADMIN"; state: "pending_upload" | "active" | "failed" | "retired"; created_by_account_id: string; created_at: string; upload_expires_at: string; }
+interface MediaReadRow { id: string; object_key: string; mime_type: string; original_filename: string; visibility: "PUBLIC" | "MEMBER" | "ADMIN"; linked_visibility_rank: number | null; }
 
 function now(): string {
   return new Date().toISOString();
@@ -326,11 +328,21 @@ export function createApp() {
   });
 
   app.get("/api/media-assets/:assetId", async (context) => {
-    const asset = await context.env.DB.prepare("SELECT id, object_key, mime_type, original_filename, visibility FROM media_asset WHERE id = ? AND state = 'active'").bind(context.req.param("assetId")).first<{ id: string; object_key: string; mime_type: string; original_filename: string; visibility: "PUBLIC" | "MEMBER" | "ADMIN" }>();
+    const asset = await context.env.DB.prepare(
+      `SELECT asset.id, asset.object_key, asset.mime_type, asset.original_filename, asset.visibility,
+        MAX(CASE person.visibility WHEN 'ADMIN' THEN 2 WHEN 'MEMBER' THEN 1 ELSE 0 END) AS linked_visibility_rank
+       FROM media_asset AS asset
+       LEFT JOIN person_media AS link ON link.media_asset_id = asset.id AND link.retired_at IS NULL
+       LEFT JOIN person ON person.id = link.person_id
+       WHERE asset.id = ? AND asset.state = 'active'
+       GROUP BY asset.id, asset.object_key, asset.mime_type, asset.original_filename, asset.visibility`,
+    ).bind(context.req.param("assetId")).first<MediaReadRow>();
     if (!asset) return context.json({ code: "media_asset_not_found" }, 404);
+    const assetVisibilityRank = asset.visibility === "ADMIN" ? 2 : asset.visibility === "MEMBER" ? 1 : 0;
+    const effectiveVisibility = (["PUBLIC", "MEMBER", "ADMIN"] as const)[Math.max(assetVisibilityRank, asset.linked_visibility_rank ?? 0)]!;
     const auth = context.get("auth");
-    if (!auth && asset.visibility !== "PUBLIC") return context.json({ code: "authentication_required" }, 401);
-    if (auth && !canReadVisibility(auth.roles, asset.visibility)) return context.json({ code: "forbidden" }, 403);
+    if (!auth && effectiveVisibility !== "PUBLIC") return context.json({ code: "authentication_required" }, 401);
+    if (auth && !canReadVisibility(auth.roles, effectiveVisibility)) return context.json({ code: "forbidden" }, 403);
     const object = await context.env.MEDIA.get(asset.object_key);
     if (!object) return context.json({ code: "media_object_missing" }, 409);
     return new Response(object.body, { headers: { "content-type": asset.mime_type, "content-disposition": `inline; filename="${asset.original_filename.replaceAll('"', "")}"`, "x-content-type-options": "nosniff" } });
@@ -1187,6 +1199,21 @@ export function createApp() {
     return context.json({ persons: rows.results });
   });
 
+  app.get("/api/admin/media-assets", requireAuthentication, async (context) => {
+    const auth = context.get("auth")!;
+    if (!hasPermission(auth.roles, "system.manage")) return context.json({ code: "forbidden" }, 403);
+    const assets = await context.env.DB.prepare(
+      `SELECT asset.id, asset.original_filename, asset.mime_type, asset.byte_size, asset.visibility, asset.finalized_at,
+        COUNT(link.id) AS active_link_count
+       FROM media_asset AS asset
+       LEFT JOIN person_media AS link ON link.media_asset_id = asset.id AND link.retired_at IS NULL
+       WHERE asset.state = 'active'
+       GROUP BY asset.id, asset.original_filename, asset.mime_type, asset.byte_size, asset.visibility, asset.finalized_at
+       ORDER BY asset.finalized_at DESC, asset.id DESC LIMIT 100`,
+    ).all();
+    return context.json({ mediaAssets: assets.results });
+  });
+
   app.post("/api/admin/persons", requireAuthentication, async (context) => {
     const auth = context.get("auth")!;
     if (!hasPermission(auth.roles, "system.manage")) return context.json({ code: "forbidden" }, 403);
@@ -1242,6 +1269,28 @@ export function createApp() {
       context.env.DB.prepare("INSERT INTO audit_log (id, actor_account_id, action, object_type, object_id, metadata_json, created_at) VALUES (?, ?, ?, ?, ?, ?, ?)").bind(crypto.randomUUID(), auth.accountId, "person.fact_added", "person_fact", id, JSON.stringify({ personId, factKind: parsed.data.factKind }), timestamp),
     ]);
     return context.json({ personFact: { id, personId, factKind: parsed.data.factKind, valueText: parsed.data.valueText ?? null, dateText: parsed.data.dateText ?? null, datePrecision: parsed.data.datePrecision, placeId, visibility: parsed.data.visibility } }, 201);
+  });
+
+  app.post("/api/admin/persons/:personId/media", requireAuthentication, async (context) => {
+    const auth = context.get("auth")!;
+    if (!hasPermission(auth.roles, "system.manage")) return context.json({ code: "forbidden" }, 403);
+    const parsed = personMediaInput.safeParse(await context.req.json().catch(() => null));
+    if (!parsed.success) return context.json({ code: "validation_failed", message: validationMessage(parsed) }, 400);
+    const personId = context.req.param("personId");
+    const [person, asset, existing] = await Promise.all([
+      context.env.DB.prepare("SELECT id FROM person WHERE id = ?").bind(personId).first<{ id: string }>(),
+      context.env.DB.prepare("SELECT id FROM media_asset WHERE id = ? AND state = 'active'").bind(parsed.data.mediaAssetId).first<{ id: string }>(),
+      context.env.DB.prepare("SELECT id FROM person_media WHERE person_id = ? AND media_asset_id = ? AND retired_at IS NULL").bind(personId, parsed.data.mediaAssetId).first<{ id: string }>(),
+    ]);
+    if (!person) return context.json({ code: "person_not_found" }, 404);
+    if (!asset) return context.json({ code: "media_asset_not_found" }, 404);
+    if (existing) return context.json({ code: "person_media_already_linked" }, 409);
+    const id = crypto.randomUUID(); const timestamp = now();
+    await context.env.DB.batch([
+      context.env.DB.prepare("INSERT INTO person_media (id, person_id, media_asset_id, role, display_order, caption, created_by_account_id, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)").bind(id, personId, parsed.data.mediaAssetId, parsed.data.role, parsed.data.displayOrder, parsed.data.caption ?? null, auth.accountId, timestamp),
+      context.env.DB.prepare("INSERT INTO audit_log (id, actor_account_id, action, object_type, object_id, metadata_json, created_at) VALUES (?, ?, ?, ?, ?, ?, ?)").bind(crypto.randomUUID(), auth.accountId, "person.media_linked", "person_media", id, JSON.stringify({ personId, mediaAssetId: parsed.data.mediaAssetId, role: parsed.data.role }), timestamp),
+    ]);
+    return context.json({ personMedia: { id, personId, mediaAssetId: parsed.data.mediaAssetId, role: parsed.data.role, displayOrder: parsed.data.displayOrder, caption: parsed.data.caption ?? null } }, 201);
   });
 
   app.get("/api/admin/persons/:personId", requireAuthentication, async (context) => {

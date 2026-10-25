@@ -190,9 +190,10 @@ expectStatus(missingMediaCompletion, 409);
 assert.equal(missingMediaCompletion.body.code, "media_upload_verification_failed");
 expectStatus(await request(`/api/media-assets/${mediaIntent.body.mediaAsset.id}`, { cookie: adminCookie }), 404);
 execFileSync("npx", ["wrangler", "r2", "object", "put", "cloud-genealogy-local/media/local-read-fixture", "--local", "--persist-to", ".wrangler/local-auth-integration", "--content-type", "image/jpeg", "--pipe"], { input: "local media fixture", stdio: "pipe" });
-execFileSync("npx", ["wrangler", "d1", "execute", "DB", "--local", "--persist-to", ".wrangler/local-auth-integration", "--command", "INSERT INTO media_asset (id, object_key, sha256, byte_size, mime_type, original_filename, visibility, state, created_by_account_id, created_at, upload_expires_at, finalized_at) SELECT 'local-media-read', 'media/local-read-fixture', 'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa', 19, 'image/jpeg', 'local.jpg', 'MEMBER', 'active', id, '2026-10-25T00:00:00.000Z', '2026-10-25T00:05:00.000Z', '2026-10-25T00:00:00.000Z' FROM account WHERE username = 'local.admin';"], { stdio: "pipe" });
-expectStatus(await request("/api/media-assets/local-media-read"), 401);
-const privateMediaRead = await fetch(`${baseUrl}/api/media-assets/local-media-read`, { headers: { cookie: adminCookie } });
+const localMediaAssetId = "99999999-9999-4999-8999-999999999999";
+execFileSync("npx", ["wrangler", "d1", "execute", "DB", "--local", "--persist-to", ".wrangler/local-auth-integration", "--command", `INSERT INTO media_asset (id, object_key, sha256, byte_size, mime_type, original_filename, visibility, state, created_by_account_id, created_at, upload_expires_at, finalized_at) SELECT '${localMediaAssetId}', 'media/local-read-fixture', 'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa', 19, 'image/jpeg', 'local.jpg', 'MEMBER', 'active', id, '2026-10-25T00:00:00.000Z', '2026-10-25T00:05:00.000Z', '2026-10-25T00:00:00.000Z' FROM account WHERE username = 'local.admin';`], { stdio: "pipe" });
+expectStatus(await request(`/api/media-assets/${localMediaAssetId}`), 401);
+const privateMediaRead = await fetch(`${baseUrl}/api/media-assets/${localMediaAssetId}`, { headers: { cookie: adminCookie } });
 assert.equal(privateMediaRead.status, 200);
 assert.equal(privateMediaRead.headers.get("content-type"), "image/jpeg");
 assert.equal(await privateMediaRead.text(), "local media fixture");
@@ -219,6 +220,28 @@ const personResult = await request("/api/admin/persons", {
   body: { displayName: "本地人物锚点", visibility: "MEMBER" },
 });
 expectStatus(personResult, 201);
+const activeMediaAssets = await request("/api/admin/media-assets", { cookie: adminCookie });
+expectStatus(activeMediaAssets, 200);
+assert.equal(activeMediaAssets.body.mediaAssets.some((asset) => asset.id === localMediaAssetId && asset.active_link_count === 0), true);
+const protectedMediaPerson = await request("/api/admin/persons", {
+  method: "POST", cookie: adminCookie, csrf: adminCsrf,
+  body: { displayName: "本地私密媒体人物", visibility: "ADMIN" },
+});
+expectStatus(protectedMediaPerson, 201);
+const personMediaLink = await request(`/api/admin/persons/${protectedMediaPerson.body.person.id}/media`, {
+  method: "POST", cookie: adminCookie, csrf: adminCsrf,
+  body: { mediaAssetId: localMediaAssetId, role: "portrait", caption: "本地权限夹具" },
+});
+expectStatus(personMediaLink, 201);
+const duplicatePersonMediaLink = await request(`/api/admin/persons/${protectedMediaPerson.body.person.id}/media`, {
+  method: "POST", cookie: adminCookie, csrf: adminCsrf,
+  body: { mediaAssetId: localMediaAssetId, role: "portrait" },
+});
+expectStatus(duplicatePersonMediaLink, 409);
+assert.equal(duplicatePersonMediaLink.body.code, "person_media_already_linked");
+const linkedMediaAssets = await request("/api/admin/media-assets", { cookie: adminCookie });
+expectStatus(linkedMediaAssets, 200);
+assert.equal(linkedMediaAssets.body.mediaAssets.find((asset) => asset.id === localMediaAssetId).active_link_count, 1);
 const personName = await request(`/api/admin/persons/${personResult.body.person.id}/names`, {
   method: "POST", cookie: adminCookie, csrf: adminCsrf,
   body: { nameText: "本地人物谱名", nameKind: "genealogy", isPrimary: true, visibility: "MEMBER" },
@@ -715,6 +738,8 @@ const memberLogin = await request("/api/auth/login", {
 expectStatus(memberLogin, 200);
 const memberCookie = sessionCookie(memberLogin);
 const memberCsrf = memberLogin.body.csrfToken;
+
+expectStatus(await request(`/api/media-assets/${localMediaAssetId}`, { cookie: memberCookie }), 403);
 
 const identity = await request("/api/me", { cookie: memberCookie });
 expectStatus(identity, 200);

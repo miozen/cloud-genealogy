@@ -23,6 +23,7 @@ type ChangeRequest = { id: string; lineage_id: string; state: "draft" | "pending
 type Reviewer = { id: string; username: string; display_name: string };
 type ReviewerAssignment = { id: string; reviewer_account_id: string; valid_from: string; valid_until: string; reason: string; revoked_at: string | null; version: number };
 type Branch = WorkbenchBranch;
+type MediaAsset = { id: string; original_filename: string; mime_type: string; byte_size: number; visibility: "PUBLIC" | "MEMBER" | "ADMIN"; finalized_at: string; active_link_count: number };
 type BranchWorkbench = { lineageId: string; revisionId: string; pointerVersion: number; branches: Branch[]; memberships: Array<{ branchId: string; personId: string; personDisplayName: string; membershipKind: string }> };
 type StructureItem = LocalStructureItem;
 type MembershipItem = { operation: "add" | "remove"; branchId: string; personId: string; membershipKind: "blood_primary" | "migration" | "administrative" };
@@ -48,6 +49,7 @@ const membershipDraft = ref({ operation: "add" as MembershipItem["operation"], b
 const retirementConfirmations = ref<Record<string, string>>({});
 const mediaUploadAvailable = ref(false), mediaUploadBusy = ref(false), mediaFile = ref<File | null>(null), mediaFileInput = ref<HTMLInputElement | null>(null);
 const mediaUploadForm = ref({ visibility: "MEMBER" as MediaUploadVisibility });
+const mediaAssets = ref<MediaAsset[]>([]), personMediaForm = ref({ personId: "", mediaAssetId: "", role: "portrait" as "portrait" | "document" | "other", caption: "" });
 const chartSvg = ref<SVGSVGElement | null>(null);
 const chartPan = ref({ x: 0, y: 0 }), chartDrag = ref<{ pointerId: number; clientX: number; clientY: number } | null>(null);
 const isAdmin = computed(() => account.value?.roles.includes("admin") ?? false);
@@ -85,7 +87,7 @@ async function message(response: Response) {
   return body.message ?? "请求未能完成。";
 }
 async function refreshAdminData() {
-  const [pendingResponse, personsResponse, lineagesResponse, editionsResponse] = await Promise.all([request("/api/admin/accounts/pending"), request("/api/admin/persons"), request("/api/admin/lineages"), request("/api/admin/genealogy-editions")]);
+  const [pendingResponse, personsResponse, lineagesResponse, editionsResponse, mediaAssetsResponse] = await Promise.all([request("/api/admin/accounts/pending"), request("/api/admin/persons"), request("/api/admin/lineages"), request("/api/admin/genealogy-editions"), request("/api/admin/media-assets")]);
   if (pendingResponse.ok) pendingAccounts.value = ((await pendingResponse.json()) as { accounts: PendingAccount[] }).accounts;
   if (personsResponse.ok) persons.value = ((await personsResponse.json()) as { persons: Person[] }).persons;
   if (lineagesResponse.ok) {
@@ -93,6 +95,7 @@ async function refreshAdminData() {
     if (!lineageId.value && lineages.value[0]) lineageId.value = lineages.value[0].id;
   }
   if (editionsResponse.ok) { editions.value = ((await editionsResponse.json()) as { editions: Edition[] }).editions; if (!editionId.value && editions.value[0]) editionId.value = editions.value[0].id; }
+  if (mediaAssetsResponse.ok) mediaAssets.value = ((await mediaAssetsResponse.json()) as { mediaAssets: MediaAsset[] }).mediaAssets;
   await refreshWorkflowData();
 }
 async function refreshWorkflowData() {
@@ -129,10 +132,19 @@ async function uploadMedia() {
     mediaFile.value = null;
     if (mediaFileInput.value) mediaFileInput.value.value = "";
     notice.value = `媒体已完成校验并激活：${result.mediaAsset.id}`;
+    await refreshAdminData();
   } catch (error) {
     notice.value = error instanceof MediaUploadError && error.code === "media_direct_upload_unavailable" ? "媒体直传配置已不可用；未继续上传。" : "媒体上传或完成校验失败；资产不会被激活。";
     await refreshMediaUploadAvailability();
   } finally { mediaUploadBusy.value = false; }
+}
+async function linkMediaToPerson() {
+  const form = personMediaForm.value;
+  if (!form.personId || !form.mediaAssetId) return void (notice.value = "请选择人物和已激活媒体。");
+  const response = await request(`/api/admin/persons/${encodeURIComponent(form.personId)}/media`, { method: "POST", body: JSON.stringify({ mediaAssetId: form.mediaAssetId, role: form.role, caption: form.caption || undefined }) });
+  if (!response.ok) return void (notice.value = await message(response));
+  personMediaForm.value = { personId: "", mediaAssetId: "", role: "portrait", caption: "" };
+  await refreshAdminData(); notice.value = "媒体已关联到人物，并保留审计记录。";
 }
 async function register() {
   const response = await request("/api/auth/register", { method: "POST", body: JSON.stringify(registerForm.value) });
@@ -364,6 +376,7 @@ onMounted(async () => { try { const response = await request("/api/health"); sta
       <p v-if="pendingAccounts.length === 0">暂无待审核账号。</p>
       <article v-for="item in pendingAccounts" :key="item.id" class="pending"><h3>{{ item.display_name }} <small>@{{ item.username }}</small></h3><p>线索：{{ item.registration_branch_name || "未填房支" }}；{{ item.registration_ancestor_name || "未填父辈/祖辈" }}</p><label>人工关联人物<select v-model="selectedPerson[item.id]"><option value="">请选择，不自动匹配</option><option v-for="person in persons" :key="person.id" :value="person.id">{{ person.display_name }} · {{ person.id }}</option></select></label><label>额外角色<select v-model="selectedRole[item.id]"><option value="member">仅族人</option><option value="editor">编辑员</option><option value="admin">管理员</option></select></label><div class="actions"><button @click="approve(item)">通过</button><button class="secondary" @click="reject(item)">拒绝</button></div></article>
       <section class="workflow-admin media-admin"><h2>媒体上传</h2><p>只允许 JPEG、PNG、WebP，单文件不超过 10 MiB。文件将直传私有 R2；完成校验前不会被激活。</p><p v-if="!mediaUploadAvailable" class="status">此环境尚未配置受限直传凭据，上传按钮已禁用。</p><form class="workflow-form" @submit.prevent="uploadMedia"><label>图片文件<input ref="mediaFileInput" type="file" accept="image/jpeg,image/png,image/webp" :disabled="!mediaUploadAvailable || mediaUploadBusy" required @change="selectMediaFile" /></label><label>可见性<select v-model="mediaUploadForm.visibility" :disabled="!mediaUploadAvailable || mediaUploadBusy"><option value="PUBLIC">公开</option><option value="MEMBER">族人</option><option value="ADMIN">管理员</option></select></label><button :disabled="!mediaUploadAvailable || !mediaFile || mediaUploadBusy">{{ mediaUploadBusy ? "正在上传并校验…" : "上传并完成校验" }}</button></form></section>
+      <section class="workflow-admin media-admin"><h2>已激活媒体与人物关联</h2><p v-if="mediaAssets.length === 0">暂无已激活媒体。</p><div v-else class="media-list"><article v-for="asset in mediaAssets" :key="asset.id" class="pending"><a :href="`/api/media-assets/${asset.id}`" target="_blank" rel="noopener">{{ asset.original_filename }}</a><p>{{ asset.mime_type }} · {{ asset.byte_size }} bytes · {{ asset.visibility }} · 已关联 {{ asset.active_link_count }} 人物</p></article></div><form class="workflow-form" @submit.prevent="linkMediaToPerson"><label>人物<select v-model="personMediaForm.personId" required><option value="" disabled>请选择人物</option><option v-for="person in persons" :key="person.id" :value="person.id">{{ person.display_name }}</option></select></label><label>已激活媒体<select v-model="personMediaForm.mediaAssetId" required><option value="" disabled>请选择媒体</option><option v-for="asset in mediaAssets" :key="asset.id" :value="asset.id">{{ asset.original_filename }} · {{ asset.visibility }}</option></select></label><label>用途<select v-model="personMediaForm.role"><option value="portrait">肖像</option><option value="document">文档</option><option value="other">其他</option></select></label><label>说明（可选）<input v-model.trim="personMediaForm.caption" maxlength="1000" /></label><button :disabled="mediaAssets.length === 0">关联到人物</button></form></section>
       <section class="workflow-admin">
         <h2>提案工作台</h2><p>关系提案与房支变更均须先创建不可直接修改的草稿，再阅读服务端预览并提交审核。</p>
         <form class="workflow-form" @submit.prevent="createProposal"><label>世系<select v-model="lineageId" required @change="refreshWorkflowData"><option value="" disabled>请选择世系</option><option v-for="lineage in lineages" :key="lineage.id" :value="lineage.id">{{ lineage.name }}</option></select></label><label>理由<input v-model.trim="proposalForm.reason" maxlength="1000" required /></label><label>操作<select v-model="proposalForm.operation"><option value="relation_add">新增亲属关系</option><option value="relation_remove">移除亲属关系</option></select></label><label>{{ proposalForm.relationKind === "spouse" ? "一方人物 ID" : "子女人物 ID" }}<input v-model.trim="proposalForm.subjectPersonId" required /></label><label>{{ proposalForm.relationKind === "spouse" ? "另一方人物 ID" : "父母人物 ID" }}<input v-model.trim="proposalForm.relatedPersonId" required /></label><label>关系类型<select v-model="proposalForm.relationKind"><option value="biological_parent">生父母</option><option value="adoptive_parent">养父母</option><option value="successor_parent">嗣父母</option><option value="spouse">配偶</option></select></label><button>创建草稿并预览</button></form>

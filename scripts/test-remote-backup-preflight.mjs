@@ -10,6 +10,7 @@ const root = path.resolve(import.meta.dirname, "..");
 const script = path.join(root, "scripts/remote-backup-preflight.mjs");
 const commandPlan = path.join(root, "scripts/remote-backup-command-plan.mjs");
 const executionPrecheck = path.join(root, "scripts/remote-backup-execution-precheck.mjs");
+const authorizationValidator = path.join(root, "scripts/validate-preview-recovery-authorization.mjs");
 const config = path.join(root, "wrangler.jsonc");
 const plan = { formatVersion: 1, operation: "remote_backup", environment: "preview", databaseName: "cloud-genealogy-preview", databaseId: "aaaacbfb-762d-41b7-a424-aaa6e69ec563", r2Bucket: "cloud-genealogy-preview", writeFreezeId: "11111111-1111-4111-8111-111111111111", confirmedBy: ["backup-custodian-a", "backup-custodian-b"], backupId: "preview-backup-20261026", approvalRecordId: "approval-20261026-1", offsiteStorageLocationId: "offsite-vault-primary", createdAt: "2026-10-26T00:00:00.000Z" };
 
@@ -46,6 +47,10 @@ try {
   await writeFile(freezeRecord, JSON.stringify({ active: true, writeFreezeId: plan.writeFreezeId, approvalRecordId: plan.approvalRecordId }), "utf8");
   assert.equal(spawnSync(process.execPath, [executionPrecheck, "--preflight", accepted.output, "--command-plan", commandPlanOutput, "--freeze-record", freezeRecord, "--temp-dir", accepted.directory, "--archive-dir", accepted.directory, "--output", precheckOutput], { encoding: "utf8" }).status, 0);
   assert.equal(JSON.parse(await readFile(precheckOutput, "utf8")).remoteExecutionAvailable, false);
+  const authorization = path.join(accepted.directory, "authorization.json"); const authorizationReport = path.join(accepted.directory, "authorization-report.json");
+  await writeFile(authorization, JSON.stringify({ formatVersion: 1, environment: "preview", backupId: plan.backupId, approvalRecordId: plan.approvalRecordId, confirmedBy: plan.confirmedBy, windowStart: "2026-10-26T01:00:00.000Z", windowEnd: "2026-10-26T02:00:00.000Z", cleanupOwner: "preview-custodian", offsiteStorageLocationId: plan.offsiteStorageLocationId }), "utf8");
+  assert.equal(spawnSync(process.execPath, [authorizationValidator, "--authorization", authorization, "--preflight", accepted.output, "--precheck", precheckOutput, "--output", authorizationReport], { encoding: "utf8" }).status, 0);
+  assert.equal(JSON.parse(await readFile(authorizationReport, "utf8")).readyForHumanAuthorization, true);
   assert.equal(spawnSync(process.execPath, [executionPrecheck, "--preflight", accepted.output, "--command-plan", commandPlanOutput, "--freeze-record", freezeRecord, "--temp-dir", accepted.directory, "--archive-dir", accepted.directory, "--output", precheckOutput], { encoding: "utf8" }).status, 1);
   assert.equal(spawnSync(process.execPath, [commandPlan, "--preflight", accepted.output, "--output", commandPlanOutput], { encoding: "utf8" }).status, 1);
   const invalidPreflight = path.join(accepted.directory, "invalid-preflight.json");

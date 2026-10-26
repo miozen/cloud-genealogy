@@ -22,6 +22,7 @@
 - 新增 `P0-6-PREVIEW-REMOTE-EXECUTOR-DESIGN.md`：固化未来 preview 备份执行器的最小权限、拒绝 production、凭据分离与失败收敛契约；本阶段没有 remote 实现或 Cloudflare 调用。
 - 新增 `remote-backup-command-plan.mjs`：只消费合格的 preview preflight JSON，生成不可执行的人工审阅步骤，永久输出 `remoteExecutionAvailable: false`；测试覆盖无效 preflight 与输出覆盖拒绝。
 - 新增 `remote-backup-execution-precheck.mjs`：本地核验 preview 预检、不可执行命令计划、活动冻结/审批记录和非符号链接本机目录；不读取凭据、不联网，且拒绝输出覆盖。
+- 新增 `validate-preview-recovery-authorization.mjs`：将非秘密授权记录、preflight 与执行前检查绑定校验，要求两位不同确认、演练窗口、清理责任和归档标识一致；输出仍不可执行。
 
 ## 当前风险与未完成项
 

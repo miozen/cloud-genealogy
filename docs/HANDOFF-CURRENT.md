@@ -75,6 +75,7 @@ npm run test:local-backup-recovery
 - `remote-backup-preflight.mjs` 已提供 future remote 备份的 local-only 输入校验：仅允许与 `wrangler.jsonc` 相符的 preview 目标，要求两位不同确认、写冻结与外部归档标识，拒绝秘密字段和 production；它明确不能执行 remote 操作。
 - `remote-backup-command-plan.mjs` 只从合格 preflight 生成供人工审阅的 future 执行步骤；它不调用 Wrangler、不读取凭据，且始终标明不可执行。
 - `remote-backup-execution-precheck.mjs` 已为 future executor 增加本地前置校验；它验证冻结与审批记录一致性、本机目录安全性，始终不可执行。
+- 授权包校验器已将授权记录、preflight 与执行前检查串联；它只确认材料完整，不能替代用户的一次性 remote 授权。
 - `backup-local-archive.mjs` 已提供受控本机加密归档：先验证包，再写入一个新的 `.tar.gz.cgbk` 文件并清除临时明文 tar；它是 Cloudflare 账户外副本，但不是异地副本。
 - `backup-recovery-catalog.mjs` 已登记并重验本机加密归档的 SHA-256；local 演练现要求至少三个恢复点。目录仅证明本机文件完整性与数量，不替代异地保管或 remote 恢复证明。
 

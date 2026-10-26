@@ -25,6 +25,7 @@
     "catalog:backup-recovery": "node scripts/backup-recovery-catalog.mjs",
     "prepare:d1-restore-data": "node scripts/prepare-d1-restore-data.mjs",
     "preflight:remote-backup": "node scripts/remote-backup-preflight.mjs",
+    "plan:remote-backup": "node scripts/remote-backup-command-plan.mjs",
     "test:remote-backup-preflight": "node scripts/test-remote-backup-preflight.mjs",
     "lint": "eslint . --max-warnings=0",
     "typecheck": "vue-tsc --noEmit",

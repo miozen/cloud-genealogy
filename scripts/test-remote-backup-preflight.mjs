@@ -8,6 +8,7 @@ import path from "node:path";
 
 const root = path.resolve(import.meta.dirname, "..");
 const script = path.join(root, "scripts/remote-backup-preflight.mjs");
+const commandPlan = path.join(root, "scripts/remote-backup-command-plan.mjs");
 const config = path.join(root, "wrangler.jsonc");
 const plan = { formatVersion: 1, operation: "remote_backup", environment: "preview", databaseName: "cloud-genealogy-preview", databaseId: "aaaacbfb-762d-41b7-a424-aaa6e69ec563", r2Bucket: "cloud-genealogy-preview", writeFreezeId: "11111111-1111-4111-8111-111111111111", confirmedBy: ["backup-custodian-a", "backup-custodian-b"], backupId: "preview-backup-20261026", approvalRecordId: "approval-20261026-1", offsiteStorageLocationId: "offsite-vault-primary", createdAt: "2026-10-26T00:00:00.000Z" };
 
@@ -15,7 +16,7 @@ async function invoke(value) {
   const directory = await mkdtemp(path.join(tmpdir(), "remote-backup-preflight-"));
   const input = path.join(directory, "plan.json"); const output = path.join(directory, "result.json");
   await writeFile(input, JSON.stringify(value), "utf8");
-  return { output, run: () => spawnSync(process.execPath, [script, "--plan", input, "--wrangler-config", config, "--output", output], { encoding: "utf8" }) };
+  return { output, directory, run: () => spawnSync(process.execPath, [script, "--plan", input, "--wrangler-config", config, "--output", output], { encoding: "utf8" }) };
 }
 
 try {
@@ -36,6 +37,14 @@ try {
     confirmedBy: plan.confirmedBy,
     offsiteStorageLocationId: plan.offsiteStorageLocationId,
   });
+  const commandPlanOutput = path.join(accepted.directory, "command-plan.json");
+  const planResult = spawnSync(process.execPath, [commandPlan, "--preflight", accepted.output, "--output", commandPlanOutput], { encoding: "utf8" });
+  assert.equal(planResult.status, 0);
+  assert.equal(JSON.parse(await readFile(commandPlanOutput, "utf8")).remoteExecutionAvailable, false);
+  assert.equal(spawnSync(process.execPath, [commandPlan, "--preflight", accepted.output, "--output", commandPlanOutput], { encoding: "utf8" }).status, 1);
+  const invalidPreflight = path.join(accepted.directory, "invalid-preflight.json");
+  await writeFile(invalidPreflight, JSON.stringify({ remoteExecutionAvailable: false, environment: "production" }), "utf8");
+  assert.equal(spawnSync(process.execPath, [commandPlan, "--preflight", invalidPreflight, "--output", path.join(accepted.directory, "invalid-output.json")], { encoding: "utf8" }).status, 1);
   const production = await invoke({ ...plan, environment: "production" });
   const productionResult = production.run();
   assert.equal(productionResult.status, 1);

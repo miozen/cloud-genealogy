@@ -22,6 +22,7 @@
     "collect:local-backup-counts": "node scripts/backup-counts.mjs",
     "crypt:backup": "node scripts/backup-crypt.mjs",
     "archive:local-backup": "node scripts/backup-local-archive.mjs",
+    "catalog:backup-recovery": "node scripts/backup-recovery-catalog.mjs",
     "prepare:d1-restore-data": "node scripts/prepare-d1-restore-data.mjs",
     "preflight:remote-backup": "node scripts/remote-backup-preflight.mjs",
     "test:remote-backup-preflight": "node scripts/test-remote-backup-preflight.mjs",

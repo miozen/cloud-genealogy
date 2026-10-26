@@ -18,6 +18,7 @@ source_retired_media="$fixture_root/source-retired-media.txt"
 restored_retired_media="$fixture_root/restored-retired-media.txt"
 passphrase_file="$fixture_root/recovery-passphrase"
 wrong_passphrase_file="$fixture_root/wrong-recovery-passphrase"
+catalog_file="$fixture_root/recovery-catalog.json"
 export XDG_CONFIG_HOME="$fixture_root/config"
 export WRANGLER_SEND_METRICS=false
 
@@ -112,6 +113,12 @@ rg -q '"people":\s*1' "$fixture_root/prepared-result.json"
 printf 'disposable-local-recovery-passphrase\n' > "$passphrase_file"
 chmod 600 "$passphrase_file"
 node "$project_root/scripts/backup-local-archive.mjs" --package "$package_dir" --migration-dir "$project_root/migrations" --destination "$fixture_root" --backup-id backup-package --passphrase-file "$passphrase_file" >/dev/null
+node "$project_root/scripts/backup-local-archive.mjs" --package "$package_dir" --migration-dir "$project_root/migrations" --destination "$fixture_root" --backup-id backup-package-2 --passphrase-file "$passphrase_file" >/dev/null
+node "$project_root/scripts/backup-local-archive.mjs" --package "$package_dir" --migration-dir "$project_root/migrations" --destination "$fixture_root" --backup-id backup-package-3 --passphrase-file "$passphrase_file" >/dev/null
+node "$project_root/scripts/backup-recovery-catalog.mjs" register --catalog "$catalog_file" --backup-id backup-package --archive "$encrypted_file" >/dev/null
+node "$project_root/scripts/backup-recovery-catalog.mjs" register --catalog "$catalog_file" --backup-id backup-package-2 --archive "$fixture_root/backup-package-2.tar.gz.cgbk" >/dev/null
+node "$project_root/scripts/backup-recovery-catalog.mjs" register --catalog "$catalog_file" --backup-id backup-package-3 --archive "$fixture_root/backup-package-3.tar.gz.cgbk" >/dev/null
+node "$project_root/scripts/backup-recovery-catalog.mjs" verify-retention --catalog "$catalog_file" --minimum 3 >/dev/null
 node "$project_root/scripts/backup-crypt.mjs" decrypt --input "$encrypted_file" --output "$decrypted_file" --passphrase-file "$passphrase_file" >/dev/null
 mkdir -p "$decrypted_dir"
 tar --extract --gzip --file "$decrypted_file" --directory "$decrypted_dir"

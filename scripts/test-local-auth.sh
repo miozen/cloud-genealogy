@@ -1068,6 +1068,24 @@ const noReviewerSubmit = await request(`/api/admin/change-requests/${noReviewerP
 expectStatus(noReviewerSubmit, 409);
 assert.equal(noReviewerSubmit.body.code, "reviewer_assignment_required");
 
+const writeFreeze = await request("/api/admin/backup-write-freeze", {
+  method: "POST", cookie: adminCookie, csrf: adminCsrf,
+  body: { reason: "本地备份一致性演练" },
+});
+expectStatus(writeFreeze, 201);
+expectStatus(await request("/api/admin/backup-write-freeze", { cookie: adminCookie }), 200);
+const frozenBusinessWrite = await request("/api/admin/persons", {
+  method: "POST", cookie: adminCookie, csrf: adminCsrf,
+  body: { displayName: "冻结期间不得创建", visibility: "MEMBER" },
+});
+expectStatus(frozenBusinessWrite, 423);
+assert.equal(frozenBusinessWrite.body.code, "backup_write_freeze_active");
+expectStatus(await request(`/api/admin/lineages/${lineageId}/branch-workbench`, { cookie: adminCookie }), 200);
+expectStatus(await request("/api/admin/backup-write-freeze/release", {
+  method: "POST", cookie: adminCookie, csrf: adminCsrf,
+  body: { freezeId: writeFreeze.body.freeze.id, reason: "本地备份一致性演练结束" },
+}), 204);
+
 const passwordReset = await request(`/api/admin/accounts/${member.id}/reset-password`, {
   method: "POST",
   cookie: adminCookie,

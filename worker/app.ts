@@ -37,10 +37,13 @@ import {
   rollbackChangeRequestInput,
   mediaUploadIntentInput,
   mediaCleanupRunInput,
+  backupWriteFreezeInput,
+  backupWriteFreezeReleaseInput,
   personMediaInput,
   personMediaOrderInput,
   validationMessage,
 } from "./auth/validation";
+import { activeBackupWriteFreeze, backupWriteFreezeProtection } from "./backup/write-freeze";
 import { createMediaUploadIntent, finalizeMediaUpload, retireMediaAsset } from "./media/media-asset";
 import { cancelMediaCleanupRun, confirmMediaCleanupRun, expireMediaCleanupRun, freezeMediaCleanupRun, previewMediaCleanupItem, type CurrentMediaCleanupAsset, type FrozenMediaCleanupItem, type FrozenMediaCleanupRun, type MediaCleanupCandidate } from "./media/media-cleanup-run";
 import { createR2PresignedPut, getR2PresignConfiguration } from "./media/r2-presigned-put";
@@ -269,6 +272,7 @@ export function createApp() {
   app.use("/api/*", securityHeaders);
   app.use("/api/*", sessionMiddleware);
   app.use("/api/*", csrfProtection);
+  app.use("/api/*", backupWriteFreezeProtection);
 
   app.get("/api/health", async (context) => {
     try {
@@ -295,6 +299,44 @@ export function createApp() {
     const auth = context.get("auth")!;
     if (!hasPermission(auth.roles, "system.manage")) return context.json({ code: "forbidden" }, 403);
     return context.json({ available: getR2PresignConfiguration(context.env) !== null });
+  });
+
+  app.get("/api/admin/backup-write-freeze", requireAuthentication, async (context) => {
+    const auth = context.get("auth")!;
+    if (!hasPermission(auth.roles, "system.manage")) return context.json({ code: "forbidden" }, 403);
+    return context.json({ freeze: await activeBackupWriteFreeze(context.env.DB) });
+  });
+
+  app.post("/api/admin/backup-write-freeze", requireAuthentication, async (context) => {
+    const auth = context.get("auth")!;
+    if (!hasPermission(auth.roles, "system.manage")) return context.json({ code: "forbidden" }, 403);
+    const parsed = backupWriteFreezeInput.safeParse(await context.req.json().catch(() => null));
+    if (!parsed.success) return context.json({ code: "validation_failed", message: validationMessage(parsed) }, 400);
+    const id = crypto.randomUUID(); const timestamp = now();
+    try {
+      await context.env.DB.batch([
+        context.env.DB.prepare("INSERT INTO backup_write_freeze (id, reason, created_by_account_id, created_at) VALUES (?, ?, ?, ?)").bind(id, parsed.data.reason, auth.accountId, timestamp),
+        context.env.DB.prepare("INSERT INTO audit_log (id, actor_account_id, action, object_type, object_id, metadata_json, created_at) VALUES (?, ?, ?, ?, ?, ?, ?)").bind(crypto.randomUUID(), auth.accountId, "backup.write_freeze_started", "backup_write_freeze", id, JSON.stringify({ reason: parsed.data.reason }), timestamp),
+      ]);
+    } catch (error) {
+      if (error instanceof Error && /UNIQUE constraint failed/u.test(error.message)) return context.json({ code: "backup_write_freeze_already_active" }, 409);
+      throw error;
+    }
+    return context.json({ freeze: { id, reason: parsed.data.reason, createdByAccountId: auth.accountId, createdAt: timestamp } }, 201);
+  });
+
+  app.post("/api/admin/backup-write-freeze/release", requireAuthentication, async (context) => {
+    const auth = context.get("auth")!;
+    if (!hasPermission(auth.roles, "system.manage")) return context.json({ code: "forbidden" }, 403);
+    const parsed = backupWriteFreezeReleaseInput.safeParse(await context.req.json().catch(() => null));
+    if (!parsed.success) return context.json({ code: "validation_failed", message: validationMessage(parsed) }, 400);
+    const timestamp = now();
+    const result = await context.env.DB.prepare(
+      "UPDATE backup_write_freeze SET released_by_account_id = ?, released_at = ?, release_reason = ? WHERE id = ? AND released_at IS NULL",
+    ).bind(auth.accountId, timestamp, parsed.data.reason, parsed.data.freezeId).run();
+    if (result.meta.changes !== 1) return context.json({ code: "backup_write_freeze_not_active" }, 409);
+    await writeAudit(context.env.DB, auth.accountId, "backup.write_freeze_released", "backup_write_freeze", parsed.data.freezeId, { reason: parsed.data.reason });
+    return context.body(null, 204);
   });
 
   app.post("/api/admin/media-assets/upload-intents", requireAuthentication, async (context) => {

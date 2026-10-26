@@ -1,6 +1,6 @@
 # P0-6 状态：备份与恢复
 
-状态：local 基线、媒体引用恢复核验、D1 数据导入准备工具与 preview 合成恢复演练已完成；真实 remote 备份、远程媒体引用校验与灾难切换尚未开始。最后更新：2026-10-25。
+状态：local 基线、媒体引用恢复核验、D1 数据导入准备工具、可审计写冻结与 preview 合成恢复演练已完成；真实 remote 备份、远程媒体引用校验与灾难切换尚未开始。最后更新：2026-10-26。
 
 ## 已完成
 
@@ -15,6 +15,7 @@
 - 新增 `P0-6-ADMIN-RUNBOOK.md`：将 local 演练、remote 备份前置条件、恢复预检、测试环境演练和生产恢复的授权边界固化为管理员清单；不含任何真实秘密或远程资源标识。
 - 新增 `P0-6-TEST-RECOVERY-AUTHORIZATION.md`：固化测试环境演练的成功标准、一次性授权范围、禁止事项和待安全审批记录补齐的事实。
 - 新增 `scripts/prepare-d1-restore-data.mjs` 与 `npm run prepare:d1-restore-data -- --input <data-only.sql> --output <prepared.sql>`：仅处理 Wrangler 的 data-only D1 导出，移除内部 `d1_migrations` 记录，并仅将三个固定权限种子表的插入改为幂等形式。`test:local-backup-recovery` 已覆盖“先迁移空目标、拒绝非 Wrangler 输入与覆盖输出、再准备并导入数据、查询恢复人物”的链路。
+- 新增 `0018_backup_write_freeze.sql` 和管理员写冻结 API：`GET/POST /api/admin/backup-write-freeze`、`POST /api/admin/backup-write-freeze/release`。冻结时所有管理端业务写入统一返回 `423 backup_write_freeze_active`；读取和纯内存 revision preview 保持可用。启动与解除均写入 `audit_log`，且数据库只允许一个活动冻结窗口。该能力只在 local 测试中验证，未迁移到 preview。
 
 ## 当前风险与未完成项
 
@@ -30,7 +31,8 @@
 | 本地源码、迁移、运行配置与脚本审计 | 已执行；确认没有既有备份/恢复实现或 CI 工作流。 |
 | Cloudflare 官方文档复核 | 已执行；D1 SQL 导出/导入、R2 S3 访问及 Workers 限制与设计一致。 |
 | `npm run test:local-backup-recovery` | 通过：仅临时 local D1/R2，验证业务计数采集、导出、只读预检、D1 data-only 准备的拒绝路径和已迁移空目标导入、加密认证解密、错误口令/篡改拦截、隔离恢复及对象内容比对。 |
-| `npm run lint`、`npm run check`、`npm run build` | 已于第 43 项通过：28 个测试文件、71 项测试；生产构建完成。 |
+| `npm run lint`、`npm run check`、`npm run build` | 2026-10-26 通过：29 个测试文件、73 项测试；生产构建完成。 |
+| `npm run test:local-core-model`、`npm run test:local-auth`、`npm run test:local-backup-recovery` | 2026-10-26 通过：仅隔离 Wrangler local D1/R2；认证集成覆盖写冻结拒绝业务写入、保留读取及受审计解除。 |
 | preview D1/R2 合成恢复演练 | 通过：已重建 preview、应用 15 项迁移、恢复合成人物与媒体并完成外键/字节校验；未部署 Worker。 |
 
 第 36 项已扩展 local 演练：fixture 现有真实 `active media_asset → person_media → R2` 链；包格式 v2 将 R2 文件逐一绑定媒体 ID/哈希/大小/MIME/状态/引用数，恢复后核验资产元数据、关联行和对象字节。未访问 preview 或 production。
@@ -49,7 +51,7 @@
 
 第 43 项新增 local 清理批次的只读 D1 漂移预检：冻结元数据与当前状态或关联数不一致时只报告将跳过的原因，不写状态、不读 R2，也不开放执行。
 
-接力基线见 [当前接力快照](/home/mio/projects/cloud-genealogy/docs/HANDOFF-CURRENT.md)：其中记录当前功能分支、local `0017` 与 preview `0015` 的迁移差异、最近真实验证和远端禁止事项。
+接力基线见 [当前接力快照](/home/mio/projects/cloud-genealogy/docs/HANDOFF-CURRENT.md)：其中记录当前功能分支、local `0018` 与 preview `0015` 的迁移差异、最近真实验证和远端禁止事项。
 
 ## Preview 恢复演练（2026-10-25）
 

@@ -166,6 +166,13 @@ export const mediaCleanupRunInput = z.object({
   backupRecoveryPoint: z.string().trim().min(1).max(255),
   backupPackageSha256: z.string().regex(/^[0-9a-f]{64}$/u, "备份包 SHA-256 必须为小写十六进制摘要。"),
 });
+export const backupWriteFreezeInput = z.object({
+  reason: z.string().trim().min(1, "请说明备份写冻结原因。").max(1_000, "备份写冻结原因过长。"),
+});
+export const backupWriteFreezeReleaseInput = z.object({
+  freezeId: z.string().uuid(),
+  reason: z.string().trim().min(1, "请说明解除备份写冻结的原因。").max(1_000, "解除原因过长。"),
+});
 export const personNameInput = z.object({
   nameText: z.string().trim().min(1, "姓名不能为空。").max(80, "姓名最长 80 个字符。"),
   nameKind: z.enum(["genealogy", "courtesy", "art_name", "alias", "source_text"]),

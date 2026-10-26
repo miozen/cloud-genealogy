@@ -1,13 +1,13 @@
 # 当前接力快照
 
-最后更新：2026-10-25。此文件面向下一台接力电脑；以仓库内容和 Git 状态为准，绝不将本文件视为远端/生产操作授权。
+最后更新：2026-10-26。此文件面向下一台接力电脑；以仓库内容和 Git 状态为准，绝不将本文件视为远端/生产操作授权。
 
 ## 1. 从何处继续
 
 - 远端：`ssh://git@ssh.github.com:443/miozen/cloud-genealogy.git`
 - 当前功能分支：`feat/p0-3-chart-api-svg`
 - 接力基线提交：`279aa30 feat(media): preflight cleanup run drift`；本次接力文档提交后应以该提交的后继提交为准。
-- 当前开发阶段：P0-6 local 备份恢复基线与 P2 媒体资产/清理**审阅流程**已完成；真实 remote 备份、远程媒体恢复、清理执行器、部署与生产资源操作均未开始或未获授权。
+- 当前开发阶段：P0-6 local 备份恢复基线及可审计写冻结、P2 媒体资产/清理**审阅流程**已完成；真实 remote 备份、远程媒体恢复、清理执行器、部署与生产资源操作均未开始或未获授权。
 
 在新电脑上执行：
 
@@ -70,24 +70,25 @@ npm run test:local-backup-recovery
 - 到期候选的管理员只读预览：`GET /api/admin/media-assets/cleanup-preview`，不读/写 R2，不写 D1 或审计。
 - 仅 `APP_ENV=development` 可用的清理 run 审阅闭环：冻结候选、不同第二管理员确认、取消、过期收敛、查询及 D1 漂移预检。它始终返回 `executionAvailable: false`，没有执行或删除 API。
 - `0017_media_cleanup_runs.sql` 已加入本地迁移链；它只保存 run/item/确认状态，不改变媒体状态且不删除数据。
+- `0018_backup_write_freeze.sql` 已加入本地迁移链；管理员可开启、查询及解除单一活动的逻辑写冻结。冻结期间管理端业务写入统一被拒绝，读取保持可用；启停均有审计。
 
 最近真实验证（代码提交 `279aa30`）：
 
-- `npm run lint`、`npm run check`、`npm run build`：通过；28 个测试文件、71 项测试。
-- `LOCAL_AUTH_TEST_PORT=18992 npm run test:local-auth`：通过；覆盖 local 清理 run 冻结、双人确认、取消、过期及漂移预检。
-- `npm run test:local-core-model`：第 40 项执行通过，验证 local D1 迁移链含 `0017`。
-- `npm run test:local-backup-recovery`：第 37 项执行通过，验证活动及保留期内退休媒体恢复；此后只增加 local 清理审阅能力，未改变备份包代码。接力电脑应在继续媒体或备份工作前重新执行该命令。
+- `npm run lint`、`npm run check`、`npm run build`：2026-10-26 通过；29 个测试文件、73 项测试。
+- `LOCAL_AUTH_TEST_PORT=18992 npm run test:local-auth`：2026-10-26 通过；覆盖 local 清理 run 审阅闭环及备份写冻结的拒绝、读取与解除。
+- `npm run test:local-core-model`：2026-10-26 通过，验证 local D1 迁移链含 `0018`。
+- `npm run test:local-backup-recovery`：2026-10-26 通过，验证活动及保留期内退休媒体恢复，并确认 `0018` 可进入空 local 目标的恢复迁移链。
 
 ## 5. 明确禁止与远端基线
 
 - 不得实现或调用 `MEDIA.delete()`、R2 lifecycle rule、Cron、Dashboard 批量删除、D1 物理删除或清理执行器。
 - 不得把 local 的 `backupRecoveryPoint`/包哈希字段描述为真实 remote 备份恢复证明。
 - 不得在未经明确一次性授权时操作 preview/production D1、R2、Secrets、部署或迁移。
-- preview 是唯一远程测试环境：D1 `cloud-genealogy-preview`，ID `aaaacbfb-762d-41b7-a424-aaa6e69ec563`；仅已应用 `0001`–`0015`。本地 `0016`、`0017` 尚未获 preview 迁移授权。
+- preview 是唯一远程测试环境：D1 `cloud-genealogy-preview`，ID `aaaacbfb-762d-41b7-a424-aaa6e69ec563`；仅已应用 `0001`–`0015`。本地 `0016`、`0017`、`0018` 尚未获 preview 迁移授权。
 - production D1 ID 仍为占位值；production 未创建/未使用。
 
 ## 6. 推荐下一步
 
-停止扩展 local 清理功能。先回到 P0-6，补齐并由负责人确认真实 remote 备份与恢复演练方案：责任人、异地存放、加密密钥保管、写冻结、测试窗口、最小权限凭据、preview 覆盖授权和恢复验收记录。
+停止扩展 local 清理功能。P0-6 写冻结已具备 local 基线；下一步补齐真实 remote 备份命令的最小权限设计与实现，但在责任人、异地存放、加密密钥保管、测试窗口、最小权限凭据、preview 覆盖授权和恢复验收记录齐备并经一次性授权前，不得操作任何远程资源。
 
 只有在这些前置条件完成且负责人再次明确授权后，才重新评审清理执行器。届时仍应遵循 `P2-MEDIA-CLEANUP-DESIGN-REVIEW.md`：候选冻结、双人确认、逐项重新核验、R2 删除后的 D1 墓碑与半完成恢复，不得直接删 D1 历史记录。

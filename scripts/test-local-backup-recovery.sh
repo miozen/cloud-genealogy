@@ -9,7 +9,6 @@ fixture_root="$(mktemp -d)"
 target_state="$fixture_root/target-state"
 package_dir="$fixture_root/backup-package"
 prepared_state="$fixture_root/prepared-target-state"
-archive_file="$fixture_root/backup-package.tar.gz"
 encrypted_file="$fixture_root/backup-package.tar.gz.cgbk"
 decrypted_file="$fixture_root/backup-package-restored.tar.gz"
 decrypted_dir="$fixture_root/decrypted"
@@ -112,10 +111,8 @@ rg -q '"people":\s*1' "$fixture_root/prepared-result.json"
 
 printf 'disposable-local-recovery-passphrase\n' > "$passphrase_file"
 chmod 600 "$passphrase_file"
-tar --create --gzip --file "$archive_file" --directory "$fixture_root" backup-package
-node "$project_root/scripts/backup-crypt.mjs" encrypt --input "$archive_file" --output "$encrypted_file" --passphrase-file "$passphrase_file" >/dev/null
+node "$project_root/scripts/backup-local-archive.mjs" --package "$package_dir" --migration-dir "$project_root/migrations" --destination "$fixture_root" --backup-id backup-package --passphrase-file "$passphrase_file" >/dev/null
 node "$project_root/scripts/backup-crypt.mjs" decrypt --input "$encrypted_file" --output "$decrypted_file" --passphrase-file "$passphrase_file" >/dev/null
-cmp -- "$archive_file" "$decrypted_file"
 mkdir -p "$decrypted_dir"
 tar --extract --gzip --file "$decrypted_file" --directory "$decrypted_dir"
 node "$project_root/scripts/backup-package.mjs" verify --package "$decrypted_dir/backup-package" --migration-dir "$project_root/migrations" >/dev/null

@@ -20,6 +20,7 @@
 - 交付报告必须区分“已执行且通过”“已执行但失败”“未执行及原因”；未执行项绝不写为通过。
 - 当前已有本地命令：`npm run lint`（ESLint 代码规范检查）、`npm run check`（类型检查和单元测试）、`npm run build`（生产构建）、`npm run test:local-core-model`（P0-2 固定 D1 数据）、`npm run test:local-auth`（本地 Worker/D1 集成）、`npm run test:local-backup-recovery`（临时 local D1/R2 的离线包预检、加密认证与隔离恢复演练）、`npm run collect:local-backup-counts -- --wrangler <path> --cwd <local-dir> --output <counts.json>`（本地 D1 的核心业务计数采集）、`npm run crypt:backup -- <encrypt|decrypt> --input <file> --output <new-file> --passphrase-file <mode-0600-file>`（离线归档加密/认证解密）、`npm run prepare:d1-restore-data -- --input <data-only.sql> --output <prepared.sql>`（为已迁移的空 D1 目标准备 Wrangler data-only 导出）、`npm run dev:worker`（本地 Worker）、`wrangler d1 ... --local`（本地迁移/查询）。交付前至少运行与改动相关的 lint、check 和 build，并如实记录结果。
 - `npm run preflight:remote-backup -- --plan <non-secret-plan.json> --wrangler-config wrangler.jsonc --output <new-result.json>` 只生成 future remote backup 的本地预检记录；不读取 token、不调用 `--remote`，且结果为 `remoteExecutionAvailable: false`。使用前仍须具备本次 remote 授权、两位责任确认、活动写冻结与外部归档位置；对应拒绝路径由 `npm run test:remote-backup-preflight` 覆盖。
+- `npm run archive:local-backup -- --package <verified-package-dir> --migration-dir migrations --destination <existing-local-dir> --backup-id <safe-id> --passphrase-file <mode-0600-file>` 可将已验证的本地包加密归档到本机目录，成功后不会保留它生成的明文 tar。该目录必须由责任人单独管理；同机副本不能替代异地副本或 remote 恢复演练。
 - `npm run test:local-auth` 会在独立的 `.wrangler/local-auth-integration/` 状态目录中启动本地 Worker，自动迁移并验证 bootstrap、注册待审、CSRF、人工人物关联、批准、登录、重置密码、会话撤销与退出。脚本使用临时测试凭证，退出时清理测试账号及关联记录；不得加 `--remote`。
 
 ## 0.2 远程测试接力基线

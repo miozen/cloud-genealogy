@@ -72,6 +72,7 @@ npm run test:local-backup-recovery
 - `0017_media_cleanup_runs.sql` 已加入本地迁移链；它只保存 run/item/确认状态，不改变媒体状态且不删除数据。
 - `0018_backup_write_freeze.sql` 已加入本地迁移链；管理员可开启、查询及解除单一活动的逻辑写冻结。冻结期间管理端业务写入统一被拒绝，读取保持可用；启停均有审计。
 - `remote-backup-preflight.mjs` 已提供 future remote 备份的 local-only 输入校验：仅允许与 `wrangler.jsonc` 相符的 preview 目标，要求两位不同确认、写冻结与外部归档标识，拒绝秘密字段和 production；它明确不能执行 remote 操作。
+- `backup-local-archive.mjs` 已提供受控本机加密归档：先验证包，再写入一个新的 `.tar.gz.cgbk` 文件并清除临时明文 tar；它是 Cloudflare 账户外副本，但不是异地副本。
 
 最近真实验证（代码提交 `279aa30`）：
 

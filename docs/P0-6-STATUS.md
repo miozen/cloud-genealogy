@@ -17,6 +17,7 @@
 - 新增 `scripts/prepare-d1-restore-data.mjs` 与 `npm run prepare:d1-restore-data -- --input <data-only.sql> --output <prepared.sql>`：仅处理 Wrangler 的 data-only D1 导出，移除内部 `d1_migrations` 记录，并仅将三个固定权限种子表的插入改为幂等形式。`test:local-backup-recovery` 已覆盖“先迁移空目标、拒绝非 Wrangler 输入与覆盖输出、再准备并导入数据、查询恢复人物”的链路。
 - 新增 `0018_backup_write_freeze.sql` 和管理员写冻结 API：`GET/POST /api/admin/backup-write-freeze`、`POST /api/admin/backup-write-freeze/release`。冻结时所有管理端业务写入统一返回 `423 backup_write_freeze_active`；读取和纯内存 revision preview 保持可用。启动与解除均写入 `audit_log`，且数据库只允许一个活动冻结窗口。该能力只在 local 测试中验证，未迁移到 preview。
 - 新增 `scripts/remote-backup-preflight.mjs` 与 `npm run preflight:remote-backup -- --plan <non-secret-plan.json> --wrangler-config wrangler.jsonc --output <new-result.json>`：只校验不含秘密的 preview 备份计划，要求两个不同确认标识、活动写冻结 ID、外部归档位置标识，并精确核对 preview D1/R2 binding。它拒绝 production、目标不匹配和 token/secret/password/credential 字段，输出固定 `remoteExecutionAvailable: false`，不调用 Wrangler remote 或 Cloudflare API。
+- 新增 `scripts/backup-local-archive.mjs` 与 `npm run archive:local-backup -- --package <verified-package-dir> --migration-dir migrations --destination <existing-local-dir> --backup-id <safe-id> --passphrase-file <mode-0600-file>`：先验证 manifest 与迁移基线，再生成临时 tar.gz、AES-GCM 加密到指定本机目录并删除临时明文；拒绝符号链接目录和覆盖已有归档。本机副本位于 Cloudflare 账户之外，但不等同于异地容灾副本。
 
 ## 当前风险与未完成项
 

@@ -21,6 +21,7 @@
 - 新增 `scripts/backup-recovery-catalog.mjs` 与 `npm run catalog:backup-recovery -- <register|verify-retention> ...`：目录仅登记常规加密归档的 ID、路径、大小、SHA-256 与登记时间；保留校验重新哈希每个归档，且当前 local 演练强制至少三个恢复点。它不解密、不读取远程资源，也不以同机三份文件宣称已具备异地容灾。
 - 新增 `P0-6-PREVIEW-REMOTE-EXECUTOR-DESIGN.md`：固化未来 preview 备份执行器的最小权限、拒绝 production、凭据分离与失败收敛契约；本阶段没有 remote 实现或 Cloudflare 调用。
 - 新增 `remote-backup-command-plan.mjs`：只消费合格的 preview preflight JSON，生成不可执行的人工审阅步骤，永久输出 `remoteExecutionAvailable: false`；测试覆盖无效 preflight 与输出覆盖拒绝。
+- 新增 `remote-backup-execution-precheck.mjs`：本地核验 preview 预检、不可执行命令计划、活动冻结/审批记录和非符号链接本机目录；不读取凭据、不联网，且拒绝输出覆盖。
 
 ## 当前风险与未完成项
 

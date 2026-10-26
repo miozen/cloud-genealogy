@@ -16,6 +16,7 @@
 - 新增 `P0-6-TEST-RECOVERY-AUTHORIZATION.md`：固化测试环境演练的成功标准、一次性授权范围、禁止事项和待安全审批记录补齐的事实。
 - 新增 `scripts/prepare-d1-restore-data.mjs` 与 `npm run prepare:d1-restore-data -- --input <data-only.sql> --output <prepared.sql>`：仅处理 Wrangler 的 data-only D1 导出，移除内部 `d1_migrations` 记录，并仅将三个固定权限种子表的插入改为幂等形式。`test:local-backup-recovery` 已覆盖“先迁移空目标、拒绝非 Wrangler 输入与覆盖输出、再准备并导入数据、查询恢复人物”的链路。
 - 新增 `0018_backup_write_freeze.sql` 和管理员写冻结 API：`GET/POST /api/admin/backup-write-freeze`、`POST /api/admin/backup-write-freeze/release`。冻结时所有管理端业务写入统一返回 `423 backup_write_freeze_active`；读取和纯内存 revision preview 保持可用。启动与解除均写入 `audit_log`，且数据库只允许一个活动冻结窗口。该能力只在 local 测试中验证，未迁移到 preview。
+- 新增 `scripts/remote-backup-preflight.mjs` 与 `npm run preflight:remote-backup -- --plan <non-secret-plan.json> --wrangler-config wrangler.jsonc --output <new-result.json>`：只校验不含秘密的 preview 备份计划，要求两个不同确认标识、活动写冻结 ID、外部归档位置标识，并精确核对 preview D1/R2 binding。它拒绝 production、目标不匹配和 token/secret/password/credential 字段，输出固定 `remoteExecutionAvailable: false`，不调用 Wrangler remote 或 Cloudflare API。
 
 ## 当前风险与未完成项
 
@@ -33,6 +34,7 @@
 | `npm run test:local-backup-recovery` | 通过：仅临时 local D1/R2，验证业务计数采集、导出、只读预检、D1 data-only 准备的拒绝路径和已迁移空目标导入、加密认证解密、错误口令/篡改拦截、隔离恢复及对象内容比对。 |
 | `npm run lint`、`npm run check`、`npm run build` | 2026-10-26 通过：29 个测试文件、73 项测试；生产构建完成。 |
 | `npm run test:local-core-model`、`npm run test:local-auth`、`npm run test:local-backup-recovery` | 2026-10-26 通过：仅隔离 Wrangler local D1/R2；认证集成覆盖写冻结拒绝业务写入、保留读取及受审计解除。 |
+| `npm run test:remote-backup-preflight` | 2026-10-26 通过：验证 preview 计划通过，production 与秘密字段计划被拒绝；未连接远程资源。 |
 | preview D1/R2 合成恢复演练 | 通过：已重建 preview、应用 15 项迁移、恢复合成人物与媒体并完成外键/字节校验；未部署 Worker。 |
 
 第 36 项已扩展 local 演练：fixture 现有真实 `active media_asset → person_media → R2` 链；包格式 v2 将 R2 文件逐一绑定媒体 ID/哈希/大小/MIME/状态/引用数，恢复后核验资产元数据、关联行和对象字节。未访问 preview 或 production。

@@ -65,6 +65,8 @@ P2 已提供媒体表、上传流程与稳定对象键、内容哈希、大小�
 
 local 基线现已提供完整归档的加密与认证解密工具；算法、失败行为和非门限的双人操作流程见 `P0-6-KEY-RECOVERY-DESIGN.md`。这不改变“真实口令、remote token 与 remote 恢复须单独授权”的边界。
 
+为避免把一次泛化的“继续”误解为 remote 执行授权，仓库提供了 `remote-backup-preflight.mjs`。它只读取一份不含秘密的计划和 `wrangler.jsonc`，强制目标为已配置 preview D1/R2、两位不同确认者、写冻结 ID、审批记录 ID 与外部归档位置标识；它不接受 production 或任何 token/secret/password/credential 字段，且结果永久标记 `remoteExecutionAvailable: false`。它是未来执行器的输入校验，不是备份命令、授权记录或远程恢复证明。
+
 Wrangler 的完整 D1 导出包含内部 `d1_migrations`，因此不能直接写入已经完成迁移的目标。`scripts/prepare-d1-restore-data.mjs` 只接受带这些内部记录的 Wrangler data-only 导出：删除内部记录，并将 `role`、`permission`、`role_permission` 三个固定种子表改成 `INSERT OR IGNORE`。它只适用于“先应用全部 migrations 的空目标”，并由 local 演练覆盖；不是通用 SQL 清洗或业务数据合并工具。
 
 ## 5. 恢复演练与正式恢复

@@ -71,6 +71,7 @@ npm run test:local-backup-recovery
 - 仅 `APP_ENV=development` 可用的清理 run 审阅闭环：冻结候选、不同第二管理员确认、取消、过期收敛、查询及 D1 漂移预检。它始终返回 `executionAvailable: false`，没有执行或删除 API。
 - `0017_media_cleanup_runs.sql` 已加入本地迁移链；它只保存 run/item/确认状态，不改变媒体状态且不删除数据。
 - `0018_backup_write_freeze.sql` 已加入本地迁移链；管理员可开启、查询及解除单一活动的逻辑写冻结。冻结期间管理端业务写入统一被拒绝，读取保持可用；启停均有审计。
+- `remote-backup-preflight.mjs` 已提供 future remote 备份的 local-only 输入校验：仅允许与 `wrangler.jsonc` 相符的 preview 目标，要求两位不同确认、写冻结与外部归档标识，拒绝秘密字段和 production；它明确不能执行 remote 操作。
 
 最近真实验证（代码提交 `279aa30`）：
 
@@ -78,6 +79,7 @@ npm run test:local-backup-recovery
 - `LOCAL_AUTH_TEST_PORT=18992 npm run test:local-auth`：2026-10-26 通过；覆盖 local 清理 run 审阅闭环及备份写冻结的拒绝、读取与解除。
 - `npm run test:local-core-model`：2026-10-26 通过，验证 local D1 迁移链含 `0018`。
 - `npm run test:local-backup-recovery`：2026-10-26 通过，验证活动及保留期内退休媒体恢复，并确认 `0018` 可进入空 local 目标的恢复迁移链。
+- `npm run test:remote-backup-preflight`：2026-10-26 通过；preview-only 正向计划通过，production 和秘密字段计划被拒绝，未连接 Cloudflare。
 
 ## 5. 明确禁止与远端基线
 
@@ -89,6 +91,6 @@ npm run test:local-backup-recovery
 
 ## 6. 推荐下一步
 
-停止扩展 local 清理功能。P0-6 写冻结已具备 local 基线；下一步补齐真实 remote 备份命令的最小权限设计与实现，但在责任人、异地存放、加密密钥保管、测试窗口、最小权限凭据、preview 覆盖授权和恢复验收记录齐备并经一次性授权前，不得操作任何远程资源。
+停止扩展 local 清理功能。P0-6 写冻结和 remote 执行前置校验已具备 local 基线；下一步仍是补齐真实 remote 备份命令的最小权限设计与实现，但在责任人、异地存放、加密密钥保管、测试窗口、最小权限凭据、preview 覆盖授权和恢复验收记录齐备并经一次性授权前，不得操作任何远程资源。
 
 只有在这些前置条件完成且负责人再次明确授权后，才重新评审清理执行器。届时仍应遵循 `P2-MEDIA-CLEANUP-DESIGN-REVIEW.md`：候选冻结、双人确认、逐项重新核验、R2 删除后的 D1 墓碑与半完成恢复，不得直接删 D1 历史记录。

@@ -307,6 +307,34 @@ export function createApp() {
     return context.json({ freeze: await activeBackupWriteFreeze(context.env.DB) });
   });
 
+  app.get("/api/admin/backup-write-freeze/readiness", requireAuthentication, async (context) => {
+    const auth = context.get("auth")!;
+    if (!hasPermission(auth.roles, "system.manage")) return context.json({ code: "forbidden" }, 403);
+    // One D1 statement gives a consistent view of the freeze and both counts.
+    const state = await context.env.DB.prepare(`SELECT
+      (SELECT id FROM backup_write_freeze WHERE released_at IS NULL LIMIT 1) AS freeze_id,
+      (SELECT COUNT(*) FROM backup_write_admission WHERE completed_at IS NULL) AS active_writes,
+      (SELECT COUNT(*) FROM media_asset WHERE state = 'pending_upload') AS pending_uploads,
+      (SELECT COUNT(*) FROM media_asset WHERE upload_expires_at > ?) AS unexpired_upload_urls`).bind(now()).first<{ freeze_id: string | null; active_writes: number; pending_uploads: number; unexpired_upload_urls: number }>();
+    if (!state) return context.json({ code: "backup_readiness_unavailable" }, 503);
+    return context.json({ freezeId: state.freeze_id, activeWrites: state.active_writes, pendingUploads: state.pending_uploads, unexpiredUploadUrls: state.unexpired_upload_urls, apiWritesDrained: state.freeze_id !== null && state.active_writes === 0, uploadsDrained: false, remoteExecutionAvailable: false });
+  });
+
+  app.get("/api/admin/backup-write-freeze/blockers", requireAuthentication, async (context) => {
+    const auth = context.get("auth")!;
+    if (!hasPermission(auth.roles, "system.manage")) return context.json({ code: "forbidden" }, 403);
+    const [admissions, uploads] = await context.env.DB.batch([
+      context.env.DB.prepare("SELECT id, admitted_at FROM backup_write_admission WHERE completed_at IS NULL ORDER BY admitted_at, id LIMIT 101"),
+      context.env.DB.prepare("SELECT id, state, upload_expires_at FROM media_asset WHERE state = 'pending_upload' OR upload_expires_at > ? ORDER BY upload_expires_at, id LIMIT 101").bind(now()),
+    ]);
+    if (!admissions || !uploads) return context.json({ code: "backup_readiness_unavailable" }, 503);
+    return context.json({
+      admissions: admissions.results.slice(0, 100), admissionsTruncated: admissions.results.length > 100,
+      uploads: uploads.results.slice(0, 100), uploadsTruncated: uploads.results.length > 100,
+      recoveryAvailable: false, uploadsDrained: false, remoteExecutionAvailable: false,
+    });
+  });
+
   app.post("/api/admin/backup-write-freeze", requireAuthentication, async (context) => {
     const auth = context.get("auth")!;
     if (!hasPermission(auth.roles, "system.manage")) return context.json({ code: "forbidden" }, 403);
@@ -346,10 +374,11 @@ export function createApp() {
     if (!parsed.success) return context.json({ code: "validation_failed", message: validationMessage(parsed) }, 400);
     const signingConfiguration = getR2PresignConfiguration(context.env);
     if (!signingConfiguration) return context.json({ code: "media_direct_upload_unavailable" }, 503);
-    const intent = createMediaUploadIntent({ id: crypto.randomUUID(), createdByAccountId: auth.accountId, ...parsed.data }, new Date());
+    const issuedAt = new Date();
+    const intent = createMediaUploadIntent({ id: crypto.randomUUID(), createdByAccountId: auth.accountId, ...parsed.data }, issuedAt);
     let upload: Awaited<ReturnType<typeof createR2PresignedPut>>;
     try {
-      upload = await createR2PresignedPut({ ...signingConfiguration, objectKey: intent.objectKey, mimeType: intent.mimeType, sha256: intent.sha256, issuedAt: new Date() });
+      upload = await createR2PresignedPut({ ...signingConfiguration, objectKey: intent.objectKey, mimeType: intent.mimeType, sha256: intent.sha256, issuedAt });
     } catch {
       return context.json({ code: "media_direct_upload_unavailable" }, 503);
     }

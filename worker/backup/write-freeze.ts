@@ -11,7 +11,7 @@ export interface ActiveBackupWriteFreeze {
 
 export function isBackupProtectedWrite(method: string, path: string): boolean {
   if (!new Set(["POST", "PUT", "PATCH", "DELETE"]).has(method)) return false;
-  if (!path.startsWith("/api/admin/")) return false;
+  if (!path.startsWith("/api/")) return false;
   if (path === "/api/admin/backup-write-freeze" || path === "/api/admin/backup-write-freeze/release") return false;
   // This endpoint calculates an in-memory preview and never writes D1 or R2.
   if (/^\/api\/admin\/lineages\/[^/]+\/revisions\/preview$/u.test(path)) return false;
@@ -24,19 +24,27 @@ export async function activeBackupWriteFreeze(database: D1Database): Promise<Act
   ).first<ActiveBackupWriteFreeze>();
 }
 
-/** Blocks business mutations during a backup while leaving reads available. */
+/** Atomically admits each API write only while no freeze exists. */
 export const backupWriteFreezeProtection: MiddlewareHandler<AppEnv> = createMiddleware(async (context, next) => {
   if (!isBackupProtectedWrite(context.req.method, context.req.path)) {
     await next();
     return;
   }
-  const freeze = await activeBackupWriteFreeze(context.env.DB);
-  if (freeze) {
+  const admissionId = crypto.randomUUID();
+  const result = await context.env.DB.prepare(
+    "INSERT INTO backup_write_admission (id, admitted_at) SELECT ?, ? WHERE NOT EXISTS (SELECT 1 FROM backup_write_freeze WHERE released_at IS NULL)",
+  ).bind(admissionId, new Date().toISOString()).run();
+  if (result.meta.changes !== 1) {
+    const freeze = await activeBackupWriteFreeze(context.env.DB);
     return context.json({
       code: "backup_write_freeze_active",
       message: "备份写冻结进行中，暂不接受业务变更。",
-      freeze: { id: freeze.id, createdAt: freeze.createdAt },
+      freeze: freeze ? { id: freeze.id, createdAt: freeze.createdAt } : null,
     }, 423);
   }
-  await next();
+  try {
+    await next();
+  } finally {
+    await context.env.DB.prepare("UPDATE backup_write_admission SET completed_at = ? WHERE id = ? AND completed_at IS NULL").bind(new Date().toISOString(), admissionId).run();
+  }
 });

@@ -97,6 +97,18 @@ npm run test:local-backup-recovery
 
 ## 6. 推荐下一步
 
+2026-10-28：`execute-preview-remote-backup.mjs` 只提供隔离 mock 适配器，CLI 明确拒绝真实执行；`npm run test:preview-backup-mock` 验证对象完整性和失败清理。下一步先解决写冻结并发排空、既有直传 URL 失效等待及真实远程媒体清单与迁移基线核验，不能把现有本地 JSON 当成授权或一致性证明。
+
+mock 编排已在导出前后分别校验模拟冻结/活动写入/待上传状态，故障注入已通过；实际线上排空协议和远程适配器未完成，不得将此断言当成可信状态。
+
+本地新增 `0019` 写入原子准入及 readiness 查询；直传进行中请求与中断恢复仍未解决，不能视为完整冻结。preview 仅到 `0015`，不得应用新迁移或启用 remote 执行，除非另获授权并完成一致性审查。
+
+最新增量将 API 写入准入扩展至认证，真实 local HTTP 并发交错及冻结期间认证阻断已测试通过。readiness 的 `uploadsDrained` 恒为 false；中断遗留准入没有自动解除，直传 PUT 的完成证明和受审计恢复尚未实现。preview 未应用 `0019`。
+
+最新接力增加只读 blockers 清单和完成记录写入故障注入；`P0-6-QUIESCENCE-RECOVERY-REVIEW.md` 记录远程静默与中断恢复的方案和限制，仍无真实恢复或远程执行能力。
+
+独立 SQLite/内存对象 fencing 原型与故障注入已加入 `scripts/fencing-prototype.mjs` 和 `npm run test:fencing-prototype`。对象复制后数据库失败会留下未发布孤儿；原型不具备真实 R2 不可变性、孤儿恢复或业务路径 fencing，远程执行仍禁用。
+
 停止扩展 local 清理功能。P0-6 写冻结和 remote 执行前置校验已具备 local 基线；下一步仍是补齐真实 remote 备份命令的最小权限设计与实现，但在责任人、异地存放、加密密钥保管、测试窗口、最小权限凭据、preview 覆盖授权和恢复验收记录齐备并经一次性授权前，不得操作任何远程资源。
 
 只有在这些前置条件完成且负责人再次明确授权后，才重新评审清理执行器。届时仍应遵循 `P2-MEDIA-CLEANUP-DESIGN-REVIEW.md`：候选冻结、双人确认、逐项重新核验、R2 删除后的 D1 墓碑与半完成恢复，不得直接删 D1 历史记录。

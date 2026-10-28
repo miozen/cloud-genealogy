@@ -183,6 +183,7 @@ const mediaIntent = await request("/api/admin/media-assets/upload-intents", {
 expectStatus(mediaIntent, 201);
 assert.match(mediaIntent.body.mediaAsset.objectKey, /^media\/[0-9a-f-]{36}$/);
 assert.match(mediaIntent.body.upload.url, /^https:\/\/cloud-genealogy-local\.0123456789abcdef0123456789abcdef\.r2\.cloudflarestorage\.com\/media\//);
+assert.equal(mediaIntent.body.mediaAsset.uploadExpiresAt, mediaIntent.body.upload.expiresAt);
 assert.equal(mediaIntent.body.upload.requiredHeaders["content-type"], "image/jpeg");
 assert.ok(mediaIntent.body.upload.requiredHeaders["x-amz-checksum-sha256"]);
 const missingMediaCompletion = await request(`/api/admin/media-assets/${mediaIntent.body.mediaAsset.id}/complete`, { method: "POST", cookie: adminCookie, csrf: adminCsrf });
@@ -1068,19 +1069,59 @@ const noReviewerSubmit = await request(`/api/admin/change-requests/${noReviewerP
 expectStatus(noReviewerSubmit, 409);
 assert.equal(noReviewerSubmit.body.code, "reviewer_assignment_required");
 
+let delayedBody;
+const inflightResponse = fetch(`${baseUrl}/api/admin/persons`, {
+  method: "POST", duplex: "half", headers: { "content-type": "application/json", cookie: adminCookie, "x-csrf-token": adminCsrf },
+  body: new ReadableStream({ start(controller) { delayedBody = controller; controller.enqueue(new TextEncoder().encode('{"displayName":')); } }),
+});
+let inflightObserved = false;
+for (let attempt = 0; attempt < 100; attempt += 1) {
+  const state = await request("/api/admin/backup-write-freeze/readiness", { cookie: adminCookie });
+  if (state.body.activeWrites > 0) { inflightObserved = true; break; }
+  await new Promise((resolve) => setTimeout(resolve, 50));
+}
+assert.equal(inflightObserved, true, "请求应在冻结前登记为在途写入");
 const writeFreeze = await request("/api/admin/backup-write-freeze", {
   method: "POST", cookie: adminCookie, csrf: adminCsrf,
   body: { reason: "本地备份一致性演练" },
 });
 expectStatus(writeFreeze, 201);
 expectStatus(await request("/api/admin/backup-write-freeze", { cookie: adminCookie }), 200);
+const runningReadiness = await request("/api/admin/backup-write-freeze/readiness", { cookie: adminCookie });
+expectStatus(runningReadiness, 200);
+assert.equal(runningReadiness.body.activeWrites, 1);
+assert.equal(runningReadiness.body.apiWritesDrained, false);
+const runningBlockers = await request("/api/admin/backup-write-freeze/blockers", { cookie: adminCookie });
+expectStatus(runningBlockers, 200);
+assert.equal(runningBlockers.body.admissions.length, 1);
+assert.equal(runningBlockers.body.recoveryAvailable, false);
+expectStatus(await request("/api/admin/backup-write-freeze/blockers", { cookie: memberCookie }), 403);
+expectStatus(await request("/api/admin/backup-write-freeze/blockers"), 401);
 const frozenBusinessWrite = await request("/api/admin/persons", {
   method: "POST", cookie: adminCookie, csrf: adminCsrf,
   body: { displayName: "冻结期间不得创建", visibility: "MEMBER" },
 });
 expectStatus(frozenBusinessWrite, 423);
 assert.equal(frozenBusinessWrite.body.code, "backup_write_freeze_active");
+expectStatus(await request("/api/auth/login", { method: "POST", body: { username: "local.admin", password } }), 423);
+expectStatus(await request("/api/auth/register", { method: "POST", body: { username: "frozen.user", password, genealogyName: "冻结期间注册" } }), 423);
+expectStatus(await request("/api/auth/logout", { method: "POST", cookie: adminCookie, csrf: adminCsrf }), 423);
 expectStatus(await request(`/api/admin/lineages/${lineageId}/branch-workbench`, { cookie: adminCookie }), 200);
+delayedBody.enqueue(new TextEncoder().encode('"在途测试人物","visibility":"MEMBER"}'));
+delayedBody.close();
+assert.equal((await inflightResponse).status, 201);
+const drainedReadiness = await request("/api/admin/backup-write-freeze/readiness", { cookie: adminCookie });
+expectStatus(drainedReadiness, 200);
+assert.equal(drainedReadiness.body.activeWrites, 0);
+assert.equal(drainedReadiness.body.remoteExecutionAvailable, false);
+execFileSync("npx", ["wrangler", "d1", "execute", "DB", "--local", "--persist-to", ".wrangler/local-auth-integration", "--command", "INSERT INTO media_asset (id, object_key, sha256, byte_size, mime_type, original_filename, visibility, state, created_by_account_id, created_at, upload_expires_at) SELECT 'pending-freeze-test', 'media/pending-freeze-test', 'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa', 1, 'image/jpeg', 'fixture.jpg', 'ADMIN', 'pending_upload', id, '2026-10-25T00:00:00.000Z', '2026-10-25T00:05:00.000Z' FROM account WHERE username = 'local.admin';"], { stdio: "pipe" });
+const pendingReadiness = await request("/api/admin/backup-write-freeze/readiness", { cookie: adminCookie });
+expectStatus(pendingReadiness, 200);
+assert.equal(pendingReadiness.body.pendingUploads > 0, true);
+assert.equal(pendingReadiness.body.uploadsDrained, false);
+const pendingBlockers = await request("/api/admin/backup-write-freeze/blockers", { cookie: adminCookie });
+expectStatus(pendingBlockers, 200);
+assert.equal(pendingBlockers.body.uploads.some((item) => item.id === "pending-freeze-test"), true);
 expectStatus(await request("/api/admin/backup-write-freeze/release", {
   method: "POST", cookie: adminCookie, csrf: adminCsrf,
   body: { freezeId: writeFreeze.body.freeze.id, reason: "本地备份一致性演练结束" },
@@ -1123,6 +1164,6 @@ npx wrangler d1 execute DB --local --persist-to "$state_dir" --command "
          (SELECT state FROM change_request WHERE reason = '重复 revision ID 的批次必须完整回滚') AS request_state,
          (SELECT COUNT(*) FROM audit_log WHERE action = 'lineage.change_request_published' AND metadata_json LIKE '%99999999-9999-4999-8999-999999999999%') AS publish_audits;
 " > "$state_dir/publish-batch-result.json"
-rg -q '"revision_id":\s*"99999999-9999-4999-8999-999999999999"' "$state_dir/publish-batch-result.json"
+rg -q '"revision_id":\s*"dededede-dede-4ede-8ede-dededededede"' "$state_dir/publish-batch-result.json"
 rg -q '"request_state":\s*"approved"' "$state_dir/publish-batch-result.json"
 rg -q '"publish_audits":\s*1' "$state_dir/publish-batch-result.json"

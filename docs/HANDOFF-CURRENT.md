@@ -92,7 +92,7 @@ npm run test:local-backup-recovery
 - 不得实现或调用 `MEDIA.delete()`、R2 lifecycle rule、Cron、Dashboard 批量删除、D1 物理删除或清理执行器。
 - 不得把 local 的 `backupRecoveryPoint`/包哈希字段描述为真实 remote 备份恢复证明。
 - 不得在未经明确一次性授权时操作 preview/production D1、R2、Secrets、部署或迁移。
-- preview 是唯一远程测试环境：D1 `cloud-genealogy-preview`，ID `aaaacbfb-762d-41b7-a424-aaa6e69ec563`；仅已应用 `0001`–`0015`。本地 `0016`、`0017`、`0018` 尚未获 preview 迁移授权。
+- preview 是唯一远程测试环境：D1 `cloud-genealogy-preview`，ID `aaaacbfb-762d-41b7-a424-aaa6e69ec563`；仅已应用 `0001`–`0015`。本地 `0016`–`0020` 尚未获 preview 迁移授权。
 - production D1 ID 仍为占位值；production 未创建/未使用。
 
 ## 6. 推荐下一步
@@ -112,6 +112,8 @@ mock 编排已在导出前后分别校验模拟冻结/活动写入/待上传状�
 `scripts/cross-store-recovery-prototype.mjs` 对上述孤儿场景补充本地 `prepared → copied → published` 恢复和 `needs_review` 标记；测试覆盖中断重试、哈希不符和旧代次。仅内存 SQLite/Map，同一进程重新实例化不等于跨进程或 Cloudflare 恢复；不得用作真实 remote 授权或备份证明。
 
 `npm run test:cross-store-persistence` 使用磁盘 SQLite 与文件对象夹具，并以子进程 SIGKILL 验证重启及并发创建。它不证明掉电或真实 D1/R2 的持久性、条件写和并发语义；生产路径与 remote 备份仍未启用。
+
+`0020` 在 local D1 为 `/api/admin/persons` 首次接入写入代次保护；冻结中及解冻后的旧请求不能创建人物或审计，审计失败批次回滚。其他业务写路径并未接入，不构成全局 fencing 或远程备份就绪证明。
 
 停止扩展 local 清理功能。P0-6 写冻结和 remote 执行前置校验已具备 local 基线；下一步仍是补齐真实 remote 备份命令的最小权限设计与实现，但在责任人、异地存放、加密密钥保管、测试窗口、最小权限凭据、preview 覆盖授权和恢复验收记录齐备并经一次性授权前，不得操作任何远程资源。
 

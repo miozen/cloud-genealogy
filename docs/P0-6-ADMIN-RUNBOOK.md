@@ -51,7 +51,7 @@ npm run test:local-backup-recovery
 ## E. 测试环境恢复演练（单独授权后）
 
 1. 在 preview 中恢复测试包；演练前确认 preview 当前数据可以被本次恢复覆盖，禁止操作 production。
-2. 对新建的空 preview 先应用 migrations；若源为 Wrangler data-only 导出，运行 `npm run prepare:d1-restore-data -- --input <data-only.sql> --output <prepared.sql>` 后才导入。该工具只移除内部迁移记录和固定权限种子冲突，绝不能用于向非空库合并业务数据。随后恢复 R2 对象、执行外键检查、manifest 哈希/计数比对和应用授权冒烟检查。
+2. 对新建的空 preview 先应用 migrations；若源为 Wrangler data-only 导出，运行 `npm run prepare:d1-restore-data -- --input <data-only.sql> --output <prepared.sql>` 后才导入。该工具移除内部迁移记录、处理固定权限种子冲突，并在最后恢复备份中的写入代次；绝不能用于向非空库合并业务数据。随后恢复 R2 对象、执行外键检查、manifest 哈希/计数比对和应用授权冒烟检查。
 3. 记录所有差异与清理结论。失败时按恢复包重新初始化 preview；不得尝试覆盖 production 来“修复”。
 4. 仅当演练完整成功，才讨论正式恢复的候选资源和一次性 binding 切换授权。
 

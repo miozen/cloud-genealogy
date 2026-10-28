@@ -20,6 +20,7 @@ export interface AuthContext {
 
 export interface AppVariables {
   auth: AuthContext | null;
+  backupAdmissionId?: string;
 }
 
 export interface AppEnv {

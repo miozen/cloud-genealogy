@@ -32,7 +32,7 @@ export const backupWriteFreezeProtection: MiddlewareHandler<AppEnv> = createMidd
   }
   const admissionId = crypto.randomUUID();
   const result = await context.env.DB.prepare(
-    "INSERT INTO backup_write_admission (id, admitted_at) SELECT ?, ? WHERE NOT EXISTS (SELECT 1 FROM backup_write_freeze WHERE released_at IS NULL)",
+    "INSERT INTO backup_write_admission (id, admitted_at, epoch) SELECT ?, ?, epoch FROM backup_write_epoch WHERE id = 1 AND NOT EXISTS (SELECT 1 FROM backup_write_freeze WHERE released_at IS NULL)",
   ).bind(admissionId, new Date().toISOString()).run();
   if (result.meta.changes !== 1) {
     const freeze = await activeBackupWriteFreeze(context.env.DB);
@@ -42,6 +42,7 @@ export const backupWriteFreezeProtection: MiddlewareHandler<AppEnv> = createMidd
       freeze: freeze ? { id: freeze.id, createdAt: freeze.createdAt } : null,
     }, 423);
   }
+  context.set("backupAdmissionId", admissionId);
   try {
     await next();
   } finally {

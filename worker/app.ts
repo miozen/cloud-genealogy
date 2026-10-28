@@ -1431,14 +1431,23 @@ export function createApp() {
     if (!parsed.success) return context.json({ code: "validation_failed", message: validationMessage(parsed) }, 400);
     const id = crypto.randomUUID();
     const timestamp = now();
-    await context.env.DB.batch([
+    const admissionId = context.get("backupAdmissionId");
+    if (!admissionId) return context.json({ code: "backup_admission_missing" }, 503);
+    const results = await context.env.DB.batch([
       context.env.DB
-        .prepare("INSERT INTO person (id, display_name, visibility, created_at, updated_at) VALUES (?, ?, ?, ?, ?)")
-        .bind(id, parsed.data.displayName, parsed.data.visibility, timestamp, timestamp),
+        .prepare(`INSERT INTO person (id, display_name, visibility, created_at, updated_at)
+          SELECT ?, ?, ?, ?, ? WHERE EXISTS (
+            SELECT 1 FROM backup_write_admission AS admission
+            INNER JOIN backup_write_epoch AS current ON current.id = 1 AND current.epoch = admission.epoch
+            WHERE admission.id = ? AND admission.completed_at IS NULL
+              AND NOT EXISTS (SELECT 1 FROM backup_write_freeze WHERE released_at IS NULL)
+          )`)
+        .bind(id, parsed.data.displayName, parsed.data.visibility, timestamp, timestamp, admissionId),
       context.env.DB
-        .prepare("INSERT INTO audit_log (id, actor_account_id, action, object_type, object_id, metadata_json, created_at) VALUES (?, ?, ?, ?, ?, ?, ?)")
-        .bind(crypto.randomUUID(), auth.accountId, "person.anchor_created", "person", id, JSON.stringify({ visibility: parsed.data.visibility }), timestamp),
+        .prepare("INSERT INTO audit_log (id, actor_account_id, action, object_type, object_id, metadata_json, created_at) SELECT ?, ?, ?, ?, ?, ?, ? WHERE EXISTS (SELECT 1 FROM person WHERE id = ?)")
+        .bind(crypto.randomUUID(), auth.accountId, "person.anchor_created", "person", id, JSON.stringify({ visibility: parsed.data.visibility }), timestamp, id),
     ]);
+    if (results[0]?.meta.changes !== 1) return context.json({ code: "backup_write_epoch_stale", message: "备份冻结期间请求已失效，请在解除冻结后重试。" }, 409);
     return context.json({ person: { id, displayName: parsed.data.displayName, visibility: parsed.data.visibility } }, 201);
   });
 

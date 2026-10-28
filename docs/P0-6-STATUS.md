@@ -20,6 +20,10 @@
 
 磁盘增量 `npm run test:cross-store-persistence` 已以磁盘 SQLite、文件对象和真实子进程完成两处 SIGKILL/重启、两个进程并发无覆盖创建、审计去重、篡改和旧代次测试。此夹具只证明本地进程中断场景，不代表掉电或真实 Cloudflare 一致性；remote 执行继续禁用。
 
+2026-10-28 首个业务 fencing 切片：`0020_backup_write_epoch.sql` 建立代次，创建冻结时由 D1 触发器在同一事务内递增；写请求原子准入时记录代次。仅 `/api/admin/persons` 在 D1 batch 内校验开放准入、当前代次及冻结状态，再创建人物和审计。冻结中以及解冻后的旧请求返回 `409 backup_write_epoch_stale`，不创建人物或审计；新代次可以正常创建。注入审计失败时整个批次回滚。迁移仅在 local 测试；其他写路径尚未 fencing，R2 直传与孤儿恢复问题未解决，不能将该切片用于启用远程备份。
+
+验证：`LOCAL_AUTH_TEST_PORT=18999 npm run test:local-auth` 和 `npm run test:local-core-model` 通过；`npm run test:local-backup-recovery` 的初次运行暴露代次种子冲突，修复后又以两条历史冻结、源代次 7 和旧准入代次 6 验证末尾恢复，并拒绝缺失/重复单例，最终通过。`npm run lint`、`npm run check`（29 文件、75 项）、`npm run test:cross-store-persistence`、`npm run build` 均通过。此处只验证 local，未执行远程迁移或备份。
+
 ## 已完成
 
 - 基于实际 migrations、Worker/R2 使用情况、Wrangler 环境配置和现有本地验证脚本完成备份恢复审查。
@@ -32,7 +36,7 @@
 - 新增 `scripts/backup-crypt.mjs` 与 `npm run crypt:backup -- ...`：对完整离线归档进行 AES-256-GCM 加密和认证解密，使用随机 salt/IV 与 Node 内建 scrypt；拒绝覆盖输出，认证失败不留下输出文件。真实密钥保管流程见 `P0-6-KEY-RECOVERY-DESIGN.md`。
 - 新增 `P0-6-ADMIN-RUNBOOK.md`：将 local 演练、remote 备份前置条件、恢复预检、测试环境演练和生产恢复的授权边界固化为管理员清单；不含任何真实秘密或远程资源标识。
 - 新增 `P0-6-TEST-RECOVERY-AUTHORIZATION.md`：固化测试环境演练的成功标准、一次性授权范围、禁止事项和待安全审批记录补齐的事实。
-- 新增 `scripts/prepare-d1-restore-data.mjs` 与 `npm run prepare:d1-restore-data -- --input <data-only.sql> --output <prepared.sql>`：仅处理 Wrangler 的 data-only D1 导出，移除内部 `d1_migrations` 记录，并仅将三个固定权限种子表的插入改为幂等形式。`test:local-backup-recovery` 已覆盖“先迁移空目标、拒绝非 Wrangler 输入与覆盖输出、再准备并导入数据、查询恢复人物”的链路。
+- 新增 `scripts/prepare-d1-restore-data.mjs` 与 `npm run prepare:d1-restore-data -- --input <data-only.sql> --output <prepared.sql>`：仅处理 Wrangler 的 data-only D1 导出，移除内部 `d1_migrations` 记录，将三个固定权限种子表的插入改为幂等形式，并在导入末尾恢复源写入代次。`test:local-backup-recovery` 覆盖迁移空目标、拒绝无效输入与覆盖输出、导入数据和代次恢复。
 - 新增 `0018_backup_write_freeze.sql` 和管理员写冻结 API：`GET/POST /api/admin/backup-write-freeze`、`POST /api/admin/backup-write-freeze/release`。冻结时所有管理端业务写入统一返回 `423 backup_write_freeze_active`；读取和纯内存 revision preview 保持可用。启动与解除均写入 `audit_log`，且数据库只允许一个活动冻结窗口。该能力只在 local 测试中验证，未迁移到 preview。
 - 新增 `scripts/remote-backup-preflight.mjs` 与 `npm run preflight:remote-backup -- --plan <non-secret-plan.json> --wrangler-config wrangler.jsonc --output <new-result.json>`：只校验不含秘密的 preview 备份计划，要求两个不同确认标识、活动写冻结 ID、外部归档位置标识，并精确核对 preview D1/R2 binding。它拒绝 production、目标不匹配和 token/secret/password/credential 字段，输出固定 `remoteExecutionAvailable: false`，不调用 Wrangler remote 或 Cloudflare API。
 - 新增 `scripts/backup-local-archive.mjs` 与 `npm run archive:local-backup -- --package <verified-package-dir> --migration-dir migrations --destination <existing-local-dir> --backup-id <safe-id> --passphrase-file <mode-0600-file>`：先验证 manifest 与迁移基线，再生成临时 tar.gz、AES-GCM 加密到指定本机目录并删除临时明文；拒绝符号链接目录和覆盖已有归档。本机副本位于 Cloudflare 账户之外，但不等同于异地容灾副本。

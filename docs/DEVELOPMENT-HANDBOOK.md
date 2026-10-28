@@ -40,8 +40,8 @@
 
 - 唯一远程测试资源：`cloud-genealogy-preview` D1 与同名私有 R2 桶；production 未创建且绝不用于测试。
 - preview D1 于 2026-10-25 重建，当前 ID：`aaaacbfb-762d-41b7-a424-aaa6e69ec563`；该 ID 已写入 `wrangler.jsonc` 的 `preview` binding。
-- preview 已应用 migrations `0001` 至 `0015`，并完成一次合成 D1/R2 恢复演练：外键检查无结果、合成人物计数为 1、媒体字节一致。local 分支现已包含 `0016`、`0017`、`0018`，但它们尚未获 preview 迁移授权；未部署 Worker、未写入 Secrets。
-- D1 完整导出含内部 `d1_migrations`，不可直接导入已初始化 preview。`npm run prepare:d1-restore-data -- --input <data-only.sql> --output <prepared.sql>` 已将 Wrangler data-only 导出中的这些内部行移除，并仅将 `role`、`permission`、`role_permission` 的固定种子行改为 `INSERT OR IGNORE`。目标必须是**刚完成迁移的空库**；该工具不是合并工具，不能用于含业务数据的 preview，更不能用于 production。
+- preview 已应用 migrations `0001` 至 `0015`，并完成一次合成 D1/R2 恢复演练：外键检查无结果、合成人物计数为 1、媒体字节一致。local 分支现已包含 `0016` 至 `0020`，但它们尚未获 preview 迁移授权；未部署 Worker、未写入 Secrets。
+- D1 完整导出含内部 `d1_migrations`，不可直接导入已初始化 preview。`npm run prepare:d1-restore-data -- --input <data-only.sql> --output <prepared.sql>` 移除这些内部行，将三个固定权限种子表改为 `INSERT OR IGNORE`，并在导入末尾恢复源 `backup_write_epoch` 单例，避免历史冻结触发器改变源代次。目标必须是**刚完成迁移的空库**；该工具不是合并工具，不能用于含业务数据的 preview，更不能用于 production。
 - 接力前先执行 `git status --short --branch`、阅读 `docs/P0-6-STATUS.md`，并且只有用户明确允许覆盖 preview 后才能执行任何 `--env preview --remote` 写命令。
 
 ## 1. 工作站前置条件

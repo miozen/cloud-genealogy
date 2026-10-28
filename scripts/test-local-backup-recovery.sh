@@ -49,6 +49,12 @@ printf '%s\n' \
   "$project_root/node_modules/.bin/wrangler" d1 execute DB --local --command "
   INSERT INTO account (id, username, display_name, password_scheme, password_hash, status, created_at, updated_at)
   VALUES ('aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa', 'backup.fixture', '备份演练操作人', 'fixture', 'fixture', 'active', '2026-10-25T00:00:00Z', '2026-10-25T00:00:00Z');
+  INSERT INTO backup_write_freeze (id, reason, created_by_account_id, created_at, released_by_account_id, released_at, release_reason)
+  VALUES ('historical-freeze-1', 'fixture', 'aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa', '2026-10-25T00:00:00Z', 'aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa', '2026-10-25T00:01:00Z', 'fixture');
+  INSERT INTO backup_write_freeze (id, reason, created_by_account_id, created_at, released_by_account_id, released_at, release_reason)
+  VALUES ('historical-freeze-2', 'fixture', 'aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa', '2026-10-25T00:02:00Z', 'aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa', '2026-10-25T00:03:00Z', 'fixture');
+  UPDATE backup_write_epoch SET epoch = 7 WHERE id = 1;
+  INSERT INTO backup_write_admission (id, admitted_at, completed_at, epoch) VALUES ('historical-admission', '2026-10-25T00:00:00Z', '2026-10-25T00:01:00Z', 6);
   INSERT INTO person (id, display_name, visibility, created_at, updated_at)
   VALUES ('backup-fixture-person', '备份演练人物', 'MEMBER', '2026-10-25T00:00:00Z', '2026-10-25T00:00:00Z');
   INSERT INTO media_asset (id, object_key, sha256, byte_size, mime_type, original_filename, visibility, state, created_by_account_id, created_at, upload_expires_at, finalized_at)
@@ -98,6 +104,20 @@ if node "$project_root/scripts/prepare-d1-restore-data.mjs" --input "$fixture_ro
   exit 1
 fi
 test ! -e "$fixture_root/invalid-prepared.sql"
+sed '/^INSERT INTO "backup_write_epoch" /d' "$fixture_root/data-only.sql" > "$fixture_root/missing-epoch.sql"
+if node "$project_root/scripts/prepare-d1-restore-data.mjs" --input "$fixture_root/missing-epoch.sql" --output "$fixture_root/missing-epoch-prepared.sql" >/dev/null 2>&1; then
+  echo "缺少写入代次的 0020 备份通过了恢复数据准备。" >&2
+  exit 1
+fi
+test ! -e "$fixture_root/missing-epoch-prepared.sql"
+cp "$fixture_root/data-only.sql" "$fixture_root/duplicate-epoch.sql"
+printf '\n' >> "$fixture_root/duplicate-epoch.sql"
+sed -n '/^INSERT INTO "backup_write_epoch" /p' "$fixture_root/data-only.sql" >> "$fixture_root/duplicate-epoch.sql"
+if node "$project_root/scripts/prepare-d1-restore-data.mjs" --input "$fixture_root/duplicate-epoch.sql" --output "$fixture_root/duplicate-epoch-prepared.sql" >/dev/null 2>&1; then
+  echo "重复写入代次的备份通过了恢复数据准备。" >&2
+  exit 1
+fi
+test ! -e "$fixture_root/duplicate-epoch-prepared.sql"
 node "$project_root/scripts/prepare-d1-restore-data.mjs" --input "$fixture_root/data-only.sql" --output "$fixture_root/prepared-data.sql" >/dev/null
 if node "$project_root/scripts/prepare-d1-restore-data.mjs" --input "$fixture_root/data-only.sql" --output "$fixture_root/prepared-data.sql" >/dev/null 2>&1; then
   echo "恢复数据准备覆盖了已有输出文件。" >&2
@@ -105,10 +125,14 @@ if node "$project_root/scripts/prepare-d1-restore-data.mjs" --input "$fixture_ro
 fi
 ! rg -q 'INSERT INTO "d1_migrations"' "$fixture_root/prepared-data.sql"
 rg -q '^INSERT OR IGNORE INTO "role"' "$fixture_root/prepared-data.sql"
+rg -q '^INSERT OR REPLACE INTO "backup_write_epoch"' "$fixture_root/prepared-data.sql"
 npx wrangler d1 migrations apply DB --local --persist-to "$prepared_state" >/dev/null
 npx wrangler d1 execute DB --local --persist-to "$prepared_state" --file "$fixture_root/prepared-data.sql" >/dev/null
-npx wrangler d1 execute DB --local --persist-to "$prepared_state" --command "SELECT COUNT(*) AS people FROM person WHERE id = 'backup-fixture-person';" > "$fixture_root/prepared-result.json"
+npx wrangler d1 execute DB --local --persist-to "$prepared_state" --command "SELECT (SELECT COUNT(*) FROM person WHERE id = 'backup-fixture-person') AS people, (SELECT epoch FROM backup_write_epoch WHERE id = 1) AS epoch, (SELECT epoch FROM backup_write_admission WHERE id = 'historical-admission') AS admission_epoch, (SELECT COUNT(*) FROM backup_write_freeze) AS freezes;" > "$fixture_root/prepared-result.json"
 rg -q '"people":\s*1' "$fixture_root/prepared-result.json"
+rg -q '"epoch":\s*7' "$fixture_root/prepared-result.json"
+rg -q '"admission_epoch":\s*6' "$fixture_root/prepared-result.json"
+rg -q '"freezes":\s*2' "$fixture_root/prepared-result.json"
 
 printf 'disposable-local-recovery-passphrase\n' > "$passphrase_file"
 chmod 600 "$passphrase_file"

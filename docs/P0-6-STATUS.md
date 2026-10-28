@@ -18,6 +18,8 @@
 
 后续本地跨存储恢复原型以 SQLite 记录 `prepared`/`copied`/`published`/`needs_review`、预期哈希与审计；模拟对象复制后中断可按相同哈希幂等收尾，旧代次须转人工审阅。`npm run test:cross-store-recovery-prototype` 已覆盖复制及发布中断、重复请求、哈希不符、对象缺失与冻结代次变化。该原型的对象存储是内存 Map，不支持真实跨进程恢复或 R2 并发语义，remote 仍禁用。
 
+磁盘增量 `npm run test:cross-store-persistence` 已以磁盘 SQLite、文件对象和真实子进程完成两处 SIGKILL/重启、两个进程并发无覆盖创建、审计去重、篡改和旧代次测试。此夹具只证明本地进程中断场景，不代表掉电或真实 Cloudflare 一致性；remote 执行继续禁用。
+
 ## 已完成
 
 - 基于实际 migrations、Worker/R2 使用情况、Wrangler 环境配置和现有本地验证脚本完成备份恢复审查。

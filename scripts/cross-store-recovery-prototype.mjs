@@ -56,7 +56,12 @@ export class CrossStoreRecoveryPrototype {
     if (digest(bytes) !== item.expected_sha256) throw new Error("source hash mismatch");
     const existing = this.objects.get(item.object_key);
     if (existing && digest(existing) !== item.expected_sha256) throw new Error("destination hash mismatch");
-    if (!existing) this.objects.set(item.object_key, Buffer.from(bytes));
+    if (!existing) {
+      if (typeof this.objects.putIfAbsent === "function") this.objects.putIfAbsent(item.object_key, bytes);
+      else this.objects.set(item.object_key, Buffer.from(bytes));
+    }
+    const copied = this.objects.get(item.object_key);
+    if (!copied || digest(copied) !== item.expected_sha256) throw new Error("destination hash mismatch");
     if (interruptAfterCopy) throw new Error("injected interruption after copy");
     return this.transaction(() => {
       this.requireEpoch(item.epoch);
@@ -69,7 +74,7 @@ export class CrossStoreRecoveryPrototype {
     });
   }
 
-  finalize(id, { interruptAfterPublication = false } = {}) {
+  finalize(id, { interruptAfterPublication = false, afterPublication = () => {} } = {}) {
     return this.transaction(() => {
       const item = this.item(id);
       if (!item) throw new Error("item not prepared");
@@ -83,6 +88,7 @@ export class CrossStoreRecoveryPrototype {
       }
       if (item.state !== "copied" || publication) throw new Error("item not ready to finalize");
       this.db.prepare("INSERT INTO recovery_publication VALUES (?, ?, ?)").run(id, item.object_key, item.expected_sha256);
+      afterPublication();
       if (interruptAfterPublication) throw new Error("injected finalization interruption");
       this.db.prepare("UPDATE recovery_item SET state = 'published' WHERE id = ? AND state = 'copied'").run(id);
       this.audit(id, "published", item.epoch);

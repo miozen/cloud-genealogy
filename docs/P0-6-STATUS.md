@@ -16,6 +16,8 @@
 
 同日完成独立 SQLite fencing 与内存对象暂存原型；旧代次写入被拒绝，事务中断回滚，旧暂存写入不改变模拟的发布副本。对象复制后数据库失败会保留未发布孤儿，未实现恢复；原型不接入真实 D1/R2 或业务路径，不解除远程执行禁令。
 
+后续本地跨存储恢复原型以 SQLite 记录 `prepared`/`copied`/`published`/`needs_review`、预期哈希与审计；模拟对象复制后中断可按相同哈希幂等收尾，旧代次须转人工审阅。`npm run test:cross-store-recovery-prototype` 已覆盖复制及发布中断、重复请求、哈希不符、对象缺失与冻结代次变化。该原型的对象存储是内存 Map，不支持真实跨进程恢复或 R2 并发语义，remote 仍禁用。
+
 ## 已完成
 
 - 基于实际 migrations、Worker/R2 使用情况、Wrangler 环境配置和现有本地验证脚本完成备份恢复审查。

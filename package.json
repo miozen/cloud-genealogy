@@ -31,6 +31,7 @@
     "execute:preview-remote-backup": "node scripts/execute-preview-remote-backup.mjs",
     "test:preview-backup-mock": "node scripts/test-preview-backup-mock.mjs",
     "test:fencing-prototype": "node scripts/test-fencing-prototype.mjs",
+    "test:cross-store-recovery-prototype": "node scripts/test-cross-store-recovery-prototype.mjs",
     "test:remote-backup-preflight": "node scripts/test-remote-backup-preflight.mjs",
     "lint": "eslint . --max-warnings=0",
     "typecheck": "vue-tsc --noEmit",

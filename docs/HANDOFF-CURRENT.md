@@ -109,6 +109,8 @@ mock 编排已在导出前后分别校验模拟冻结/活动写入/待上传状�
 
 独立 SQLite/内存对象 fencing 原型与故障注入已加入 `scripts/fencing-prototype.mjs` 和 `npm run test:fencing-prototype`。对象复制后数据库失败会留下未发布孤儿；原型不具备真实 R2 不可变性、孤儿恢复或业务路径 fencing，远程执行仍禁用。
 
+`scripts/cross-store-recovery-prototype.mjs` 对上述孤儿场景补充本地 `prepared → copied → published` 恢复和 `needs_review` 标记；测试覆盖中断重试、哈希不符和旧代次。仅内存 SQLite/Map，同一进程重新实例化不等于跨进程或 Cloudflare 恢复；不得用作真实 remote 授权或备份证明。
+
 停止扩展 local 清理功能。P0-6 写冻结和 remote 执行前置校验已具备 local 基线；下一步仍是补齐真实 remote 备份命令的最小权限设计与实现，但在责任人、异地存放、加密密钥保管、测试窗口、最小权限凭据、preview 覆盖授权和恢复验收记录齐备并经一次性授权前，不得操作任何远程资源。
 
 只有在这些前置条件完成且负责人再次明确授权后，才重新评审清理执行器。届时仍应遵循 `P2-MEDIA-CLEANUP-DESIGN-REVIEW.md`：候选冻结、双人确认、逐项重新核验、R2 删除后的 D1 墓碑与半完成恢复，不得直接删 D1 历史记录。

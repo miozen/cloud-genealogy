@@ -22,6 +22,10 @@
 
 2026-10-28 首个业务 fencing 切片：`0020_backup_write_epoch.sql` 建立代次，创建冻结时由 D1 触发器在同一事务内递增；写请求原子准入时记录代次。仅 `/api/admin/persons` 在 D1 batch 内校验开放准入、当前代次及冻结状态，再创建人物和审计。冻结中以及解冻后的旧请求返回 `409 backup_write_epoch_stale`，不创建人物或审计；新代次可以正常创建。注入审计失败时整个批次回滚。迁移仅在 local 测试；其他写路径尚未 fencing，R2 直传与孤儿恢复问题未解决，不能将该切片用于启用远程备份。
 
+2026-10-28 后续扩展：人物姓名创建（含主姓名替换）、人物事实创建（含新增地点）、谱书和版本创建、来源人物记录创建与关联替换、来源事实和关系主张创建，均在各自单个 D1 batch 内执行准入/代次校验，业务写入与审计一起提交。local 集成测试并发挂起八类请求，跨冻结和解冻后确认旧代次均拒绝且表计数、主姓名、既有关联和审计不变；另注入姓名和来源关联审计失败，验证旧主姓名与旧关联回滚保留。该切片不覆盖名称/事实/地点退休、来源主张撤回、来源关系语义、媒体关联/上传、账号认证和审核、世系变更等写路径；不能视为全局 fencing。
+
+本次验证：`npm run lint`、`npm run check`（29 文件、75 项）、`npm run build`、`LOCAL_AUTH_TEST_PORT=19001 npm run test:local-auth`、`npm run test:local-core-model` 与 `npm run test:local-backup-recovery` 均通过；全部集成测试使用隔离 local D1/R2。未访问远程资源。
+
 验证：`LOCAL_AUTH_TEST_PORT=18999 npm run test:local-auth` 和 `npm run test:local-core-model` 通过；`npm run test:local-backup-recovery` 的初次运行暴露代次种子冲突，修复后又以两条历史冻结、源代次 7 和旧准入代次 6 验证末尾恢复，并拒绝缺失/重复单例，最终通过。`npm run lint`、`npm run check`（29 文件、75 项）、`npm run test:cross-store-persistence`、`npm run build` 均通过。此处只验证 local，未执行远程迁移或备份。
 
 ## 已完成

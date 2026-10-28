@@ -61,6 +61,14 @@ import { securityHeaders } from "./middleware/security";
 import type { AppEnv } from "./types";
 
 const SESSION_MAX_AGE_SECONDS = 8 * 60 * 60;
+// Use inside the same D1 batch as every affected business statement. A prior
+// middleware check alone cannot prevent a freeze racing with the commit.
+const activeWriteAdmissionGuard = `EXISTS (
+  SELECT 1 FROM backup_write_admission AS admission
+  INNER JOIN backup_write_epoch AS current ON current.id = 1 AND current.epoch = admission.epoch
+  WHERE admission.id = ? AND admission.completed_at IS NULL
+    AND NOT EXISTS (SELECT 1 FROM backup_write_freeze WHERE released_at IS NULL)
+)`;
 
 interface AccountRow {
   id: string;
@@ -1460,12 +1468,15 @@ export function createApp() {
     const person = await context.env.DB.prepare("SELECT id FROM person WHERE id = ?").bind(personId).first<{ id: string }>();
     if (!person) return context.json({ code: "person_not_found" }, 404);
     const id = crypto.randomUUID(); const timestamp = now();
-    await context.env.DB.batch([
-      ...(parsed.data.isPrimary ? [context.env.DB.prepare("UPDATE person_name SET is_primary = 0 WHERE person_id = ? AND retired_at IS NULL").bind(personId)] : []),
-      context.env.DB.prepare("INSERT INTO person_name (id, person_id, name_text, name_kind, is_primary, visibility, created_at) VALUES (?, ?, ?, ?, ?, ?, ?)").bind(id, personId, parsed.data.nameText, parsed.data.nameKind, Number(parsed.data.isPrimary), parsed.data.visibility, timestamp),
-      ...(parsed.data.isPrimary ? [context.env.DB.prepare("UPDATE person SET display_name = ?, updated_at = ? WHERE id = ?").bind(parsed.data.nameText, timestamp, personId)] : []),
-      context.env.DB.prepare("INSERT INTO audit_log (id, actor_account_id, action, object_type, object_id, metadata_json, created_at) VALUES (?, ?, ?, ?, ?, ?, ?)").bind(crypto.randomUUID(), auth.accountId, "person.name_added", "person_name", id, JSON.stringify({ personId, isPrimary: parsed.data.isPrimary }), timestamp),
+    const admissionId = context.get("backupAdmissionId");
+    if (!admissionId) return context.json({ code: "backup_admission_missing" }, 503);
+    const results = await context.env.DB.batch([
+      ...(parsed.data.isPrimary ? [context.env.DB.prepare(`UPDATE person_name SET is_primary = 0 WHERE person_id = ? AND retired_at IS NULL AND ${activeWriteAdmissionGuard}`).bind(personId, admissionId)] : []),
+      context.env.DB.prepare(`INSERT INTO person_name (id, person_id, name_text, name_kind, is_primary, visibility, created_at) SELECT ?, ?, ?, ?, ?, ?, ? WHERE ${activeWriteAdmissionGuard}`).bind(id, personId, parsed.data.nameText, parsed.data.nameKind, Number(parsed.data.isPrimary), parsed.data.visibility, timestamp, admissionId),
+      ...(parsed.data.isPrimary ? [context.env.DB.prepare("UPDATE person SET display_name = ?, updated_at = ? WHERE id = ? AND EXISTS (SELECT 1 FROM person_name WHERE id = ?)").bind(parsed.data.nameText, timestamp, personId, id)] : []),
+      context.env.DB.prepare("INSERT INTO audit_log (id, actor_account_id, action, object_type, object_id, metadata_json, created_at) SELECT ?, ?, ?, ?, ?, ?, ? WHERE EXISTS (SELECT 1 FROM person_name WHERE id = ?)").bind(crypto.randomUUID(), auth.accountId, "person.name_added", "person_name", id, JSON.stringify({ personId, isPrimary: parsed.data.isPrimary }), timestamp, id),
     ]);
+    if (results[parsed.data.isPrimary ? 1 : 0]?.meta.changes !== 1) return context.json({ code: "backup_write_epoch_stale" }, 409);
     return context.json({ personName: { id, personId, nameText: parsed.data.nameText, nameKind: parsed.data.nameKind, isPrimary: parsed.data.isPrimary, visibility: parsed.data.visibility } }, 201);
   });
 
@@ -1482,11 +1493,14 @@ export function createApp() {
       if (!place) return context.json({ code: "place_not_found" }, 404);
     }
     const id = crypto.randomUUID(); const placeId = parsed.data.placeId ?? (parsed.data.placeName ? crypto.randomUUID() : null); const timestamp = now();
-    await context.env.DB.batch([
-      ...(parsed.data.placeName ? [context.env.DB.prepare("INSERT INTO place (id, name_text, place_kind, created_at) VALUES (?, ?, ?, ?)").bind(placeId, parsed.data.placeName, parsed.data.placeKind ?? "unknown", timestamp)] : []),
-      context.env.DB.prepare("INSERT INTO person_fact (id, person_id, fact_kind, value_text, date_text, date_precision, place_id, visibility, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)").bind(id, personId, parsed.data.factKind, parsed.data.valueText ?? null, parsed.data.dateText ?? null, parsed.data.datePrecision, placeId, parsed.data.visibility, timestamp),
-      context.env.DB.prepare("INSERT INTO audit_log (id, actor_account_id, action, object_type, object_id, metadata_json, created_at) VALUES (?, ?, ?, ?, ?, ?, ?)").bind(crypto.randomUUID(), auth.accountId, "person.fact_added", "person_fact", id, JSON.stringify({ personId, factKind: parsed.data.factKind }), timestamp),
+    const admissionId = context.get("backupAdmissionId");
+    if (!admissionId) return context.json({ code: "backup_admission_missing" }, 503);
+    const results = await context.env.DB.batch([
+      ...(parsed.data.placeName ? [context.env.DB.prepare(`INSERT INTO place (id, name_text, place_kind, created_at) SELECT ?, ?, ?, ? WHERE ${activeWriteAdmissionGuard}`).bind(placeId, parsed.data.placeName, parsed.data.placeKind ?? "unknown", timestamp, admissionId)] : []),
+      context.env.DB.prepare(`INSERT INTO person_fact (id, person_id, fact_kind, value_text, date_text, date_precision, place_id, visibility, created_at) SELECT ?, ?, ?, ?, ?, ?, ?, ?, ? WHERE ${activeWriteAdmissionGuard}`).bind(id, personId, parsed.data.factKind, parsed.data.valueText ?? null, parsed.data.dateText ?? null, parsed.data.datePrecision, placeId, parsed.data.visibility, timestamp, admissionId),
+      context.env.DB.prepare("INSERT INTO audit_log (id, actor_account_id, action, object_type, object_id, metadata_json, created_at) SELECT ?, ?, ?, ?, ?, ?, ? WHERE EXISTS (SELECT 1 FROM person_fact WHERE id = ?)").bind(crypto.randomUUID(), auth.accountId, "person.fact_added", "person_fact", id, JSON.stringify({ personId, factKind: parsed.data.factKind }), timestamp, id),
     ]);
+    if (results[parsed.data.placeName ? 1 : 0]?.meta.changes !== 1) return context.json({ code: "backup_write_epoch_stale" }, 409);
     return context.json({ personFact: { id, personId, factKind: parsed.data.factKind, valueText: parsed.data.valueText ?? null, dateText: parsed.data.dateText ?? null, datePrecision: parsed.data.datePrecision, placeId, visibility: parsed.data.visibility } }, 201);
   });
 
@@ -1632,10 +1646,13 @@ export function createApp() {
     const parsed = genealogyInput.safeParse(await context.req.json().catch(() => null));
     if (!parsed.success) return context.json({ code: "validation_failed", message: validationMessage(parsed) }, 400);
     const id = crypto.randomUUID(); const timestamp = now();
-    await context.env.DB.batch([
-      context.env.DB.prepare("INSERT INTO genealogy (id, title, created_at) VALUES (?, ?, ?)").bind(id, parsed.data.title, timestamp),
-      context.env.DB.prepare("INSERT INTO audit_log (id, actor_account_id, action, object_type, object_id, metadata_json, created_at) VALUES (?, ?, ?, ?, ?, ?, ?)").bind(crypto.randomUUID(), auth.accountId, "source.genealogy_created", "genealogy", id, "{}", timestamp),
+    const admissionId = context.get("backupAdmissionId");
+    if (!admissionId) return context.json({ code: "backup_admission_missing" }, 503);
+    const results = await context.env.DB.batch([
+      context.env.DB.prepare(`INSERT INTO genealogy (id, title, created_at) SELECT ?, ?, ? WHERE ${activeWriteAdmissionGuard}`).bind(id, parsed.data.title, timestamp, admissionId),
+      context.env.DB.prepare("INSERT INTO audit_log (id, actor_account_id, action, object_type, object_id, metadata_json, created_at) SELECT ?, ?, ?, ?, ?, ?, ? WHERE EXISTS (SELECT 1 FROM genealogy WHERE id = ?)").bind(crypto.randomUUID(), auth.accountId, "source.genealogy_created", "genealogy", id, "{}", timestamp, id),
     ]);
+    if (results[0]?.meta.changes !== 1) return context.json({ code: "backup_write_epoch_stale" }, 409);
     return context.json({ genealogy: { id, title: parsed.data.title } }, 201);
   });
 
@@ -1648,10 +1665,13 @@ export function createApp() {
     const genealogy = await context.env.DB.prepare("SELECT id FROM genealogy WHERE id = ? AND retired_at IS NULL").bind(genealogyId).first<{ id: string }>();
     if (!genealogy) return context.json({ code: "genealogy_not_found" }, 404);
     const id = crypto.randomUUID(); const timestamp = now();
-    await context.env.DB.batch([
-      context.env.DB.prepare("INSERT INTO genealogy_edition (id, genealogy_id, title, edition_label, supersedes_edition_id, created_at) VALUES (?, ?, ?, ?, ?, ?)").bind(id, genealogyId, parsed.data.title, parsed.data.editionLabel ?? null, parsed.data.supersedesEditionId ?? null, timestamp),
-      context.env.DB.prepare("INSERT INTO audit_log (id, actor_account_id, action, object_type, object_id, metadata_json, created_at) VALUES (?, ?, ?, ?, ?, ?, ?)").bind(crypto.randomUUID(), auth.accountId, "source.edition_created", "genealogy_edition", id, JSON.stringify({ genealogyId }), timestamp),
+    const admissionId = context.get("backupAdmissionId");
+    if (!admissionId) return context.json({ code: "backup_admission_missing" }, 503);
+    const results = await context.env.DB.batch([
+      context.env.DB.prepare(`INSERT INTO genealogy_edition (id, genealogy_id, title, edition_label, supersedes_edition_id, created_at) SELECT ?, ?, ?, ?, ?, ? WHERE ${activeWriteAdmissionGuard}`).bind(id, genealogyId, parsed.data.title, parsed.data.editionLabel ?? null, parsed.data.supersedesEditionId ?? null, timestamp, admissionId),
+      context.env.DB.prepare("INSERT INTO audit_log (id, actor_account_id, action, object_type, object_id, metadata_json, created_at) SELECT ?, ?, ?, ?, ?, ?, ? WHERE EXISTS (SELECT 1 FROM genealogy_edition WHERE id = ?)").bind(crypto.randomUUID(), auth.accountId, "source.edition_created", "genealogy_edition", id, JSON.stringify({ genealogyId }), timestamp, id),
     ]);
+    if (results[0]?.meta.changes !== 1) return context.json({ code: "backup_write_epoch_stale" }, 409);
     return context.json({ edition: { id, genealogyId, title: parsed.data.title, editionLabel: parsed.data.editionLabel ?? null } }, 201);
   });
 
@@ -1664,10 +1684,13 @@ export function createApp() {
     const edition = await context.env.DB.prepare("SELECT id FROM genealogy_edition WHERE id = ? AND retired_at IS NULL").bind(editionId).first<{ id: string }>();
     if (!edition) return context.json({ code: "edition_not_found" }, 404);
     const id = crypto.randomUUID(); const timestamp = now();
-    await context.env.DB.batch([
-      context.env.DB.prepare("INSERT INTO source_person_record (id, edition_id, source_key, name_text, raw_text, created_at) VALUES (?, ?, ?, ?, ?, ?)").bind(id, editionId, parsed.data.sourceKey ?? null, parsed.data.nameText ?? null, parsed.data.rawText, timestamp),
-      context.env.DB.prepare("INSERT INTO audit_log (id, actor_account_id, action, object_type, object_id, metadata_json, created_at) VALUES (?, ?, ?, ?, ?, ?, ?)").bind(crypto.randomUUID(), auth.accountId, "source.person_record_created", "source_person_record", id, JSON.stringify({ editionId }), timestamp),
+    const admissionId = context.get("backupAdmissionId");
+    if (!admissionId) return context.json({ code: "backup_admission_missing" }, 503);
+    const results = await context.env.DB.batch([
+      context.env.DB.prepare(`INSERT INTO source_person_record (id, edition_id, source_key, name_text, raw_text, created_at) SELECT ?, ?, ?, ?, ?, ? WHERE ${activeWriteAdmissionGuard}`).bind(id, editionId, parsed.data.sourceKey ?? null, parsed.data.nameText ?? null, parsed.data.rawText, timestamp, admissionId),
+      context.env.DB.prepare("INSERT INTO audit_log (id, actor_account_id, action, object_type, object_id, metadata_json, created_at) SELECT ?, ?, ?, ?, ?, ?, ? WHERE EXISTS (SELECT 1 FROM source_person_record WHERE id = ?)").bind(crypto.randomUUID(), auth.accountId, "source.person_record_created", "source_person_record", id, JSON.stringify({ editionId }), timestamp, id),
     ]);
+    if (results[0]?.meta.changes !== 1) return context.json({ code: "backup_write_epoch_stale" }, 409);
     return context.json({ sourcePersonRecord: { id, editionId, sourceKey: parsed.data.sourceKey ?? null, nameText: parsed.data.nameText ?? null, rawText: parsed.data.rawText } }, 201);
   });
 
@@ -1684,11 +1707,14 @@ export function createApp() {
     if (!record) return context.json({ code: "source_record_not_found" }, 404);
     if (!person) return context.json({ code: "person_not_found" }, 404);
     const id = crypto.randomUUID(); const timestamp = now();
-    await context.env.DB.batch([
-      context.env.DB.prepare("UPDATE source_person_link SET status = 'revoked', revoked_at = ? WHERE source_record_id = ? AND status = 'confirmed' AND revoked_at IS NULL").bind(timestamp, sourceRecordId),
-      context.env.DB.prepare("INSERT INTO source_person_link (id, source_record_id, person_id, status, linked_by_account_id, created_at) VALUES (?, ?, ?, 'confirmed', ?, ?)").bind(id, sourceRecordId, parsed.data.personId, auth.accountId, timestamp),
-      context.env.DB.prepare("INSERT INTO audit_log (id, actor_account_id, action, object_type, object_id, metadata_json, created_at) VALUES (?, ?, ?, ?, ?, ?, ?)").bind(crypto.randomUUID(), auth.accountId, "source.person_link_confirmed", "source_person_link", id, JSON.stringify({ sourceRecordId, personId: parsed.data.personId }), timestamp),
+    const admissionId = context.get("backupAdmissionId");
+    if (!admissionId) return context.json({ code: "backup_admission_missing" }, 503);
+    const results = await context.env.DB.batch([
+      context.env.DB.prepare(`UPDATE source_person_link SET status = 'revoked', revoked_at = ? WHERE source_record_id = ? AND status = 'confirmed' AND revoked_at IS NULL AND ${activeWriteAdmissionGuard}`).bind(timestamp, sourceRecordId, admissionId),
+      context.env.DB.prepare(`INSERT INTO source_person_link (id, source_record_id, person_id, status, linked_by_account_id, created_at) SELECT ?, ?, ?, 'confirmed', ?, ? WHERE ${activeWriteAdmissionGuard}`).bind(id, sourceRecordId, parsed.data.personId, auth.accountId, timestamp, admissionId),
+      context.env.DB.prepare("INSERT INTO audit_log (id, actor_account_id, action, object_type, object_id, metadata_json, created_at) SELECT ?, ?, ?, ?, ?, ?, ? WHERE EXISTS (SELECT 1 FROM source_person_link WHERE id = ?)").bind(crypto.randomUUID(), auth.accountId, "source.person_link_confirmed", "source_person_link", id, JSON.stringify({ sourceRecordId, personId: parsed.data.personId }), timestamp, id),
     ]);
+    if (results[1]?.meta.changes !== 1) return context.json({ code: "backup_write_epoch_stale" }, 409);
     return context.json({ sourcePersonLink: { id, sourceRecordId, personId: parsed.data.personId, status: "confirmed" } }, 201);
   });
 
@@ -1709,10 +1735,13 @@ export function createApp() {
       if (!previous) return context.json({ code: "source_claim_not_found" }, 404);
     }
     const id = crypto.randomUUID(); const timestamp = now();
-    await context.env.DB.batch([
-      context.env.DB.prepare("INSERT INTO source_fact_claim (id, edition_id, subject_record_id, fact_kind, raw_text, created_at, supersedes_claim_id) VALUES (?, ?, ?, ?, ?, ?, ?)").bind(id, editionId, parsed.data.subjectRecordId ?? null, parsed.data.factKind, parsed.data.rawText, timestamp, parsed.data.supersedesClaimId ?? null),
-      context.env.DB.prepare("INSERT INTO audit_log (id, actor_account_id, action, object_type, object_id, metadata_json, created_at) VALUES (?, ?, ?, ?, ?, ?, ?)").bind(crypto.randomUUID(), auth.accountId, "source.fact_claim_created", "source_fact_claim", id, JSON.stringify({ editionId }), timestamp),
+    const admissionId = context.get("backupAdmissionId");
+    if (!admissionId) return context.json({ code: "backup_admission_missing" }, 503);
+    const results = await context.env.DB.batch([
+      context.env.DB.prepare(`INSERT INTO source_fact_claim (id, edition_id, subject_record_id, fact_kind, raw_text, created_at, supersedes_claim_id) SELECT ?, ?, ?, ?, ?, ?, ? WHERE ${activeWriteAdmissionGuard}`).bind(id, editionId, parsed.data.subjectRecordId ?? null, parsed.data.factKind, parsed.data.rawText, timestamp, parsed.data.supersedesClaimId ?? null, admissionId),
+      context.env.DB.prepare("INSERT INTO audit_log (id, actor_account_id, action, object_type, object_id, metadata_json, created_at) SELECT ?, ?, ?, ?, ?, ?, ? WHERE EXISTS (SELECT 1 FROM source_fact_claim WHERE id = ?)").bind(crypto.randomUUID(), auth.accountId, "source.fact_claim_created", "source_fact_claim", id, JSON.stringify({ editionId }), timestamp, id),
     ]);
+    if (results[0]?.meta.changes !== 1) return context.json({ code: "backup_write_epoch_stale" }, 409);
     return context.json({ sourceFactClaim: { id, editionId, subjectRecordId: parsed.data.subjectRecordId ?? null, factKind: parsed.data.factKind, rawText: parsed.data.rawText, supersedesClaimId: parsed.data.supersedesClaimId ?? null } }, 201);
   });
 
@@ -1734,10 +1763,13 @@ export function createApp() {
       if (!previous) return context.json({ code: "source_claim_not_found" }, 404);
     }
     const id = crypto.randomUUID(); const timestamp = now();
-    await context.env.DB.batch([
-      context.env.DB.prepare("INSERT INTO source_relation_claim (id, edition_id, subject_record_id, related_record_id, relation_kind, raw_text, created_at, supersedes_claim_id) VALUES (?, ?, ?, ?, ?, ?, ?, ?)").bind(id, editionId, parsed.data.subjectRecordId, parsed.data.relatedRecordId ?? null, parsed.data.relationKind, parsed.data.rawText, timestamp, parsed.data.supersedesClaimId ?? null),
-      context.env.DB.prepare("INSERT INTO audit_log (id, actor_account_id, action, object_type, object_id, metadata_json, created_at) VALUES (?, ?, ?, ?, ?, ?, ?)").bind(crypto.randomUUID(), auth.accountId, "source.relation_claim_created", "source_relation_claim", id, JSON.stringify({ editionId }), timestamp),
+    const admissionId = context.get("backupAdmissionId");
+    if (!admissionId) return context.json({ code: "backup_admission_missing" }, 503);
+    const results = await context.env.DB.batch([
+      context.env.DB.prepare(`INSERT INTO source_relation_claim (id, edition_id, subject_record_id, related_record_id, relation_kind, raw_text, created_at, supersedes_claim_id) SELECT ?, ?, ?, ?, ?, ?, ?, ? WHERE ${activeWriteAdmissionGuard}`).bind(id, editionId, parsed.data.subjectRecordId, parsed.data.relatedRecordId ?? null, parsed.data.relationKind, parsed.data.rawText, timestamp, parsed.data.supersedesClaimId ?? null, admissionId),
+      context.env.DB.prepare("INSERT INTO audit_log (id, actor_account_id, action, object_type, object_id, metadata_json, created_at) SELECT ?, ?, ?, ?, ?, ?, ? WHERE EXISTS (SELECT 1 FROM source_relation_claim WHERE id = ?)").bind(crypto.randomUUID(), auth.accountId, "source.relation_claim_created", "source_relation_claim", id, JSON.stringify({ editionId }), timestamp, id),
     ]);
+    if (results[0]?.meta.changes !== 1) return context.json({ code: "backup_write_epoch_stale" }, 409);
     return context.json({ sourceRelationClaim: { id, editionId, subjectRecordId: parsed.data.subjectRecordId, relatedRecordId: parsed.data.relatedRecordId ?? null, relationKind: parsed.data.relationKind, rawText: parsed.data.rawText, supersedesClaimId: parsed.data.supersedesClaimId ?? null } }, 201);
   });
 

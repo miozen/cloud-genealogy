@@ -267,6 +267,14 @@ const personName = await request(`/api/admin/persons/${personResult.body.person.
   body: { nameText: "本地人物谱名", nameKind: "genealogy", isPrimary: true, visibility: "MEMBER" },
 });
 expectStatus(personName, 201);
+execFileSync("npx", ["wrangler", "d1", "execute", "DB", "--local", "--persist-to", ".wrangler/local-auth-integration", "--command", "CREATE TRIGGER local_name_audit_failure BEFORE INSERT ON audit_log WHEN NEW.action = 'person.name_added' BEGIN SELECT RAISE(ABORT, 'injected name audit failure'); END;"], { stdio: "pipe" });
+expectStatus(await request(`/api/admin/persons/${personResult.body.person.id}/names`, { method: "POST", cookie: adminCookie, csrf: adminCsrf, body: { nameText: "故障新主名", nameKind: "genealogy", isPrimary: true, visibility: "MEMBER" } }), 500);
+const nameAfterFailure = await request(`/api/admin/persons/${personResult.body.person.id}`, { cookie: adminCookie });
+expectStatus(nameAfterFailure, 200);
+assert.equal(nameAfterFailure.body.person.displayName, "本地人物谱名");
+assert.equal(nameAfterFailure.body.names.filter((name) => name.is_primary === 1)[0].id, personName.body.personName.id);
+assert.equal(nameAfterFailure.body.names.some((name) => name.name_text === "故障新主名"), false);
+execFileSync("npx", ["wrangler", "d1", "execute", "DB", "--local", "--persist-to", ".wrangler/local-auth-integration", "--command", "DROP TRIGGER local_name_audit_failure;"], { stdio: "pipe" });
 const personFact = await request(`/api/admin/persons/${personResult.body.person.id}/facts`, {
   method: "POST", cookie: adminCookie, csrf: adminCsrf,
   body: { factKind: "birth", dateText: "1901", datePrecision: "year", placeName: "本地测试村", placeKind: "village", visibility: "MEMBER" },
@@ -340,6 +348,11 @@ const sourceLink = await request(`/api/admin/source-person-records/${sourceRecor
 });
 expectStatus(sourceLink, 201);
 assert.equal(sourceLink.body.sourcePersonLink.personId, personResult.body.person.id);
+execFileSync("npx", ["wrangler", "d1", "execute", "DB", "--local", "--persist-to", ".wrangler/local-auth-integration", "--command", "CREATE TRIGGER local_link_audit_failure BEFORE INSERT ON audit_log WHEN NEW.action = 'source.person_link_confirmed' BEGIN SELECT RAISE(ABORT, 'injected link audit failure'); END;"], { stdio: "pipe" });
+expectStatus(await request(`/api/admin/source-person-records/${sourceRecord.body.sourcePersonRecord.id}/links`, { method: "POST", cookie: adminCookie, csrf: adminCsrf, body: { personId: secondPerson.body.person.id } }), 500);
+const linksAfterFailure = JSON.parse(execFileSync("npx", ["wrangler", "d1", "execute", "DB", "--local", "--persist-to", ".wrangler/local-auth-integration", "--command", `SELECT id, person_id, status, revoked_at FROM source_person_link WHERE source_record_id = '${sourceRecord.body.sourcePersonRecord.id}' ORDER BY id;`, "--json"], { encoding: "utf8" }))[0].results;
+assert.deepEqual(linksAfterFailure, [{ id: sourceLink.body.sourcePersonLink.id, person_id: personResult.body.person.id, status: "confirmed", revoked_at: null }]);
+execFileSync("npx", ["wrangler", "d1", "execute", "DB", "--local", "--persist-to", ".wrangler/local-auth-integration", "--command", "DROP TRIGGER local_link_audit_failure;"], { stdio: "pipe" });
 const sourceFactClaim = await request(`/api/admin/genealogy-editions/${edition.body.edition.id}/source-fact-claims`, {
   method: "POST", cookie: adminCookie, csrf: adminCsrf,
   body: { subjectRecordId: sourceRecord.body.sourcePersonRecord.id, factKind: "birth", rawText: "生于光绪二十七年" },
@@ -1088,10 +1101,32 @@ function delayedPersonRequest() {
 }
 const duringFreeze = delayedPersonRequest();
 const afterRelease = delayedPersonRequest();
+function delayedWrite(path, body) {
+  let controller;
+  const serialized = JSON.stringify(body);
+  const response = fetch(`${baseUrl}${path}`, {
+    method: "POST", duplex: "half", headers: { "content-type": "application/json", cookie: adminCookie, "x-csrf-token": adminCsrf },
+    body: new ReadableStream({ start(value) { controller = value; value.enqueue(new TextEncoder().encode("{")); } }),
+  });
+  return { response, finish() { controller.enqueue(new TextEncoder().encode(serialized.slice(1))); controller.close(); } };
+}
+const delayedWrites = [
+  delayedWrite(`/api/admin/persons/${personResult.body.person.id}/names`, { nameText: "旧代次主名", nameKind: "genealogy", isPrimary: true, visibility: "MEMBER" }),
+  delayedWrite(`/api/admin/persons/${personResult.body.person.id}/facts`, { factKind: "birth", placeName: "旧代次地点", visibility: "MEMBER" }),
+  delayedWrite("/api/admin/genealogies", { title: "旧代次谱书" }),
+  delayedWrite(`/api/admin/genealogies/${genealogy.body.genealogy.id}/editions`, { title: "旧代次版本" }),
+  delayedWrite(`/api/admin/genealogy-editions/${edition.body.edition.id}/source-person-records`, { rawText: "旧代次来源人物" }),
+  delayedWrite(`/api/admin/source-person-records/${sourceRecord.body.sourcePersonRecord.id}/links`, { personId: secondPerson.body.person.id }),
+  delayedWrite(`/api/admin/genealogy-editions/${edition.body.edition.id}/source-fact-claims`, { subjectRecordId: sourceRecord.body.sourcePersonRecord.id, factKind: "birth", rawText: "旧代次事实" }),
+  delayedWrite(`/api/admin/genealogy-editions/${edition.body.edition.id}/source-relation-claims`, { subjectRecordId: sourceRecord.body.sourcePersonRecord.id, relatedRecordId: relatedSourceRecord.body.sourcePersonRecord.id, relationKind: "biological_parent", rawText: "旧代次关系" }),
+];
+const guardedTablesQuery = `SELECT (SELECT COUNT(*) FROM person_name) AS names, (SELECT COUNT(*) FROM person_fact) AS facts, (SELECT COUNT(*) FROM place) AS places, (SELECT COUNT(*) FROM genealogy) AS genealogies, (SELECT COUNT(*) FROM genealogy_edition) AS editions, (SELECT COUNT(*) FROM source_person_record) AS records, (SELECT COUNT(*) FROM source_person_link) AS links, (SELECT COUNT(*) FROM source_fact_claim) AS fact_claims, (SELECT COUNT(*) FROM source_relation_claim) AS relation_claims, (SELECT COUNT(*) FROM audit_log WHERE action IN ('person.name_added','person.fact_added','source.genealogy_created','source.edition_created','source.person_record_created','source.person_link_confirmed','source.fact_claim_created','source.relation_claim_created')) AS audits, (SELECT display_name FROM person WHERE id = '${personResult.body.person.id}') AS display_name, (SELECT id FROM person_name WHERE person_id = '${personResult.body.person.id}' AND is_primary = 1 AND retired_at IS NULL) AS primary_name, (SELECT person_id FROM source_person_link WHERE source_record_id = '${sourceRecord.body.sourcePersonRecord.id}' AND status = 'confirmed' AND revoked_at IS NULL) AS linked_person;`;
+const guardedBefore = JSON.parse(execFileSync("npx", ["wrangler", "d1", "execute", "DB", "--local", "--persist-to", ".wrangler/local-auth-integration", "--command", guardedTablesQuery, "--json"], { encoding: "utf8" }))[0].results[0];
+const expectedInflight = 2 + delayedWrites.length;
 let inflightObserved = false;
 for (let attempt = 0; attempt < 100; attempt += 1) {
   const state = await request("/api/admin/backup-write-freeze/readiness", { cookie: adminCookie });
-  if (state.body.activeWrites === 2) { inflightObserved = true; break; }
+  if (state.body.activeWrites === expectedInflight) { inflightObserved = true; break; }
   await new Promise((resolve) => setTimeout(resolve, 50));
 }
 assert.equal(inflightObserved, true, "请求应在冻结前登记为在途写入");
@@ -1103,11 +1138,11 @@ expectStatus(writeFreeze, 201);
 expectStatus(await request("/api/admin/backup-write-freeze", { cookie: adminCookie }), 200);
 const runningReadiness = await request("/api/admin/backup-write-freeze/readiness", { cookie: adminCookie });
 expectStatus(runningReadiness, 200);
-assert.equal(runningReadiness.body.activeWrites, 2);
+assert.equal(runningReadiness.body.activeWrites, expectedInflight);
 assert.equal(runningReadiness.body.apiWritesDrained, false);
 const runningBlockers = await request("/api/admin/backup-write-freeze/blockers", { cookie: adminCookie });
 expectStatus(runningBlockers, 200);
-assert.equal(runningBlockers.body.admissions.length, 2);
+assert.equal(runningBlockers.body.admissions.length, expectedInflight);
 assert.equal(runningBlockers.body.recoveryAvailable, false);
 expectStatus(await request("/api/admin/backup-write-freeze/blockers", { cookie: memberCookie }), 403);
 expectStatus(await request("/api/admin/backup-write-freeze/blockers"), 401);
@@ -1127,7 +1162,7 @@ assert.equal(staleDuring.status, 409);
 assert.equal((await staleDuring.json()).code, "backup_write_epoch_stale");
 const drainedReadiness = await request("/api/admin/backup-write-freeze/readiness", { cookie: adminCookie });
 expectStatus(drainedReadiness, 200);
-assert.equal(drainedReadiness.body.activeWrites, 1);
+assert.equal(drainedReadiness.body.activeWrites, expectedInflight - 1);
 assert.equal(drainedReadiness.body.remoteExecutionAvailable, false);
 execFileSync("npx", ["wrangler", "d1", "execute", "DB", "--local", "--persist-to", ".wrangler/local-auth-integration", "--command", "INSERT INTO media_asset (id, object_key, sha256, byte_size, mime_type, original_filename, visibility, state, created_by_account_id, created_at, upload_expires_at) SELECT 'pending-freeze-test', 'media/pending-freeze-test', 'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa', 1, 'image/jpeg', 'fixture.jpg', 'ADMIN', 'pending_upload', id, '2026-10-25T00:00:00.000Z', '2026-10-25T00:05:00.000Z' FROM account WHERE username = 'local.admin';"], { stdio: "pipe" });
 const pendingReadiness = await request("/api/admin/backup-write-freeze/readiness", { cookie: adminCookie });
@@ -1145,6 +1180,14 @@ afterRelease.finish("解冻后旧代次人物");
 const staleAfter = await afterRelease.response;
 assert.equal(staleAfter.status, 409);
 assert.equal((await staleAfter.json()).code, "backup_write_epoch_stale");
+for (const delayed of delayedWrites) delayed.finish();
+for (const delayed of delayedWrites) {
+  const response = await delayed.response;
+  assert.equal(response.status, 409);
+  assert.equal((await response.json()).code, "backup_write_epoch_stale");
+}
+const guardedAfter = JSON.parse(execFileSync("npx", ["wrangler", "d1", "execute", "DB", "--local", "--persist-to", ".wrangler/local-auth-integration", "--command", guardedTablesQuery, "--json"], { encoding: "utf8" }))[0].results[0];
+assert.deepEqual(guardedAfter, guardedBefore);
 const staleCounts = execFileSync("npx", ["wrangler", "d1", "execute", "DB", "--local", "--persist-to", ".wrangler/local-auth-integration", "--command", "SELECT (SELECT COUNT(*) FROM person WHERE display_name IN ('冻结中旧代次人物', '解冻后旧代次人物')) AS people, (SELECT COUNT(*) FROM audit_log WHERE action = 'person.anchor_created') AS audits;", "--json"], { encoding: "utf8" });
 assert.deepEqual(JSON.parse(staleCounts)[0].results[0], { people: 0, audits: anchorAuditsBeforeFence });
 expectStatus(await request("/api/admin/persons", { method: "POST", cookie: adminCookie, csrf: adminCsrf, body: { displayName: "新代次正常人物", visibility: "MEMBER" } }), 201);

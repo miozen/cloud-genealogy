@@ -151,12 +151,15 @@ const newPassword = "local-auth-integration-new-password";
 
 expectStatus(await request("/api/health"), 200);
 
-const bootstrap = await request("/api/setup/bootstrap", {
-  method: "POST",
-  bootstrapSecret: "local-integration-bootstrap-secret",
-  body: { username: "local.admin", password, genealogyName: "本地管理员" },
-});
-expectStatus(bootstrap, 201);
+const localSql = (command) => JSON.parse(execFileSync("npx", ["wrangler", "d1", "execute", "DB", "--local", "--persist-to", ".wrangler/local-auth-integration", "--command", command, "--json"], { encoding: "utf8" }))[0].results;
+localSql("CREATE TRIGGER test_bootstrap_audit_failure BEFORE INSERT ON audit_log WHEN NEW.action = 'system.bootstrap_admin' BEGIN SELECT RAISE(ABORT, 'injected bootstrap audit failure'); END;");
+const bootstrapOptions = { method: "POST", bootstrapSecret: "local-integration-bootstrap-secret", body: { username: "local.admin", password, genealogyName: "本地管理员" } };
+expectStatus(await request("/api/setup/bootstrap", bootstrapOptions), 500);
+assert.equal(localSql("SELECT COUNT(*) AS n FROM account WHERE username = 'local.admin';")[0].n, 0);
+localSql("DROP TRIGGER test_bootstrap_audit_failure;");
+const bootstraps = await Promise.all([request("/api/setup/bootstrap", bootstrapOptions), request("/api/setup/bootstrap", bootstrapOptions)]);
+assert.deepEqual(bootstraps.map((item) => item.response.status).sort(), [201, 409]);
+assert.equal(localSql("SELECT COUNT(*) AS n FROM account WHERE username = 'local.admin';")[0].n, 1);
 
 const registration = await request("/api/auth/register", {
   method: "POST",
@@ -192,6 +195,38 @@ const adminLogin = await request("/api/auth/login", {
 expectStatus(adminLogin, 200);
 const adminCookie = sessionCookie(adminLogin);
 const adminCsrf = adminLogin.body.csrfToken;
+
+// Freeze after admission but before each auth write batch. The first login
+// batch is the rate limit; the second is the session and audit transaction.
+await frozenBatchRequests([{ path: "/api/auth/register", body: { username: "stale.register", password, genealogyName: "过期注册" } }]);
+assert.equal(localSql("SELECT COUNT(*) AS n FROM account WHERE username = 'stale.register';")[0].n, 0);
+const rateBefore = localSql("SELECT COALESCE(SUM(attempt_count), 0) AS n FROM auth_login_rate_limit;")[0].n;
+await frozenBatchRequests([{ path: "/api/auth/login", body: { username: "local.admin", password } }]);
+assert.equal(localSql("SELECT COALESCE(SUM(attempt_count), 0) AS n FROM auth_login_rate_limit;")[0].n, rateBefore);
+const sessionBefore = localSql("SELECT COUNT(*) AS n FROM auth_session;")[0].n;
+await frozenBatchRequests([{ path: "/api/auth/login", body: { username: "local.admin", password }, gateBatch: 2 }]);
+assert.equal(localSql("SELECT COUNT(*) AS n FROM auth_session;")[0].n, sessionBefore);
+assert.equal(localSql("SELECT COALESCE(SUM(attempt_count), 0) AS n FROM auth_login_rate_limit;")[0].n, rateBefore + 1);
+await frozenBatchRequests(["/api/auth/logout"]);
+expectStatus(await request("/api/me", { cookie: adminCookie }), 200);
+
+localSql("CREATE TRIGGER test_registration_audit_failure BEFORE INSERT ON audit_log WHEN NEW.action = 'account.registered' BEGIN SELECT RAISE(ABORT, 'injected registration audit failure'); END;");
+expectStatus(await request("/api/auth/register", { method: "POST", body: { username: "failure.register", password, genealogyName: "审计回滚" } }), 500);
+assert.equal(localSql("SELECT COUNT(*) AS n FROM account WHERE username = 'failure.register';")[0].n, 0);
+localSql("DROP TRIGGER test_registration_audit_failure;");
+localSql("CREATE TRIGGER test_login_audit_failure BEFORE INSERT ON audit_log WHEN NEW.action = 'account.login' BEGIN SELECT RAISE(ABORT, 'injected login audit failure'); END;");
+const failedLogin = await request("/api/auth/login", { method: "POST", body: { username: "local.admin", password } });
+expectStatus(failedLogin, 500);
+assert.equal(failedLogin.cookies.length, 0);
+assert.equal(localSql("SELECT COUNT(*) AS n FROM auth_session;")[0].n, sessionBefore);
+localSql("DROP TRIGGER test_login_audit_failure;");
+
+const releaseFreeze = await request("/api/admin/backup-write-freeze", { method: "POST", cookie: adminCookie, csrf: adminCsrf, body: { reason: "释放审计回滚测试" } });
+expectStatus(releaseFreeze, 201);
+await lifecycleAuditFailure("/api/admin/backup-write-freeze/release", "backup.write_freeze_released", "backup_write_freeze", "released_at", releaseFreeze.body.freeze.id, null, { body: { freezeId: releaseFreeze.body.freeze.id, reason: "故障注入" } });
+const releases = await Promise.all(Array.from({ length: 2 }, () => request("/api/admin/backup-write-freeze/release", { method: "POST", cookie: adminCookie, csrf: adminCsrf, body: { freezeId: releaseFreeze.body.freeze.id, reason: "并发释放" } })));
+assert.deepEqual(releases.map((item) => item.response.status).sort(), [204, 409]);
+assert.equal(localSql(`SELECT COUNT(*) AS n FROM audit_log WHERE action = 'backup.write_freeze_released' AND object_id = '${releaseFreeze.body.freeze.id}';`)[0].n, 1);
 
 // Inject an audit failure after the guarded person INSERT. D1 batch must
 // roll back the person row together with the failed audit statement.

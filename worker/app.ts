@@ -272,22 +272,6 @@ function secretsMatch(actual: string | undefined, expected: string | undefined):
   return difference === 0;
 }
 
-async function writeAudit(
-  database: D1Database,
-  actorAccountId: string | null,
-  action: string,
-  objectType: string,
-  objectId: string,
-  metadata: Record<string, unknown>,
-): Promise<void> {
-  await database
-    .prepare(
-      "INSERT INTO audit_log (id, actor_account_id, action, object_type, object_id, metadata_json, created_at) VALUES (?, ?, ?, ?, ?, ?, ?)",
-    )
-    .bind(crypto.randomUUID(), actorAccountId, action, objectType, objectId, JSON.stringify(metadata), now())
-    .run();
-}
-
 export function createApp() {
   const app = new Hono<AppEnv>();
 
@@ -381,11 +365,11 @@ export function createApp() {
     const parsed = backupWriteFreezeReleaseInput.safeParse(await context.req.json().catch(() => null));
     if (!parsed.success) return context.json({ code: "validation_failed", message: validationMessage(parsed) }, 400);
     const timestamp = now();
-    const result = await context.env.DB.prepare(
-      "UPDATE backup_write_freeze SET released_by_account_id = ?, released_at = ?, release_reason = ? WHERE id = ? AND released_at IS NULL",
-    ).bind(auth.accountId, timestamp, parsed.data.reason, parsed.data.freezeId).run();
-    if (result.meta.changes !== 1) return context.json({ code: "backup_write_freeze_not_active" }, 409);
-    await writeAudit(context.env.DB, auth.accountId, "backup.write_freeze_released", "backup_write_freeze", parsed.data.freezeId, { reason: parsed.data.reason });
+    const results = await context.env.DB.batch([
+      context.env.DB.prepare("UPDATE backup_write_freeze SET released_by_account_id = ?, released_at = ?, release_reason = ? WHERE id = ? AND released_at IS NULL").bind(auth.accountId, timestamp, parsed.data.reason, parsed.data.freezeId),
+      context.env.DB.prepare("INSERT INTO audit_log (id, actor_account_id, action, object_type, object_id, metadata_json, created_at) SELECT ?, ?, ?, ?, ?, ?, ? WHERE changes() = 1").bind(crypto.randomUUID(), auth.accountId, "backup.write_freeze_released", "backup_write_freeze", parsed.data.freezeId, JSON.stringify({ reason: parsed.data.reason }), timestamp),
+    ]);
+    if (results[0]?.meta.changes !== 1) return context.json({ code: "backup_write_freeze_not_active" }, 409);
     return context.body(null, 204);
   });
 
@@ -484,33 +468,18 @@ export function createApp() {
       }, 500);
     }
     try {
-      await context.env.DB.batch([
-        context.env.DB
-          .prepare(
-            `INSERT INTO account (id, username, display_name, password_scheme, password_hash, status, reviewed_at, version, created_at, updated_at)
-             VALUES (?, ?, ?, ?, ?, 'active', ?, 1, ?, ?)`,
-          )
-          .bind(accountId, input.username, input.genealogyName, "pbkdf2-sha256", passwordHash, timestamp, timestamp, timestamp),
-        context.env.DB
-          .prepare("INSERT INTO person (id, display_name, visibility, created_at, updated_at) VALUES (?, ?, 'MEMBER', ?, ?)")
-          .bind(personId, input.genealogyName, timestamp, timestamp),
+      const results = await fencedBatch(context.env.DB, context.get("backupAdmissionId"), [
+        context.env.DB.prepare(`INSERT INTO account (id, username, display_name, password_scheme, password_hash, status, reviewed_at, version, created_at, updated_at)
+          SELECT ?, ?, ?, ?, ?, 'active', ?, 1, ?, ? WHERE NOT EXISTS (
+            SELECT 1 FROM account JOIN account_role ON account_role.account_id = account.id JOIN role ON role.id = account_role.role_id WHERE account.status = 'active' AND role.name = 'admin'
+          )`).bind(accountId, input.username, input.genealogyName, "pbkdf2-sha256", passwordHash, timestamp, timestamp, timestamp),
+        context.env.DB.prepare("INSERT INTO person (id, display_name, visibility, created_at, updated_at) SELECT ?, ?, 'MEMBER', ?, ? WHERE EXISTS (SELECT 1 FROM account WHERE id = ?)").bind(personId, input.genealogyName, timestamp, timestamp, accountId),
+        context.env.DB.prepare("INSERT INTO account_role (account_id, role_id, granted_at, granted_by_account_id) SELECT ?, 'role-member', ?, ? WHERE EXISTS (SELECT 1 FROM account WHERE id = ?)").bind(accountId, timestamp, accountId, accountId),
+        context.env.DB.prepare("INSERT INTO account_role (account_id, role_id, granted_at, granted_by_account_id) SELECT ?, 'role-admin', ?, ? WHERE EXISTS (SELECT 1 FROM account WHERE id = ?)").bind(accountId, timestamp, accountId, accountId),
+        context.env.DB.prepare("INSERT INTO account_person_link (account_id, person_id, linked_at, linked_by_account_id) SELECT ?, ?, ?, ? WHERE EXISTS (SELECT 1 FROM account WHERE id = ?)").bind(accountId, personId, timestamp, accountId, accountId),
+        context.env.DB.prepare("INSERT INTO audit_log (id, actor_account_id, action, object_type, object_id, metadata_json, created_at) SELECT ?, ?, ?, ?, ?, ?, ? WHERE EXISTS (SELECT 1 FROM account WHERE id = ?)").bind(crypto.randomUUID(), accountId, "system.bootstrap_admin", "account", accountId, JSON.stringify({ personId }), timestamp, accountId),
       ]);
-      await context.env.DB.batch([
-        context.env.DB
-          .prepare("INSERT INTO account_role (account_id, role_id, granted_at, granted_by_account_id) VALUES (?, 'role-member', ?, ?)")
-          .bind(accountId, timestamp, accountId),
-        context.env.DB
-          .prepare("INSERT INTO account_role (account_id, role_id, granted_at, granted_by_account_id) VALUES (?, 'role-admin', ?, ?)")
-          .bind(accountId, timestamp, accountId),
-        context.env.DB
-          .prepare("INSERT INTO account_person_link (account_id, person_id, linked_at, linked_by_account_id) VALUES (?, ?, ?, ?)")
-          .bind(accountId, personId, timestamp, accountId),
-        context.env.DB
-          .prepare(
-            "INSERT INTO audit_log (id, actor_account_id, action, object_type, object_id, metadata_json, created_at) VALUES (?, ?, ?, ?, ?, ?, ?)",
-          )
-          .bind(crypto.randomUUID(), accountId, "system.bootstrap_admin", "account", accountId, JSON.stringify({ personId }), timestamp),
-      ]);
+      if (results[0]?.meta.changes !== 1) return context.json({ code: "bootstrap_unavailable" }, 409);
     } catch (error) {
       if (error instanceof Error && /unique/i.test(error.message)) {
         return context.json({ code: "username_unavailable", message: "该用户名不可用。" }, 409);
@@ -529,25 +498,10 @@ export function createApp() {
     const timestamp = now();
     const passwordHash = await hashPassword(input.password);
     try {
-      await context.env.DB
-        .prepare(
-          `INSERT INTO account (
-             id, username, display_name, registration_branch_name, registration_ancestor_name,
-             password_scheme, password_hash, status, created_at, updated_at
-           ) VALUES (?, ?, ?, ?, ?, ?, ?, 'pending', ?, ?)`,
-        )
-        .bind(
-          accountId,
-          input.username,
-          input.genealogyName,
-          input.branchName ?? null,
-          input.ancestorName ?? null,
-          "pbkdf2-sha256",
-          passwordHash,
-          timestamp,
-          timestamp,
-        )
-        .run();
+      await fencedBatch(context.env.DB, context.get("backupAdmissionId"), [
+        context.env.DB.prepare(`INSERT INTO account (id, username, display_name, registration_branch_name, registration_ancestor_name, password_scheme, password_hash, status, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, 'pending', ?, ?)`).bind(accountId, input.username, input.genealogyName, input.branchName ?? null, input.ancestorName ?? null, "pbkdf2-sha256", passwordHash, timestamp, timestamp),
+        context.env.DB.prepare("INSERT INTO audit_log (id, actor_account_id, action, object_type, object_id, metadata_json, created_at) VALUES (?, ?, ?, ?, ?, ?, ?)").bind(crypto.randomUUID(), null, "account.registered", "account", accountId, JSON.stringify({ username: input.username }), timestamp),
+      ]);
     } catch (error) {
       if (error instanceof Error && /unique/i.test(error.message)) {
         return context.json({ code: "username_unavailable", message: "该用户名不可用。" }, 409);
@@ -555,7 +509,6 @@ export function createApp() {
       throw error;
     }
 
-    await writeAudit(context.env.DB, null, "account.registered", "account", accountId, { username: input.username });
     return context.json({ status: "pending", message: "注册申请已提交，等待管理员审核。" }, 201);
   });
 
@@ -565,7 +518,7 @@ export function createApp() {
     const input = parsed.data;
 
     const keyHash = await createLoginRateLimitKey(clientRateIdentifier(context, input.username), context.env.AUTH_RATE_LIMIT_SECRET);
-    const rateLimit = await consumeLoginRateLimit(context.env.DB, keyHash);
+    const rateLimit = await consumeLoginRateLimit(context.env.DB, keyHash, context.get("backupAdmissionId"));
     if (!rateLimit.allowed) {
       return context.json({ code: "login_rate_limited", message: "登录尝试过于频繁，请稍后重试。" }, 429, { "retry-after": String(rateLimit.retryAfterSeconds) });
     }
@@ -585,23 +538,23 @@ export function createApp() {
     const sessionToken = createOpaqueToken();
     const csrfToken = createOpaqueToken();
     const expiresAt = new Date(Date.now() + SESSION_MAX_AGE_SECONDS * 1_000).toISOString();
-    await context.env.DB
-      .prepare(
-        "INSERT INTO auth_session (id_hash, account_id, csrf_secret_hash, expires_at, created_at, last_seen_at) VALUES (?, ?, ?, ?, ?, ?)",
-      )
-      .bind(await hashOpaqueToken(sessionToken), account.id, await hashOpaqueToken(csrfToken), expiresAt, now(), now())
-      .run();
-
+    const timestamp = now();
+    const sessionResults = await fencedBatch(context.env.DB, context.get("backupAdmissionId"), [
+      context.env.DB.prepare("INSERT INTO auth_session (id_hash, account_id, csrf_secret_hash, expires_at, created_at, last_seen_at) SELECT ?, ?, ?, ?, ?, ? WHERE EXISTS (SELECT 1 FROM account WHERE id = ? AND status = 'active' AND password_hash = ?)").bind(await hashOpaqueToken(sessionToken), account.id, await hashOpaqueToken(csrfToken), expiresAt, timestamp, timestamp, account.id, account.password_hash),
+      context.env.DB.prepare("INSERT INTO audit_log (id, actor_account_id, action, object_type, object_id, metadata_json, created_at) SELECT ?, ?, ?, ?, ?, ?, ? WHERE changes() = 1").bind(crypto.randomUUID(), account.id, "account.login", "account", account.id, "{}", timestamp),
+    ]);
+    if (sessionResults[0]?.meta.changes !== 1) return context.json({ code: "account_changed" }, 409);
     setCookie(context, SESSION_COOKIE_NAME, sessionToken, cookieOptions(context));
     setCookie(context, CSRF_COOKIE_NAME, csrfToken, { ...cookieOptions(context), httpOnly: false });
-    await writeAudit(context.env.DB, account.id, "account.login", "account", account.id, {});
     return context.json({ csrfToken, account: { id: account.id, username: account.username, displayName: account.display_name } });
   });
 
   app.post("/api/auth/logout", requireAuthentication, async (context) => {
     const token = getCookie(context, SESSION_COOKIE_NAME);
     if (token) {
-      await context.env.DB.prepare("UPDATE auth_session SET revoked_at = ? WHERE id_hash = ? AND revoked_at IS NULL").bind(now(), await hashOpaqueToken(token)).run();
+      await fencedBatch(context.env.DB, context.get("backupAdmissionId"), [
+        context.env.DB.prepare("UPDATE auth_session SET revoked_at = ? WHERE id_hash = ? AND revoked_at IS NULL").bind(now(), await hashOpaqueToken(token)),
+      ]);
     }
     deleteCookie(context, SESSION_COOKIE_NAME, { path: "/" });
     deleteCookie(context, CSRF_COOKIE_NAME, { path: "/" });

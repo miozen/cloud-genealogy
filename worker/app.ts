@@ -403,10 +403,13 @@ export function createApp() {
     } catch {
       return context.json({ code: "media_direct_upload_unavailable" }, 503);
     }
-    await context.env.DB.batch([
-      context.env.DB.prepare("INSERT INTO media_asset (id, object_key, sha256, byte_size, mime_type, original_filename, visibility, state, created_by_account_id, created_at, upload_expires_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)").bind(intent.id, intent.objectKey, intent.sha256, intent.byteSize, intent.mimeType, intent.originalFilename, intent.visibility, intent.state, intent.createdByAccountId, intent.createdAt, intent.uploadExpiresAt),
-      context.env.DB.prepare("INSERT INTO audit_log (id, actor_account_id, action, object_type, object_id, metadata_json, created_at) VALUES (?, ?, ?, ?, ?, ?, ?)").bind(crypto.randomUUID(), auth.accountId, "media.upload_intent_created", "media_asset", intent.id, JSON.stringify({ mimeType: intent.mimeType, byteSize: intent.byteSize, visibility: intent.visibility }), intent.createdAt),
+    const admissionId = context.get("backupAdmissionId");
+    if (!admissionId) return context.json({ code: "backup_admission_missing" }, 503);
+    const results = await context.env.DB.batch([
+      context.env.DB.prepare(`INSERT INTO media_asset (id, object_key, sha256, byte_size, mime_type, original_filename, visibility, state, created_by_account_id, created_at, upload_expires_at) SELECT ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ? WHERE ${activeWriteAdmissionGuard}`).bind(intent.id, intent.objectKey, intent.sha256, intent.byteSize, intent.mimeType, intent.originalFilename, intent.visibility, intent.state, intent.createdByAccountId, intent.createdAt, intent.uploadExpiresAt, admissionId),
+      context.env.DB.prepare("INSERT INTO audit_log (id, actor_account_id, action, object_type, object_id, metadata_json, created_at) SELECT ?, ?, ?, ?, ?, ?, ? WHERE changes() = 1").bind(crypto.randomUUID(), auth.accountId, "media.upload_intent_created", "media_asset", intent.id, JSON.stringify({ mimeType: intent.mimeType, byteSize: intent.byteSize, visibility: intent.visibility }), intent.createdAt),
     ]);
+    if (results[0]?.meta.changes !== 1) return context.json({ code: "backup_write_epoch_stale" }, 409);
     return context.json({ mediaAsset: intent, upload }, 201);
   });
 
@@ -418,10 +421,12 @@ export function createApp() {
     const object = await context.env.MEDIA.head(asset.object_key);
     const uploaded = object ? { sha256: object.checksums.sha256 ? toHex(object.checksums.sha256) : "", byteSize: object.size, mimeType: object.httpMetadata?.contentType ?? "", etag: object.etag } : null;
     const finalized = finalizeMediaUpload({ id: asset.id, objectKey: asset.object_key, sha256: asset.sha256, byteSize: asset.byte_size, mimeType: asset.mime_type, originalFilename: asset.original_filename, visibility: asset.visibility, state: "pending_upload", createdByAccountId: asset.created_by_account_id, createdAt: asset.created_at, uploadExpiresAt: asset.upload_expires_at }, uploaded, new Date());
-    await context.env.DB.batch([
-      context.env.DB.prepare("UPDATE media_asset SET state = ?, finalized_at = ?, failed_at = ?, cleanup_after = ?, r2_etag = ? WHERE id = ? AND state = 'pending_upload'").bind(finalized.state, finalized.finalizedAt, finalized.failedAt, finalized.cleanupAfter, finalized.r2Etag, asset.id),
-      context.env.DB.prepare("INSERT INTO audit_log (id, actor_account_id, action, object_type, object_id, metadata_json, created_at) VALUES (?, ?, ?, ?, ?, ?, ?)").bind(crypto.randomUUID(), auth.accountId, finalized.state === "active" ? "media.upload_completed" : "media.upload_failed", "media_asset", asset.id, JSON.stringify({ objectPresent: object !== null }), now()),
-    ]);
+    const admissionId = context.get("backupAdmissionId");
+    if (!admissionId) return context.json({ code: "backup_admission_missing" }, 503);
+    const timestamp = now();
+    const result = await fencedLifecycleUpdate(context, context.env.DB.prepare(`UPDATE media_asset SET state = ?, finalized_at = ?, failed_at = ?, cleanup_after = ?, r2_etag = ? WHERE id = ? AND state = 'pending_upload' AND ${activeWriteAdmissionGuard}`).bind(finalized.state, finalized.finalizedAt, finalized.failedAt, finalized.cleanupAfter, finalized.r2Etag, asset.id, admissionId), admissionId, auth.accountId, finalized.state === "active" ? "media.upload_completed" : "media.upload_failed", "media_asset", asset.id, { objectPresent: object !== null }, timestamp);
+    if (!result.valid) return context.json({ code: "backup_write_epoch_stale" }, 409);
+    if (!result.changed) return context.json({ code: "media_upload_intent_not_found" }, 404);
     if (finalized.state !== "active") return context.json({ code: "media_upload_verification_failed" }, 409);
     return context.json({ mediaAsset: finalized });
   });
@@ -1537,10 +1542,15 @@ export function createApp() {
     if (!asset) return context.json({ code: "media_asset_not_found" }, 404);
     if (existing) return context.json({ code: "person_media_already_linked" }, 409);
     const id = crypto.randomUUID(); const timestamp = now();
-    await context.env.DB.batch([
-      context.env.DB.prepare("INSERT INTO person_media (id, person_id, media_asset_id, role, display_order, caption, created_by_account_id, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)").bind(id, personId, parsed.data.mediaAssetId, parsed.data.role, parsed.data.displayOrder, parsed.data.caption ?? null, auth.accountId, timestamp),
-      context.env.DB.prepare("INSERT INTO audit_log (id, actor_account_id, action, object_type, object_id, metadata_json, created_at) VALUES (?, ?, ?, ?, ?, ?, ?)").bind(crypto.randomUUID(), auth.accountId, "person.media_linked", "person_media", id, JSON.stringify({ personId, mediaAssetId: parsed.data.mediaAssetId, role: parsed.data.role }), timestamp),
+    const admissionId = context.get("backupAdmissionId");
+    if (!admissionId) return context.json({ code: "backup_admission_missing" }, 503);
+    const results = await context.env.DB.batch([
+      context.env.DB.prepare(`INSERT INTO person_media (id, person_id, media_asset_id, role, display_order, caption, created_by_account_id, created_at) SELECT ?, ?, ?, ?, ?, ?, ?, ? WHERE EXISTS (SELECT 1 FROM media_asset WHERE id = ? AND state = 'active') AND ${activeWriteAdmissionGuard}`).bind(id, personId, parsed.data.mediaAssetId, parsed.data.role, parsed.data.displayOrder, parsed.data.caption ?? null, auth.accountId, timestamp, parsed.data.mediaAssetId, admissionId),
+      context.env.DB.prepare("INSERT INTO audit_log (id, actor_account_id, action, object_type, object_id, metadata_json, created_at) SELECT ?, ?, ?, ?, ?, ?, ? WHERE changes() = 1").bind(crypto.randomUUID(), auth.accountId, "person.media_linked", "person_media", id, JSON.stringify({ personId, mediaAssetId: parsed.data.mediaAssetId, role: parsed.data.role }), timestamp),
+      context.env.DB.prepare(`SELECT ${activeWriteAdmissionGuard} AS valid`).bind(admissionId),
     ]);
+    if ((results[2]?.results[0] as { valid: number } | undefined)?.valid !== 1) return context.json({ code: "backup_write_epoch_stale" }, 409);
+    if (results[0]?.meta.changes !== 1) return context.json({ code: "media_asset_not_found" }, 404);
     return context.json({ personMedia: { id, personId, mediaAssetId: parsed.data.mediaAssetId, role: parsed.data.role, displayOrder: parsed.data.displayOrder, caption: parsed.data.caption ?? null } }, 201);
   });
 
@@ -1567,10 +1577,11 @@ export function createApp() {
     const link = await context.env.DB.prepare("SELECT person_id, media_asset_id FROM person_media WHERE id = ? AND retired_at IS NULL").bind(context.req.param("personMediaId")).first<{ person_id: string; media_asset_id: string }>();
     if (!link) return context.json({ code: "person_media_not_found" }, 404);
     const timestamp = now();
-    await context.env.DB.batch([
-      context.env.DB.prepare("UPDATE person_media SET display_order = ? WHERE id = ? AND retired_at IS NULL").bind(parsed.data.displayOrder, context.req.param("personMediaId")),
-      context.env.DB.prepare("INSERT INTO audit_log (id, actor_account_id, action, object_type, object_id, metadata_json, created_at) VALUES (?, ?, ?, ?, ?, ?, ?)").bind(crypto.randomUUID(), auth.accountId, "person.media_reordered", "person_media", context.req.param("personMediaId"), JSON.stringify({ personId: link.person_id, mediaAssetId: link.media_asset_id, displayOrder: parsed.data.displayOrder }), timestamp),
-    ]);
+    const admissionId = context.get("backupAdmissionId");
+    if (!admissionId) return context.json({ code: "backup_admission_missing" }, 503);
+    const result = await fencedLifecycleUpdate(context, context.env.DB.prepare(`UPDATE person_media SET display_order = ? WHERE id = ? AND retired_at IS NULL AND ${activeWriteAdmissionGuard}`).bind(parsed.data.displayOrder, context.req.param("personMediaId"), admissionId), admissionId, auth.accountId, "person.media_reordered", "person_media", context.req.param("personMediaId"), { personId: link.person_id, mediaAssetId: link.media_asset_id, displayOrder: parsed.data.displayOrder }, timestamp);
+    if (!result.valid) return context.json({ code: "backup_write_epoch_stale" }, 409);
+    if (!result.changed) return context.json({ code: "person_media_not_found" }, 404);
     return context.json({ personMedia: { id: context.req.param("personMediaId"), displayOrder: parsed.data.displayOrder } });
   });
 
@@ -1580,15 +1591,19 @@ export function createApp() {
     const linkId = context.req.param("personMediaId");
     const link = await context.env.DB.prepare("SELECT link.person_id, link.media_asset_id, asset.state FROM person_media AS link INNER JOIN media_asset AS asset ON asset.id = link.media_asset_id WHERE link.id = ? AND link.retired_at IS NULL").bind(linkId).first<{ person_id: string; media_asset_id: string; state: "active" | "retired" }>();
     if (!link) return context.json({ code: "person_media_not_found" }, 404);
-    const otherLinks = await context.env.DB.prepare("SELECT COUNT(*) AS count FROM person_media WHERE media_asset_id = ? AND retired_at IS NULL AND id != ?").bind(link.media_asset_id, linkId).first<{ count: number }>();
     const timestamp = new Date();
-    const retirement = link.state === "active" && otherLinks?.count === 0 ? retireMediaAsset("active", 0, timestamp) : null;
-    await context.env.DB.batch([
-      context.env.DB.prepare("UPDATE person_media SET retired_at = ? WHERE id = ? AND retired_at IS NULL").bind(timestamp.toISOString(), linkId),
-      ...(retirement ? [context.env.DB.prepare("UPDATE media_asset SET state = 'retired', retired_at = ?, cleanup_after = ? WHERE id = ? AND state = 'active' AND NOT EXISTS (SELECT 1 FROM person_media WHERE media_asset_id = ? AND retired_at IS NULL)").bind(retirement.retiredAt, retirement.cleanupAfter, link.media_asset_id, link.media_asset_id)] : []),
-      context.env.DB.prepare("INSERT INTO audit_log (id, actor_account_id, action, object_type, object_id, metadata_json, created_at) VALUES (?, ?, ?, ?, ?, ?, ?)").bind(crypto.randomUUID(), auth.accountId, "person.media_unlinked", "person_media", linkId, JSON.stringify({ personId: link.person_id, mediaAssetId: link.media_asset_id, assetRetirementRequested: retirement !== null }), timestamp.toISOString()),
-      ...(retirement ? [context.env.DB.prepare("INSERT INTO audit_log (id, actor_account_id, action, object_type, object_id, metadata_json, created_at) VALUES (?, ?, ?, ?, ?, ?, ?)").bind(crypto.randomUUID(), auth.accountId, "media.retired", "media_asset", link.media_asset_id, JSON.stringify({ reason: "last_person_media_link_retired" }), timestamp.toISOString())] : []),
+    const retirement = retireMediaAsset("active", 0, timestamp);
+    const admissionId = context.get("backupAdmissionId");
+    if (!admissionId) return context.json({ code: "backup_admission_missing" }, 503);
+    const results = await context.env.DB.batch([
+      context.env.DB.prepare(`UPDATE person_media SET retired_at = ? WHERE id = ? AND retired_at IS NULL AND ${activeWriteAdmissionGuard}`).bind(timestamp.toISOString(), linkId, admissionId),
+      context.env.DB.prepare("INSERT INTO audit_log (id, actor_account_id, action, object_type, object_id, metadata_json, created_at) SELECT ?, ?, ?, ?, ?, ?, ? WHERE changes() = 1").bind(crypto.randomUUID(), auth.accountId, "person.media_unlinked", "person_media", linkId, JSON.stringify({ personId: link.person_id, mediaAssetId: link.media_asset_id }), timestamp.toISOString()),
+      context.env.DB.prepare(`UPDATE media_asset SET state = 'retired', retired_at = ?, cleanup_after = ? WHERE id = ? AND state = 'active' AND changes() = 1 AND NOT EXISTS (SELECT 1 FROM person_media WHERE media_asset_id = ? AND retired_at IS NULL) AND ${activeWriteAdmissionGuard}`).bind(retirement.retiredAt, retirement.cleanupAfter, link.media_asset_id, link.media_asset_id, admissionId),
+      context.env.DB.prepare("INSERT INTO audit_log (id, actor_account_id, action, object_type, object_id, metadata_json, created_at) SELECT ?, ?, ?, ?, ?, ?, ? WHERE changes() = 1").bind(crypto.randomUUID(), auth.accountId, "media.retired", "media_asset", link.media_asset_id, JSON.stringify({ reason: "last_person_media_link_retired" }), timestamp.toISOString()),
+      context.env.DB.prepare(`SELECT ${activeWriteAdmissionGuard} AS valid`).bind(admissionId),
     ]);
+    if ((results[4]?.results[0] as { valid: number } | undefined)?.valid !== 1) return context.json({ code: "backup_write_epoch_stale" }, 409);
+    if (results[0]?.meta.changes !== 1) return context.json({ code: "person_media_not_found" }, 404);
     const asset = await context.env.DB.prepare("SELECT state, cleanup_after FROM media_asset WHERE id = ?").bind(link.media_asset_id).first<{ state: "active" | "retired"; cleanup_after: string | null }>();
     return context.json({ status: "retired", mediaAssetState: asset?.state, cleanupAfter: asset?.cleanup_after ?? null });
   });

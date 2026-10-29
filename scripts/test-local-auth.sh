@@ -68,7 +68,7 @@ trap 'test_status=$?; shutdown' EXIT
 
 npx wrangler d1 migrations apply DB --local --persist-to "$state_dir" >/dev/null
 clean_test_rows
-npx wrangler dev --local --port "$port" --persist-to "$state_dir" \
+npx wrangler dev tests/fixtures/fencing-barrier-worker.ts --local --port "$port" --persist-to "$state_dir" \
   --var AUTH_RATE_LIMIT_SECRET:local-integration-rate-limit-secret \
   --var BOOTSTRAP_SECRET:local-integration-bootstrap-secret \
   --var R2_S3_ACCOUNT_ID:0123456789abcdef0123456789abcdef \
@@ -96,13 +96,14 @@ import { execFileSync } from "node:child_process";
 
 const baseUrl = process.env.BASE_URL;
 
-async function request(path, { method = "GET", body, cookie, csrf, bootstrapSecret } = {}) {
+async function request(path, { method = "GET", body, cookie, csrf, bootstrapSecret, gate } = {}) {
   const response = await fetch(`${baseUrl}${path}`, {
     method,
     headers: {
       ...(body ? { "content-type": "application/json" } : {}),
       ...(cookie ? { cookie } : {}),
       ...(csrf ? { "x-csrf-token": csrf } : {}),
+      ...(gate ? { "x-test-fencing-gate": gate } : {}),
       ...(bootstrapSecret ? { "x-bootstrap-secret": bootstrapSecret } : {}),
     },
     body: body ? JSON.stringify(body) : undefined,
@@ -113,6 +114,25 @@ async function request(path, { method = "GET", body, cookie, csrf, bootstrapSecr
     body: text ? JSON.parse(text) : null,
     cookies: typeof response.headers.getSetCookie === "function" ? response.headers.getSetCookie() : [],
   };
+}
+
+async function frozenBatchRequests(paths) {
+  const ids = paths.map(() => crypto.randomUUID());
+  const pending = paths.map((entry, index) => request(typeof entry === "string" ? entry : entry.path, { method: "POST", cookie: adminCookie, csrf: adminCsrf, gate: ids[index], body: typeof entry === "string" ? undefined : entry.body }));
+  for (const id of ids) {
+    let ready = false;
+    for (let attempt = 0; attempt < 100; attempt += 1) {
+      const response = await fetch(`${baseUrl}/api/__test/fencing/${id}`);
+      if ((await response.json()).ready) { ready = true; break; }
+      await new Promise((resolve) => setTimeout(resolve, 50));
+    }
+    assert.equal(ready, true, `batch gate ${id} not reached`);
+  }
+  const freeze = await request("/api/admin/backup-write-freeze", { method: "POST", cookie: adminCookie, csrf: adminCsrf, body: { reason: "本地屏障冻结测试" } });
+  expectStatus(freeze, 201);
+  expectStatus(await request("/api/admin/backup-write-freeze/release", { method: "POST", cookie: adminCookie, csrf: adminCsrf, body: { freezeId: freeze.body.freeze.id, reason: "本地屏障测试解除" } }), 204);
+  for (const id of ids) assert.equal((await fetch(`${baseUrl}/api/__test/fencing/${id}`, { method: "POST" })).status, 204);
+  for (const result of await Promise.all(pending)) { expectStatus(result, 409); assert.equal(result.body.code, "backup_write_epoch_stale"); }
 }
 
 function expectStatus(result, expected) {
@@ -184,6 +204,7 @@ const mediaUploadAvailability = await request("/api/admin/media-assets/upload-av
 expectStatus(mediaUploadAvailability, 200);
 assert.equal(mediaUploadAvailability.body.available, true);
 
+await frozenBatchRequests([{ path: "/api/admin/media-assets/upload-intents", body: { sha256: "a".repeat(64), byteSize: 128, mimeType: "image/jpeg", originalFilename: "屏障.jpg", visibility: "MEMBER" } }]);
 const mediaIntent = await request("/api/admin/media-assets/upload-intents", {
   method: "POST", cookie: adminCookie, csrf: adminCsrf,
   body: { sha256: "a".repeat(64), byteSize: 128, mimeType: "image/jpeg", originalFilename: "本地媒体.jpg", visibility: "MEMBER" },
@@ -194,6 +215,8 @@ assert.match(mediaIntent.body.upload.url, /^https:\/\/cloud-genealogy-local\.012
 assert.equal(mediaIntent.body.mediaAsset.uploadExpiresAt, mediaIntent.body.upload.expiresAt);
 assert.equal(mediaIntent.body.upload.requiredHeaders["content-type"], "image/jpeg");
 assert.ok(mediaIntent.body.upload.requiredHeaders["x-amz-checksum-sha256"]);
+await frozenBatchRequests([`/api/admin/media-assets/${mediaIntent.body.mediaAsset.id}/complete`]);
+await lifecycleAuditFailure(`/api/admin/media-assets/${mediaIntent.body.mediaAsset.id}/complete`, "media.upload_failed", "media_asset", "state", mediaIntent.body.mediaAsset.id, "pending_upload");
 const missingMediaCompletion = await request(`/api/admin/media-assets/${mediaIntent.body.mediaAsset.id}/complete`, { method: "POST", cookie: adminCookie, csrf: adminCsrf });
 expectStatus(missingMediaCompletion, 409);
 assert.equal(missingMediaCompletion.body.code, "media_upload_verification_failed");
@@ -237,6 +260,7 @@ const protectedMediaPerson = await request("/api/admin/persons", {
   body: { displayName: "本地私密媒体人物", visibility: "ADMIN" },
 });
 expectStatus(protectedMediaPerson, 201);
+await frozenBatchRequests([{ path: `/api/admin/persons/${protectedMediaPerson.body.person.id}/media`, body: { mediaAssetId: localMediaAssetId, role: "portrait" } }]);
 const personMediaLink = await request(`/api/admin/persons/${protectedMediaPerson.body.person.id}/media`, {
   method: "POST", cookie: adminCookie, csrf: adminCsrf,
   body: { mediaAssetId: localMediaAssetId, role: "portrait", caption: "本地权限夹具" },
@@ -246,6 +270,7 @@ const linkedPersonMedia = await request(`/api/admin/persons/${protectedMediaPers
 expectStatus(linkedPersonMedia, 200);
 assert.equal(linkedPersonMedia.body.personMedia.length, 1);
 const personMediaId = linkedPersonMedia.body.personMedia[0].id;
+await frozenBatchRequests([{ path: `/api/admin/person-media/${personMediaId}/order`, body: { displayOrder: 7 } }]);
 const reorderedPersonMedia = await request(`/api/admin/person-media/${personMediaId}/order`, {
   method: "POST", cookie: adminCookie, csrf: adminCsrf, body: { displayOrder: 7 },
 });
@@ -292,13 +317,17 @@ assert.equal(personDetail.body.names.length, 2);
 assert.equal(personDetail.body.facts.length, 1);
 // Audit failures must roll back each lifecycle change, and duplicate requests
 // must produce one state transition and one audit record.
-async function lifecycleAuditFailure(path, action, table, column, id) {
+async function lifecycleAuditFailure(path, action, table, column, id, expected = null) {
   const sql = (command) => execFileSync("npx", ["wrangler", "d1", "execute", "DB", "--local", "--persist-to", ".wrangler/local-auth-integration", "--command", command, "--json"], { encoding: "utf8" });
   sql(`CREATE TRIGGER local_lifecycle_audit_failure BEFORE INSERT ON audit_log WHEN NEW.action = '${action}' BEGIN SELECT RAISE(ABORT, 'injected lifecycle audit failure'); END;`);
   expectStatus(await request(path, { method: "POST", cookie: adminCookie, csrf: adminCsrf }), 500);
-  assert.equal(JSON.parse(sql(`SELECT ${column} AS value FROM ${table} WHERE id = '${id}';`))[0].results[0].value, null);
+  assert.equal(JSON.parse(sql(`SELECT ${column} AS value FROM ${table} WHERE id = '${id}';`))[0].results[0].value, expected);
   sql("DROP TRIGGER local_lifecycle_audit_failure;");
 }
+await frozenBatchRequests([
+  `/api/admin/person-names/${aliasName.body.personName.id}/retire`,
+  `/api/admin/person-facts/${personFact.body.personFact.id}/retire`,
+]);
 await lifecycleAuditFailure(`/api/admin/person-names/${aliasName.body.personName.id}/retire`, "person.name_retired", "person_name", "retired_at", aliasName.body.personName.id);
 await lifecycleAuditFailure(`/api/admin/person-facts/${personFact.body.personFact.id}/retire`, "person.fact_retired", "person_fact", "retired_at", personFact.body.personFact.id);
 expectStatus(await request(`/api/admin/person-names/${aliasName.body.personName.id}/retire`, {
@@ -314,6 +343,7 @@ assert.equal(retiredDetail.body.facts.length, 0);
 const places = await request("/api/admin/places?query=%E6%9C%AC%E5%9C%B0%E6%B5%8B%E8%AF%95%E6%9D%91", { cookie: adminCookie });
 expectStatus(places, 200);
 assert.equal(places.body.places.length, 1);
+await frozenBatchRequests([`/api/admin/places/${personFact.body.personFact.placeId}/retire`]);
 await lifecycleAuditFailure(`/api/admin/places/${personFact.body.personFact.placeId}/retire`, "place.retired", "place", "retired_at", personFact.body.personFact.placeId);
 expectStatus(await request(`/api/admin/places/${personFact.body.personFact.placeId}/retire`, {
   method: "POST", cookie: adminCookie, csrf: adminCsrf,
@@ -403,6 +433,11 @@ assert.deepEqual(historicalProjection.body.projection.parentChildEdges, [{
   rawText: "父某某",
 }]);
 assert.equal(historicalProjection.body.projection.nodes.find((node) => node.sourceRecordId === relatedSourceRecord.body.sourcePersonRecord.id).confirmedPersonId, null);
+await frozenBatchRequests([
+  `/api/admin/source-relation-semantics/${semanticRule.body.rule.id}/retire`,
+  `/api/admin/source-relation-claims/${sourceRelationClaim.body.sourceRelationClaim.id}/retract`,
+  `/api/admin/source-fact-claims/${sourceFactClaim.body.sourceFactClaim.id}/retract`,
+]);
 await lifecycleAuditFailure(`/api/admin/source-relation-semantics/${semanticRule.body.rule.id}/retire`, "source.relation_semantic_retired", "source_relation_semantic_rule", "retired_at", semanticRule.body.rule.id);
 await lifecycleAuditFailure(`/api/admin/source-relation-claims/${sourceRelationClaim.body.sourceRelationClaim.id}/retract`, "source.claim_retracted", "source_relation_claim", "retracted_at", sourceRelationClaim.body.sourceRelationClaim.id);
 await lifecycleAuditFailure(`/api/admin/source-fact-claims/${sourceFactClaim.body.sourceFactClaim.id}/retract`, "source.claim_retracted", "source_fact_claim", "retracted_at", sourceFactClaim.body.sourceFactClaim.id);
@@ -792,6 +827,8 @@ const memberCookie = sessionCookie(memberLogin);
 const memberCsrf = memberLogin.body.csrfToken;
 
 expectStatus(await request(`/api/media-assets/${localMediaAssetId}`, { cookie: memberCookie }), 403);
+await frozenBatchRequests([`/api/admin/person-media/${personMediaId}/retire`]);
+await lifecycleAuditFailure(`/api/admin/person-media/${personMediaId}/retire`, "media.retired", "person_media", "retired_at", personMediaId);
 const retiredPersonMedia = await request(`/api/admin/person-media/${personMediaId}/retire`, { method: "POST", cookie: adminCookie, csrf: adminCsrf });
 expectStatus(retiredPersonMedia, 200);
 assert.equal(retiredPersonMedia.body.mediaAssetState, "retired");

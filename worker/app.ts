@@ -44,6 +44,7 @@ import {
   validationMessage,
 } from "./auth/validation";
 import { activeBackupWriteFreeze, backupWriteFreezeProtection } from "./backup/write-freeze";
+import { fencedBatch } from "./backup/fenced-batch";
 import { createMediaUploadIntent, finalizeMediaUpload, retireMediaAsset } from "./media/media-asset";
 import { cancelMediaCleanupRun, confirmMediaCleanupRun, expireMediaCleanupRun, freezeMediaCleanupRun, previewMediaCleanupItem, type CurrentMediaCleanupAsset, type FrozenMediaCleanupItem, type FrozenMediaCleanupRun, type MediaCleanupCandidate } from "./media/media-cleanup-run";
 import { createR2PresignedPut, getR2PresignConfiguration } from "./media/r2-presigned-put";
@@ -665,7 +666,7 @@ export function createApp() {
     const parsed = lineageInput.safeParse(await context.req.json().catch(() => null));
     if (!parsed.success) return context.json({ code: "validation_failed", message: validationMessage(parsed) }, 400);
     const id = crypto.randomUUID(); const timestamp = now();
-    await context.env.DB.batch([
+    await fencedBatch(context.env.DB, context.get("backupAdmissionId"), [
       context.env.DB.prepare("INSERT INTO lineage (id, name, created_at) VALUES (?, ?, ?)").bind(id, parsed.data.name, timestamp),
       context.env.DB.prepare("INSERT INTO audit_log (id, actor_account_id, action, object_type, object_id, metadata_json, created_at) VALUES (?, ?, ?, ?, ?, ?, ?)").bind(crypto.randomUUID(), auth.accountId, "lineage.created", "lineage", id, "{}", timestamp),
     ]);
@@ -972,7 +973,7 @@ export function createApp() {
     }
     if (!await canProposeChangeForPeople(context.env.DB, auth, personIds, pointer?.revision_id ?? null)) return context.json({ code: "scope_forbidden" }, 403);
     const id = crypto.randomUUID(); const timestamp = now();
-    await context.env.DB.batch([
+    await fencedBatch(context.env.DB, context.get("backupAdmissionId"), [
       context.env.DB.prepare("INSERT INTO change_request (id, lineage_id, state, base_revision_id, base_pointer_version, reason, created_by_account_id, created_at) VALUES (?, ?, 'draft', ?, ?, ?, ?, ?)").bind(id, lineageId, pointer?.revision_id ?? null, pointer?.version ?? 0, parsed.data.reason, auth.accountId, timestamp),
       ...parsed.data.items.map((item) => context.env.DB.prepare("INSERT INTO change_item (id, change_request_id, operation, subject_person_id, related_person_id, relation_kind, created_at) VALUES (?, ?, ?, ?, ?, ?, ?)").bind(crypto.randomUUID(), id, item.operation, item.subjectPersonId, item.relatedPersonId, item.relationKind ?? null, timestamp)),
       ...parsed.data.membershipItems.map((item) => context.env.DB.prepare("INSERT INTO branch_membership_change_item (id, change_request_id, operation, branch_id, person_id, membership_kind, created_at) VALUES (?, ?, ?, ?, ?, ?, ?)").bind(crypto.randomUUID(), id, item.operation, item.branchId, item.personId, item.membershipKind, timestamp)),
@@ -1007,7 +1008,7 @@ export function createApp() {
     const membershipItems = buildSnapshotMembershipChangeItems(toMembershipCandidates(baseMemberships.results as MembershipRow[]), toMembershipCandidates(targetMemberships.results as MembershipRow[]));
     if (items.length + membershipItems.length === 0) return context.json({ code: "rollback_not_needed" }, 409);
     const id = crypto.randomUUID(); const timestamp = now();
-    await context.env.DB.batch([
+    await fencedBatch(context.env.DB, context.get("backupAdmissionId"), [
       context.env.DB.prepare("INSERT INTO change_request (id, lineage_id, state, base_revision_id, base_pointer_version, reason, created_by_account_id, created_at) VALUES (?, ?, 'draft', ?, ?, ?, ?, ?)").bind(id, lineageId, pointer.revision_id, pointer.version, parsed.data.reason, auth.accountId, timestamp),
       ...items.map((item) => context.env.DB.prepare("INSERT INTO change_item (id, change_request_id, operation, subject_person_id, related_person_id, relation_kind, created_at) VALUES (?, ?, ?, ?, ?, ?, ?)").bind(crypto.randomUUID(), id, item.operation, item.subjectPersonId, item.relatedPersonId, "relationKind" in item ? item.relationKind : null, timestamp)),
       ...membershipItems.map((item) => context.env.DB.prepare("INSERT INTO branch_membership_change_item (id, change_request_id, operation, branch_id, person_id, membership_kind, created_at) VALUES (?, ?, ?, ?, ?, ?, ?)").bind(crypto.randomUUID(), id, item.operation, item.branchId, item.personId, item.membershipKind, timestamp)),
@@ -1054,9 +1055,9 @@ export function createApp() {
     if (!request || request.state !== "draft" || request.discarded_at !== null || request.version !== parsed.data.version) return context.json({ code: "change_request_conflict" }, 409);
     if (request.created_by_account_id !== auth.accountId) return context.json({ code: "forbidden" }, 403);
     const timestamp = now();
-    const results = await context.env.DB.batch([
+    const results = await fencedBatch(context.env.DB, context.get("backupAdmissionId"), [
       context.env.DB.prepare("UPDATE change_request SET discarded_at = ?, discarded_by_account_id = ?, version = version + 1 WHERE id = ? AND state = 'draft' AND discarded_at IS NULL AND version = ?").bind(timestamp, auth.accountId, id, parsed.data.version),
-      context.env.DB.prepare("INSERT INTO audit_log (id, actor_account_id, action, object_type, object_id, metadata_json, created_at) VALUES (?, ?, ?, ?, ?, ?, ?)").bind(crypto.randomUUID(), auth.accountId, "lineage.change_request_discarded", "change_request", id, JSON.stringify({ previousVersion: parsed.data.version }), timestamp),
+      context.env.DB.prepare("INSERT INTO audit_log (id, actor_account_id, action, object_type, object_id, metadata_json, created_at) SELECT ?, ?, ?, ?, ?, ?, ? WHERE changes() = 1").bind(crypto.randomUUID(), auth.accountId, "lineage.change_request_discarded", "change_request", id, JSON.stringify({ previousVersion: parsed.data.version }), timestamp),
     ]);
     if (results[0]?.meta.changes !== 1) return context.json({ code: "change_request_conflict" }, 409);
     return context.json({ state: "discarded", version: parsed.data.version + 1 });
@@ -1080,10 +1081,10 @@ export function createApp() {
     }
     const reviewers = await effectiveReviewerAssignments(context.env.DB, request.lineage_id, timestamp, request.created_by_account_id);
     if (reviewers.length === 0) return context.json({ code: "reviewer_assignment_required", message: "该世系没有有效的非创建者审核人指派。" }, 409);
-    const results = await context.env.DB.batch([
+    const results = await fencedBatch(context.env.DB, context.get("backupAdmissionId"), [
       context.env.DB.prepare("UPDATE change_request SET state = 'pending_review', submitted_at = ?, version = version + 1 WHERE id = ? AND state = 'draft' AND discarded_at IS NULL AND version = ?").bind(timestamp, id, parsed.data.version),
-      ...reviewers.map((reviewer) => context.env.DB.prepare("INSERT INTO change_request_reviewer_assignment (change_request_id, reviewer_assignment_id, reviewer_account_id, captured_at) VALUES (?, ?, ?, ?)").bind(id, reviewer.id, reviewer.reviewer_account_id, timestamp)),
-      context.env.DB.prepare("INSERT INTO audit_log (id, actor_account_id, action, object_type, object_id, metadata_json, created_at) VALUES (?, ?, ?, ?, ?, ?, ?)").bind(crypto.randomUUID(), auth.accountId, "lineage.change_request_submitted", "change_request", id, JSON.stringify({ reviewerAssignmentIds: reviewers.map((reviewer) => reviewer.id) }), timestamp),
+      ...reviewers.map((reviewer) => context.env.DB.prepare("INSERT INTO change_request_reviewer_assignment (change_request_id, reviewer_assignment_id, reviewer_account_id, captured_at) SELECT ?, ?, ?, ? WHERE changes() = 1").bind(id, reviewer.id, reviewer.reviewer_account_id, timestamp)),
+      context.env.DB.prepare("INSERT INTO audit_log (id, actor_account_id, action, object_type, object_id, metadata_json, created_at) SELECT ?, ?, ?, ?, ?, ?, ? WHERE changes() = 1").bind(crypto.randomUUID(), auth.accountId, "lineage.change_request_submitted", "change_request", id, JSON.stringify({ reviewerAssignmentIds: reviewers.map((reviewer) => reviewer.id) }), timestamp),
     ]);
     if (results[0]?.meta.changes !== 1) return context.json({ code: "change_request_conflict" }, 409);
     return context.json({ state: "pending_review" });
@@ -1101,9 +1102,9 @@ export function createApp() {
     const pointer = await context.env.DB.prepare("SELECT revision_id, version FROM lineage_published_pointer WHERE lineage_id = ?").bind(request.lineage_id).first<PublishedPointerRow>();
     if ((pointer?.revision_id ?? null) !== request.base_revision_id || (pointer?.version ?? 0) !== request.base_pointer_version) {
       const timestamp = now();
-      await context.env.DB.batch([
+      await fencedBatch(context.env.DB, context.get("backupAdmissionId"), [
         context.env.DB.prepare("UPDATE change_request SET state = 'conflicted', review_note = ?, reviewed_at = ?, reviewed_by_account_id = ?, version = version + 1 WHERE id = ? AND state = 'pending_review' AND version = ?").bind("发布基准已变化，请基于当前版本重新创建提案。", timestamp, auth.accountId, request.id, request.version),
-        context.env.DB.prepare("INSERT INTO audit_log (id, actor_account_id, action, object_type, object_id, metadata_json, created_at) VALUES (?, ?, ?, ?, ?, ?, ?)").bind(crypto.randomUUID(), auth.accountId, "lineage.change_request_conflicted", "change_request", request.id, JSON.stringify({ expectedPointerVersion: request.base_pointer_version, actualPointerVersion: pointer?.version ?? 0 }), timestamp),
+        context.env.DB.prepare("INSERT INTO audit_log (id, actor_account_id, action, object_type, object_id, metadata_json, created_at) SELECT ?, ?, ?, ?, ?, ?, ? WHERE changes() = 1").bind(crypto.randomUUID(), auth.accountId, "lineage.change_request_conflicted", "change_request", request.id, JSON.stringify({ expectedPointerVersion: request.base_pointer_version, actualPointerVersion: pointer?.version ?? 0 }), timestamp),
       ]);
       return context.json({ code: "change_request_conflicted" }, 409);
     }
@@ -1131,10 +1132,11 @@ export function createApp() {
     if (!membershipItemsFitStructure(membershipItems.results as MembershipChangeItemRow[], structurePreview.branches)) return context.json({ code: "membership_branch_not_active" }, 409);
     if (!await structureRetirementsAreSafe(context.env.DB, preview.memberships, structurePreview.branches)) return context.json({ code: "branch_retirement_in_use" }, 409);
     if (!membershipsUseActiveStructures(preview.memberships, structurePreview.branches)) return context.json({ code: "membership_branch_not_active" }, 409);
-    await context.env.DB.batch([
+    const approvalResults = await fencedBatch(context.env.DB, context.get("backupAdmissionId"), [
       context.env.DB.prepare("UPDATE change_request SET state = 'approved', reviewed_at = ?, reviewed_by_account_id = ?, version = version + 1 WHERE id = ? AND state = 'pending_review' AND version = ?").bind(now(), auth.accountId, request.id, request.version),
-      context.env.DB.prepare("INSERT INTO audit_log (id, actor_account_id, action, object_type, object_id, metadata_json, created_at) VALUES (?, ?, ?, ?, ?, ?, ?)").bind(crypto.randomUUID(), auth.accountId, "lineage.change_request_approved", "change_request", request.id, "{}", now()),
+      context.env.DB.prepare("INSERT INTO audit_log (id, actor_account_id, action, object_type, object_id, metadata_json, created_at) SELECT ?, ?, ?, ?, ?, ?, ? WHERE changes() = 1").bind(crypto.randomUUID(), auth.accountId, "lineage.change_request_approved", "change_request", request.id, "{}", now()),
     ]);
+    if (approvalResults[0]?.meta.changes !== 1) return context.json({ code: "change_request_conflict" }, 409);
     return context.json({ state: "approved", version: request.version + 1 });
   });
 
@@ -1147,9 +1149,11 @@ export function createApp() {
     const request = await context.env.DB.prepare("SELECT id, lineage_id, state, base_revision_id, base_pointer_version, created_by_account_id, version FROM change_request WHERE id = ?").bind(id).first<ChangeRequestRow>();
     if (!request || request.state !== "pending_review" || request.version !== parsed.data.version) return context.json({ code: "change_request_conflict" }, 409);
     if (request.created_by_account_id === auth.accountId) return context.json({ code: "self_review_forbidden" }, 403);
-    const result = await context.env.DB.prepare("UPDATE change_request SET state = 'rejected', reviewed_at = ?, reviewed_by_account_id = ?, review_note = ?, version = version + 1 WHERE id = ? AND state = 'pending_review' AND version = ?").bind(timestamp, auth.accountId, parsed.data.reviewNote, id, parsed.data.version).run();
-    if (result.meta.changes !== 1) return context.json({ code: "change_request_conflict" }, 409);
-    await writeAudit(context.env.DB, auth.accountId, "lineage.change_request_rejected", "change_request", id, {});
+    const admissionId = context.get("backupAdmissionId");
+    if (!admissionId) return context.json({ code: "backup_admission_missing" }, 503);
+    const result = await fencedLifecycleUpdate(context, context.env.DB.prepare(`UPDATE change_request SET state = 'rejected', reviewed_at = ?, reviewed_by_account_id = ?, review_note = ?, version = version + 1 WHERE id = ? AND state = 'pending_review' AND version = ? AND ${activeWriteAdmissionGuard}`).bind(timestamp, auth.accountId, parsed.data.reviewNote, id, parsed.data.version, admissionId), admissionId, auth.accountId, "lineage.change_request_rejected", "change_request", id, {}, timestamp);
+    if (!result.valid) return context.json({ code: "backup_write_epoch_stale" }, 409);
+    if (!result.changed) return context.json({ code: "change_request_conflict" }, 409);
     return context.json({ state: "rejected" });
   });
 
@@ -1187,7 +1191,9 @@ export function createApp() {
     if (!await structureRetirementsAreSafe(context.env.DB, preview.memberships, structurePreview.branches)) return context.json({ code: "branch_retirement_in_use" }, 409);
     if (!membershipsUseActiveStructures(preview.memberships, structurePreview.branches)) return context.json({ code: "membership_branch_not_active" }, 409);
     const publishTime = now();
+    if (!context.get("backupAdmissionId")) return context.json({ code: "backup_admission_missing" }, 503);
     const result = await publishSuccessionRevision(context.env.DB, {
+      admissionId: context.get("backupAdmissionId"),
       lineageId: request.lineage_id, revisionId: parsed.data.revisionId, basedOnRevisionId: request.base_revision_id ?? undefined,
       baseEdges: (edges.results as SuccessionRow[]).map((edge) => ({ parentPersonId: edge.parent_person_id, childPersonId: edge.child_person_id })),
       proposedEdges: preview.edges, proposedRelations: preview.relations, proposedBranchMemberships: preview.memberships.map((membership) => ({ branch_id: membership.branchId, person_id: membership.personId, membership_kind: membership.membershipKind })), proposedBranchStructures: structurePreview.branches.map((branch) => ({ branch_id: branch.branchId, parent_branch_id: branch.parentBranchId, name: branch.name, branch_kind: branch.branchKind, retired_at: branch.retiredAt === "__PROPOSED_RETIREMENT__" ? publishTime : branch.retiredAt })), branchStructureMutations: toStructureChangeCandidates(structureItems.results as StructureChangeItemRow[]), expectedPointerVersion: request.base_pointer_version, now: publishTime,
@@ -1212,7 +1218,9 @@ export function createApp() {
     const base = await context.env.DB.prepare(
       "SELECT s.parent_person_id, s.child_person_id FROM lineage_published_pointer p JOIN lineage_succession_snapshot s ON s.revision_id = p.revision_id WHERE p.lineage_id = ? ORDER BY s.order_key",
     ).bind(lineageId).all<SuccessionRow>();
+    if (!context.get("backupAdmissionId")) return context.json({ code: "backup_admission_missing" }, 503);
     const result = await publishSuccessionRevision(context.env.DB, {
+      admissionId: context.get("backupAdmissionId"),
       lineageId, revisionId: parsed.data.revisionId, basedOnRevisionId: parsed.data.basedOnRevisionId,
       baseEdges: base.results.map((row) => ({ parentPersonId: row.parent_person_id, childPersonId: row.child_person_id })),
       proposedEdges: parsed.data.edges, expectedPointerVersion: parsed.data.expectedPointerVersion, now: now(),
@@ -1238,7 +1246,9 @@ export function createApp() {
     if (!parsed.success) return context.json({ code: "validation_failed", message: validationMessage(parsed) }, 400);
     const lineageId = context.req.param("lineageId");
     try {
+      if (!context.get("backupAdmissionId")) return context.json({ code: "backup_admission_missing" }, 503);
       const result = await rollbackSuccessionRevision(context.env.DB, {
+        admissionId: context.get("backupAdmissionId"),
         lineageId, targetRevisionId: parsed.data.targetRevisionId, newRevisionId: parsed.data.newRevisionId,
         expectedPointerVersion: parsed.data.expectedPointerVersion, now: now(),
         audit: {
@@ -1369,7 +1379,7 @@ export function createApp() {
     } catch {
       return context.json({ code: "media_cleanup_candidate_invalid" }, 409);
     }
-    await context.env.DB.batch([
+    await fencedBatch(context.env.DB, context.get("backupAdmissionId"), [
       context.env.DB.prepare("INSERT INTO media_cleanup_run (id, state, candidate_snapshot_sha256, candidate_count, backup_recovery_point, backup_package_sha256, created_by_account_id, created_at, expires_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)").bind(frozen.run.id, frozen.run.state, frozen.run.candidateSnapshotSha256, frozen.run.candidateCount, frozen.run.backupRecoveryPoint, frozen.run.backupPackageSha256, frozen.run.createdByAccountId, frozen.run.createdAt, frozen.run.expiresAt),
       ...frozen.candidates.map((candidate) => context.env.DB.prepare("INSERT INTO media_cleanup_item (id, cleanup_run_id, media_asset_id, expected_object_key, expected_sha256, expected_byte_size, expected_retired_at, expected_cleanup_after, expected_historical_link_count, state, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'frozen', ?)").bind(crypto.randomUUID(), frozen.run.id, candidate.mediaAssetId, candidate.objectKey, candidate.sha256, candidate.byteSize, candidate.retiredAt, candidate.cleanupAfter, candidate.historicalLinkCount, frozen.run.createdAt)),
       context.env.DB.prepare("INSERT INTO audit_log (id, actor_account_id, action, object_type, object_id, metadata_json, created_at) VALUES (?, ?, ?, ?, ?, ?, ?)").bind(crypto.randomUUID(), auth.accountId, "media.cleanup_run_frozen", "media_cleanup_run", frozen.run.id, JSON.stringify({ candidateCount: frozen.run.candidateCount, candidateSnapshotSha256: frozen.run.candidateSnapshotSha256, backupRecoveryPoint: frozen.run.backupRecoveryPoint, backupPackageSha256: frozen.run.backupPackageSha256, localOnly: true }), frozen.run.createdAt),
@@ -1425,8 +1435,10 @@ export function createApp() {
     const timestamp = new Date();
     if (timestamp.getTime() >= Date.parse(frozenRun.expiresAt)) {
       expireMediaCleanupRun(frozenRun, timestamp);
-      const expired = await context.env.DB.prepare("UPDATE media_cleanup_run SET state = 'expired' WHERE id = ? AND state = 'pending_confirmation' AND expires_at <= ?").bind(frozenRun.id, timestamp.toISOString()).run();
-      if (expired.meta.changes === 1) await writeAudit(context.env.DB, auth.accountId, "media.cleanup_run_expired", "media_cleanup_run", frozenRun.id, { localOnly: true });
+      const admissionId = context.get("backupAdmissionId");
+      if (!admissionId) return context.json({ code: "backup_admission_missing" }, 503);
+      const result = await fencedLifecycleUpdate(context, context.env.DB.prepare(`UPDATE media_cleanup_run SET state = 'expired' WHERE id = ? AND state = 'pending_confirmation' AND expires_at <= ? AND ${activeWriteAdmissionGuard}`).bind(frozenRun.id, timestamp.toISOString(), admissionId), admissionId, auth.accountId, "media.cleanup_run_expired", "media_cleanup_run", frozenRun.id, { localOnly: true }, timestamp.toISOString());
+      if (!result.valid) return context.json({ code: "backup_write_epoch_stale" }, 409);
       return context.json({ code: "media_cleanup_run_expired" }, 409);
     }
     let confirmed: ReturnType<typeof confirmMediaCleanupRun>;
@@ -1435,9 +1447,11 @@ export function createApp() {
     } catch (error) {
       return context.json({ code: error instanceof Error ? error.message : "media_cleanup_confirmation_invalid" }, 409);
     }
-    const result = await context.env.DB.prepare("UPDATE media_cleanup_run SET state = 'confirmed', confirmed_by_account_id = ?, confirmed_at = ? WHERE id = ? AND state = 'pending_confirmation' AND confirmed_by_account_id IS NULL").bind(confirmed.confirmedByAccountId, confirmed.confirmedAt, confirmed.id).run();
-    if (result.meta.changes !== 1) return context.json({ code: "media_cleanup_run_not_pending" }, 409);
-    await writeAudit(context.env.DB, auth.accountId, "media.cleanup_run_confirmed", "media_cleanup_run", confirmed.id, { candidateSnapshotSha256: confirmed.candidateSnapshotSha256, confirmedByAccountId: auth.accountId, localOnly: true });
+    const admissionId = context.get("backupAdmissionId");
+    if (!admissionId) return context.json({ code: "backup_admission_missing" }, 503);
+    const result = await fencedLifecycleUpdate(context, context.env.DB.prepare(`UPDATE media_cleanup_run SET state = 'confirmed', confirmed_by_account_id = ?, confirmed_at = ? WHERE id = ? AND state = 'pending_confirmation' AND confirmed_by_account_id IS NULL AND ${activeWriteAdmissionGuard}`).bind(confirmed.confirmedByAccountId, confirmed.confirmedAt, confirmed.id, admissionId), admissionId, auth.accountId, "media.cleanup_run_confirmed", "media_cleanup_run", confirmed.id, { candidateSnapshotSha256: confirmed.candidateSnapshotSha256, confirmedByAccountId: auth.accountId, localOnly: true }, timestamp.toISOString());
+    if (!result.valid) return context.json({ code: "backup_write_epoch_stale" }, 409);
+    if (!result.changed) return context.json({ code: "media_cleanup_run_not_pending" }, 409);
     return context.json({ cleanupRun: confirmed });
   });
 
@@ -1449,9 +1463,11 @@ export function createApp() {
     if (!row) return context.json({ code: "media_cleanup_run_not_found" }, 404);
     if (row.state !== "pending_confirmation") return context.json({ code: "media_cleanup_run_not_pending" }, 409);
     const cancelled = cancelMediaCleanupRun({ id: row.id, state: "pending_confirmation", candidateSnapshotSha256: row.candidate_snapshot_sha256, candidateCount: row.candidate_count, backupRecoveryPoint: row.backup_recovery_point, backupPackageSha256: row.backup_package_sha256, createdByAccountId: row.created_by_account_id, createdAt: row.created_at, expiresAt: row.expires_at }, auth.accountId, new Date());
-    const result = await context.env.DB.prepare("UPDATE media_cleanup_run SET state = 'cancelled', cancelled_by_account_id = ?, cancelled_at = ? WHERE id = ? AND state = 'pending_confirmation' AND confirmed_by_account_id IS NULL").bind(cancelled.cancelledByAccountId, cancelled.cancelledAt, cancelled.id).run();
-    if (result.meta.changes !== 1) return context.json({ code: "media_cleanup_run_not_pending" }, 409);
-    await writeAudit(context.env.DB, auth.accountId, "media.cleanup_run_cancelled", "media_cleanup_run", cancelled.id, { localOnly: true });
+    const admissionId = context.get("backupAdmissionId");
+    if (!admissionId) return context.json({ code: "backup_admission_missing" }, 503);
+    const result = await fencedLifecycleUpdate(context, context.env.DB.prepare(`UPDATE media_cleanup_run SET state = 'cancelled', cancelled_by_account_id = ?, cancelled_at = ? WHERE id = ? AND state = 'pending_confirmation' AND confirmed_by_account_id IS NULL AND ${activeWriteAdmissionGuard}`).bind(cancelled.cancelledByAccountId, cancelled.cancelledAt, cancelled.id, admissionId), admissionId, auth.accountId, "media.cleanup_run_cancelled", "media_cleanup_run", cancelled.id, { localOnly: true }, cancelled.cancelledAt);
+    if (!result.valid) return context.json({ code: "backup_write_epoch_stale" }, 409);
+    if (!result.changed) return context.json({ code: "media_cleanup_run_not_pending" }, 409);
     return context.json({ cleanupRun: cancelled });
   });
 
@@ -1850,7 +1866,7 @@ export function createApp() {
     const timestamp = now();
     const roleIds = ["role-member", ...(input.role === "member" ? [] : [`role-${input.role}`])];
     const approvedAccount = "id = ? AND status = 'active' AND reviewed_at = ? AND reviewed_by_account_id = ? AND version = ?";
-    const results = await context.env.DB.batch([
+    const results = await fencedBatch(context.env.DB, context.get("backupAdmissionId"), [
       context.env.DB
         .prepare(
           `UPDATE account SET status = 'active', reviewed_at = ?, reviewed_by_account_id = ?, version = version + 1, updated_at = ?
@@ -1914,7 +1930,7 @@ export function createApp() {
     }
     const timestamp = now();
     const scopeGuard = "id = ? AND status = 'active' AND version = ? AND updated_at = ?";
-    const results = await context.env.DB.batch([
+    const results = await fencedBatch(context.env.DB, context.get("backupAdmissionId"), [
       context.env.DB.prepare("UPDATE account SET version = version + 1, updated_at = ? WHERE id = ? AND status = 'active' AND version = ?").bind(timestamp, accountId, input.version),
       context.env.DB.prepare(`DELETE FROM account_scope WHERE account_id = ? AND EXISTS (SELECT 1 FROM account WHERE ${scopeGuard})`).bind(accountId, accountId, input.version + 1, timestamp),
       ...input.scopes.map((scope) => context.env.DB.prepare(
@@ -1959,7 +1975,7 @@ export function createApp() {
     ).bind(lineageId, input.reviewerAccountId, input.validUntil, input.validFrom).first<{ id: string }>();
     if (overlap) return context.json({ code: "reviewer_assignment_overlap" }, 409);
     const id = crypto.randomUUID();
-    await context.env.DB.batch([
+    await fencedBatch(context.env.DB, context.get("backupAdmissionId"), [
       context.env.DB.prepare("INSERT INTO lineage_reviewer_assignment (id, lineage_id, reviewer_account_id, valid_from, valid_until, reason, granted_by_account_id, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)").bind(id, lineageId, input.reviewerAccountId, input.validFrom, input.validUntil, input.reason, auth.accountId, timestamp),
       context.env.DB.prepare("INSERT INTO audit_log (id, actor_account_id, action, object_type, object_id, metadata_json, created_at) VALUES (?, ?, ?, ?, ?, ?, ?)").bind(crypto.randomUUID(), auth.accountId, "lineage.reviewer_assigned", "lineage_reviewer_assignment", id, JSON.stringify({ lineageId, reviewerAccountId: input.reviewerAccountId, validFrom: input.validFrom, validUntil: input.validUntil }), timestamp),
     ]);
@@ -1972,9 +1988,11 @@ export function createApp() {
     const parsed = revokeReviewerAssignmentInput.safeParse(await context.req.json().catch(() => null));
     if (!parsed.success) return context.json({ code: "validation_failed", message: validationMessage(parsed) }, 400);
     const timestamp = now(); const id = context.req.param("assignmentId");
-    const result = await context.env.DB.prepare("UPDATE lineage_reviewer_assignment SET revoked_at = ?, revoked_by_account_id = ?, revoke_reason = ?, version = version + 1 WHERE id = ? AND revoked_at IS NULL AND version = ?").bind(timestamp, auth.accountId, parsed.data.reason, id, parsed.data.version).run();
-    if (result.meta.changes !== 1) return context.json({ code: "reviewer_assignment_conflict" }, 409);
-    await writeAudit(context.env.DB, auth.accountId, "lineage.reviewer_assignment_revoked", "lineage_reviewer_assignment", id, {});
+    const admissionId = context.get("backupAdmissionId");
+    if (!admissionId) return context.json({ code: "backup_admission_missing" }, 503);
+    const result = await fencedLifecycleUpdate(context, context.env.DB.prepare(`UPDATE lineage_reviewer_assignment SET revoked_at = ?, revoked_by_account_id = ?, revoke_reason = ?, version = version + 1 WHERE id = ? AND revoked_at IS NULL AND version = ? AND ${activeWriteAdmissionGuard}`).bind(timestamp, auth.accountId, parsed.data.reason, id, parsed.data.version, admissionId), admissionId, auth.accountId, "lineage.reviewer_assignment_revoked", "lineage_reviewer_assignment", id, {}, timestamp);
+    if (!result.valid) return context.json({ code: "backup_write_epoch_stale" }, 409);
+    if (!result.changed) return context.json({ code: "reviewer_assignment_conflict" }, 409);
     return context.json({ status: "revoked", version: parsed.data.version + 1 });
   });
 
@@ -1985,12 +2003,11 @@ export function createApp() {
     if (!parsed.success) return context.json({ code: "validation_failed", message: validationMessage(parsed) }, 400);
     const accountId = context.req.param("accountId");
     const timestamp = now();
-    const rejection = await context.env.DB
-      .prepare("UPDATE account SET status = 'rejected', reviewed_at = ?, reviewed_by_account_id = ?, version = version + 1, updated_at = ? WHERE id = ? AND status = 'pending' AND version = ?")
-      .bind(timestamp, auth.accountId, timestamp, accountId, parsed.data.version)
-      .run();
-    if (rejection.meta.changes !== 1) return context.json({ code: "review_conflict", message: "账号状态已变化，请刷新后重试。" }, 409);
-    await writeAudit(context.env.DB, auth.accountId, "account.rejected", "account", accountId, {});
+    const admissionId = context.get("backupAdmissionId");
+    if (!admissionId) return context.json({ code: "backup_admission_missing" }, 503);
+    const result = await fencedLifecycleUpdate(context, context.env.DB.prepare(`UPDATE account SET status = 'rejected', reviewed_at = ?, reviewed_by_account_id = ?, version = version + 1, updated_at = ? WHERE id = ? AND status = 'pending' AND version = ? AND ${activeWriteAdmissionGuard}`).bind(timestamp, auth.accountId, timestamp, accountId, parsed.data.version, admissionId), admissionId, auth.accountId, "account.rejected", "account", accountId, {}, timestamp);
+    if (!result.valid) return context.json({ code: "backup_write_epoch_stale" }, 409);
+    if (!result.changed) return context.json({ code: "review_conflict" }, 409);
     return context.json({ status: "rejected" });
   });
 
@@ -2002,21 +2019,18 @@ export function createApp() {
     const accountId = context.req.param("accountId");
     const passwordHash = await hashPassword(parsed.data.password);
     const timestamp = now();
-    const result = await context.env.DB
-      .prepare("UPDATE account SET password_scheme = ?, password_hash = ?, version = version + 1, updated_at = ? WHERE id = ?")
-      .bind("pbkdf2-sha256", passwordHash, timestamp, accountId)
-      .run();
-    if (result.meta.changes !== 1) return context.json({ code: "account_not_found" }, 404);
-    await context.env.DB.batch([
-      context.env.DB.prepare("UPDATE auth_session SET revoked_at = ? WHERE account_id = ? AND revoked_at IS NULL").bind(timestamp, accountId),
-      context.env.DB
-        .prepare("INSERT INTO audit_log (id, actor_account_id, action, object_type, object_id, metadata_json, created_at) VALUES (?, ?, ?, ?, ?, ?, ?)")
-        .bind(crypto.randomUUID(), auth.accountId, "account.password_reset", "account", accountId, "{}", timestamp),
+    const results = await fencedBatch(context.env.DB, context.get("backupAdmissionId"), [
+      context.env.DB.prepare("UPDATE account SET password_scheme = ?, password_hash = ?, version = version + 1, updated_at = ? WHERE id = ?").bind("pbkdf2-sha256", passwordHash, timestamp, accountId),
+      context.env.DB.prepare("UPDATE auth_session SET revoked_at = ? WHERE account_id = ? AND revoked_at IS NULL AND changes() = 1").bind(timestamp, accountId),
+      context.env.DB.prepare("INSERT INTO audit_log (id, actor_account_id, action, object_type, object_id, metadata_json, created_at) SELECT ?, ?, ?, ?, ?, ?, ? WHERE EXISTS (SELECT 1 FROM account WHERE id = ? AND password_hash = ? AND updated_at = ?)").bind(crypto.randomUUID(), auth.accountId, "account.password_reset", "account", accountId, "{}", timestamp, accountId, passwordHash, timestamp),
     ]);
+    if (results[0]?.meta.changes !== 1) return context.json({ code: "account_not_found" }, 404);
     return context.body(null, 204);
   });
 
   app.onError((error, context) => {
+    if (error.message.includes("backup_write_epoch_stale")) return context.json({ code: "backup_write_epoch_stale" }, 409);
+    if (error.message.includes("backup_admission_missing")) return context.json({ code: "backup_admission_missing" }, 503);
     console.error(error);
     return context.json({
       code: "internal_error",

@@ -1,3 +1,4 @@
+import { fencedBatch } from "../backup/fenced-batch";
 import type { SuccessionEdgeCandidate } from "./succession-validation";
 import { previewSuccessionRevision } from "./revision-preview";
 
@@ -12,6 +13,7 @@ export interface RevisionAuditEntry {
 
 export interface PublishRevisionInput {
   lineageId: string;
+  admissionId?: string;
   revisionId: string;
   basedOnRevisionId?: string;
   baseEdges: readonly SuccessionEdgeCandidate[];
@@ -115,7 +117,8 @@ export async function publishSuccessionRevision(
       ),
     ],
   ];
-  await database.batch(statements);
+  if (input.admissionId) await fencedBatch(database, input.admissionId, statements);
+  else await database.batch(statements);
   return { published: true, revisionId: input.revisionId };
 }
 
@@ -131,6 +134,7 @@ export async function buildRollbackRelations(database: D1Database, revisionId: s
 }
 
 export interface RollbackRevisionInput {
+  admissionId?: string;
   lineageId: string;
   targetRevisionId: string;
   newRevisionId: string;
@@ -156,6 +160,7 @@ export async function rollbackSuccessionRevision(
 
   return publishSuccessionRevision(database, {
     lineageId: input.lineageId,
+    admissionId: input.admissionId,
     revisionId: input.newRevisionId,
     basedOnRevisionId: input.targetRevisionId,
     baseEdges: await buildRollbackEdges(database, current.revision_id),

@@ -96,7 +96,7 @@ import { execFileSync } from "node:child_process";
 
 const baseUrl = process.env.BASE_URL;
 
-async function request(path, { method = "GET", body, cookie, csrf, bootstrapSecret, gate } = {}) {
+async function request(path, { method = "GET", body, cookie, csrf, bootstrapSecret, gate, gateBatch } = {}) {
   const response = await fetch(`${baseUrl}${path}`, {
     method,
     headers: {
@@ -104,6 +104,7 @@ async function request(path, { method = "GET", body, cookie, csrf, bootstrapSecr
       ...(cookie ? { cookie } : {}),
       ...(csrf ? { "x-csrf-token": csrf } : {}),
       ...(gate ? { "x-test-fencing-gate": gate } : {}),
+      ...(gateBatch ? { "x-test-fencing-batch": String(gateBatch) } : {}),
       ...(bootstrapSecret ? { "x-bootstrap-secret": bootstrapSecret } : {}),
     },
     body: body ? JSON.stringify(body) : undefined,
@@ -118,7 +119,7 @@ async function request(path, { method = "GET", body, cookie, csrf, bootstrapSecr
 
 async function frozenBatchRequests(paths) {
   const ids = paths.map(() => crypto.randomUUID());
-  const pending = paths.map((entry, index) => request(typeof entry === "string" ? entry : entry.path, { method: "POST", cookie: adminCookie, csrf: adminCsrf, gate: ids[index], body: typeof entry === "string" ? undefined : entry.body }));
+  const pending = paths.map((entry, index) => request(typeof entry === "string" ? entry : entry.path, { method: typeof entry === "string" ? "POST" : entry.method ?? "POST", cookie: typeof entry === "string" ? adminCookie : entry.cookie ?? adminCookie, csrf: typeof entry === "string" ? adminCsrf : entry.csrf ?? adminCsrf, gate: ids[index], gateBatch: typeof entry === "string" ? undefined : entry.gateBatch, body: typeof entry === "string" ? undefined : entry.body }));
   for (const id of ids) {
     let ready = false;
     for (let attempt = 0; attempt < 100; attempt += 1) {
@@ -317,10 +318,10 @@ assert.equal(personDetail.body.names.length, 2);
 assert.equal(personDetail.body.facts.length, 1);
 // Audit failures must roll back each lifecycle change, and duplicate requests
 // must produce one state transition and one audit record.
-async function lifecycleAuditFailure(path, action, table, column, id, expected = null) {
+async function lifecycleAuditFailure(path, action, table, column, id, expected = null, options = {}) {
   const sql = (command) => execFileSync("npx", ["wrangler", "d1", "execute", "DB", "--local", "--persist-to", ".wrangler/local-auth-integration", "--command", command, "--json"], { encoding: "utf8" });
   sql(`CREATE TRIGGER local_lifecycle_audit_failure BEFORE INSERT ON audit_log WHEN NEW.action = '${action}' BEGIN SELECT RAISE(ABORT, 'injected lifecycle audit failure'); END;`);
-  expectStatus(await request(path, { method: "POST", cookie: adminCookie, csrf: adminCsrf }), 500);
+  expectStatus(await request(path, { method: "POST", cookie: adminCookie, csrf: adminCsrf, ...options }), 500);
   assert.equal(JSON.parse(sql(`SELECT ${column} AS value FROM ${table} WHERE id = '${id}';`))[0].results[0].value, expected);
   sql("DROP TRIGGER local_lifecycle_audit_failure;");
 }
@@ -460,6 +461,7 @@ expectStatus(await request(`/api/admin/source-relation-claims/${sourceRelationCl
   method: "POST", cookie: adminCookie, csrf: adminCsrf,
 }), 200);
 
+await frozenBatchRequests([{ path: "/api/admin/lineages", body: { name: "冻结过期世系" } }]);
 const lineageCreate = await request("/api/admin/lineages", {
   method: "POST", cookie: adminCookie, csrf: adminCsrf, body: { name: "本地测试世系" },
 });
@@ -634,6 +636,8 @@ const reviewerPerson = await request("/api/admin/persons", {
   body: { displayName: "本地复核管理员人物", visibility: "MEMBER" },
 });
 expectStatus(reviewerPerson, 201);
+await frozenBatchRequests([{ path: `/api/admin/accounts/${reviewer.id}/approve`, body: { personId: reviewerPerson.body.person.id, role: "admin", version: reviewer.version } }]);
+await lifecycleAuditFailure(`/api/admin/accounts/${reviewer.id}/approve`, "account.approved", "account", "status", reviewer.id, "pending", { body: { personId: reviewerPerson.body.person.id, role: "admin", version: reviewer.version } });
 expectStatus(await request(`/api/admin/accounts/${reviewer.id}/approve`, {
   method: "POST", cookie: adminCookie, csrf: adminCsrf,
   body: { personId: reviewerPerson.body.person.id, role: "admin", version: reviewer.version },
@@ -645,6 +649,7 @@ const reviewerLogin = await request("/api/auth/login", {
 expectStatus(reviewerLogin, 200);
 const reviewerCookie = sessionCookie(reviewerLogin);
 const reviewerCsrf = reviewerLogin.body.csrfToken;
+await frozenBatchRequests([{ path: `/api/admin/lineages/${lineageId}/reviewer-assignments`, body: { reviewerAccountId: reviewer.id, validFrom: "2026-10-01T00:00:00.000Z", validUntil: "2026-12-29T00:00:00.000Z", reason: "屏障测试" } }]);
 const reviewerAssignment = await request(`/api/admin/lineages/${lineageId}/reviewer-assignments`, {
   method: "POST", cookie: adminCookie, csrf: adminCsrf,
   body: {
@@ -694,6 +699,7 @@ const changePreview = await request(`/api/admin/change-requests/${changeRequest.
 expectStatus(changePreview, 200);
 assert.equal(changePreview.body.preview.valid, true);
 assert.equal(changePreview.body.preview.relations.length, 4);
+await frozenBatchRequests([{ path: `/api/admin/change-requests/${changeRequest.body.changeRequest.id}/submit`, body: { version: 1 } }]);
 expectStatus(await request(`/api/admin/change-requests/${changeRequest.body.changeRequest.id}/submit`, {
   method: "POST", cookie: adminCookie, csrf: adminCsrf, body: { version: 1 },
 }), 200);
@@ -702,10 +708,13 @@ const selfApproval = await request(`/api/admin/change-requests/${changeRequest.b
 });
 expectStatus(selfApproval, 403);
 assert.equal(selfApproval.body.code, "self_review_forbidden");
+await frozenBatchRequests([{ path: `/api/admin/change-requests/${changeRequest.body.changeRequest.id}/approve`, cookie: reviewerCookie, csrf: reviewerCsrf, body: { version: 2 }, gateBatch: 2 }]);
 const changeApproval = await request(`/api/admin/change-requests/${changeRequest.body.changeRequest.id}/approve`, {
   method: "POST", cookie: reviewerCookie, csrf: reviewerCsrf, body: { version: 2 },
 });
 expectStatus(changeApproval, 200);
+await frozenBatchRequests([{ path: `/api/admin/change-requests/${changeRequest.body.changeRequest.id}/publish`, cookie: reviewerCookie, csrf: reviewerCsrf, body: { version: changeApproval.body.version, revisionId: "66666666-6666-4666-8666-666666666666" }, gateBatch: 2 }]);
+await lifecycleAuditFailure(`/api/admin/change-requests/${changeRequest.body.changeRequest.id}/publish`, "lineage.change_request_published", "change_request", "state", changeRequest.body.changeRequest.id, "approved", { cookie: reviewerCookie, csrf: reviewerCsrf, body: { version: changeApproval.body.version, revisionId: "66666666-6666-4666-8666-666666666666" } });
 const changePublish = await request(`/api/admin/change-requests/${changeRequest.body.changeRequest.id}/publish`, {
   method: "POST", cookie: reviewerCookie, csrf: reviewerCsrf,
   body: { version: changeApproval.body.version, revisionId: "66666666-6666-4666-8666-666666666666" },
@@ -852,6 +861,7 @@ assert.equal(cleanupPreview.body.candidates.some((asset) => asset.id === expired
 assert.equal(cleanupPreview.body.candidates.some((asset) => asset.id === localMediaAssetId), false);
 const cleanupAuditCountAfter = JSON.parse(execFileSync("npx", ["wrangler", "d1", "execute", "DB", "--local", "--persist-to", ".wrangler/local-auth-integration", "--command", "SELECT COUNT(*) AS count FROM audit_log;", "--json"], { encoding: "utf8" }))[0].results[0].count;
 assert.equal(cleanupAuditCountAfter, cleanupAuditCountBefore);
+await frozenBatchRequests([{ path: "/api/admin/media-cleanup-runs", body: { backupRecoveryPoint: "local-stale-test", backupPackageSha256: "c".repeat(64) } }]);
 const cleanupRun = await request("/api/admin/media-cleanup-runs", {
   method: "POST", cookie: adminCookie, csrf: adminCsrf,
   body: { backupRecoveryPoint: "local-recovery-drill-2026-10-25", backupPackageSha256: "c".repeat(64) },
@@ -866,6 +876,8 @@ assert.equal(frozenCleanupRun.body.items[0].media_asset_id, expiredCleanupAssetI
 const selfCleanupConfirmation = await request(`/api/admin/media-cleanup-runs/${cleanupRun.body.cleanupRun.id}/confirm`, { method: "POST", cookie: adminCookie, csrf: adminCsrf });
 expectStatus(selfCleanupConfirmation, 409);
 assert.equal(selfCleanupConfirmation.body.code, "media_cleanup_second_confirmer_invalid");
+await frozenBatchRequests([{ path: `/api/admin/media-cleanup-runs/${cleanupRun.body.cleanupRun.id}/confirm`, cookie: reviewerCookie, csrf: reviewerCsrf }]);
+await lifecycleAuditFailure(`/api/admin/media-cleanup-runs/${cleanupRun.body.cleanupRun.id}/confirm`, "media.cleanup_run_confirmed", "media_cleanup_run", "state", cleanupRun.body.cleanupRun.id, "pending_confirmation", { cookie: reviewerCookie, csrf: reviewerCsrf });
 const confirmedCleanupRun = await request(`/api/admin/media-cleanup-runs/${cleanupRun.body.cleanupRun.id}/confirm`, { method: "POST", cookie: reviewerCookie, csrf: reviewerCsrf });
 expectStatus(confirmedCleanupRun, 200);
 assert.equal(confirmedCleanupRun.body.cleanupRun.state, "confirmed");
@@ -889,6 +901,7 @@ const cancellableCleanupRun = await request("/api/admin/media-cleanup-runs", {
   body: { backupRecoveryPoint: "local-recovery-drill-2026-10-25-cancel", backupPackageSha256: "d".repeat(64) },
 });
 expectStatus(cancellableCleanupRun, 201);
+await frozenBatchRequests([`/api/admin/media-cleanup-runs/${cancellableCleanupRun.body.cleanupRun.id}/cancel`]);
 const cancelledCleanupRun = await request(`/api/admin/media-cleanup-runs/${cancellableCleanupRun.body.cleanupRun.id}/cancel`, { method: "POST", cookie: adminCookie, csrf: adminCsrf });
 expectStatus(cancelledCleanupRun, 200);
 assert.equal(cancelledCleanupRun.body.cleanupRun.state, "cancelled");
@@ -900,6 +913,7 @@ execFileSync("npx", ["wrangler", "d1", "execute", "DB", "--local", "--persist-to
   INSERT INTO media_cleanup_run (id, state, candidate_snapshot_sha256, candidate_count, backup_recovery_point, backup_package_sha256, created_by_account_id, created_at, expires_at)
   SELECT '${expiredCleanupRunId}', 'pending_confirmation', '${"e".repeat(64)}', 1, 'local-expired-run', '${"f".repeat(64)}', id, '1999-01-01T00:00:00.000Z', '2000-01-01T00:00:00.000Z' FROM account WHERE username = 'local.admin';
 `], { stdio: "pipe" });
+await frozenBatchRequests([{ path: `/api/admin/media-cleanup-runs/${expiredCleanupRunId}/confirm`, cookie: reviewerCookie, csrf: reviewerCsrf }]);
 const expiredCleanupConfirmation = await request(`/api/admin/media-cleanup-runs/${expiredCleanupRunId}/confirm`, { method: "POST", cookie: reviewerCookie, csrf: reviewerCsrf });
 expectStatus(expiredCleanupConfirmation, 409);
 assert.equal(expiredCleanupConfirmation.body.code, "media_cleanup_run_expired");
@@ -918,6 +932,7 @@ const outOfScopeEditorProposal = await request(`/api/admin/lineages/${lineageId}
 expectStatus(outOfScopeEditorProposal, 403);
 assert.equal(outOfScopeEditorProposal.body.code, "scope_forbidden");
 
+await frozenBatchRequests([{ path: `/api/admin/accounts/${member.id}/scopes`, method: "PUT", body: { version: member.version + 1, scopes: [{ scopeType: "person", scopeId: secondPerson.body.person.id }] } }]);
 const scopes = await request(`/api/admin/accounts/${member.id}/scopes`, {
   method: "PUT", cookie: adminCookie, csrf: adminCsrf,
   body: {
@@ -1131,6 +1146,7 @@ const retiredMembership = execFileSync("npx", ["wrangler", "d1", "execute", "DB"
 ], { encoding: "utf8" });
 assert.match(retiredMembership, /"member_count": 0/);
 
+await frozenBatchRequests([{ path: `/api/admin/reviewer-assignments/${reviewerAssignment.body.assignment.id}/revoke`, body: { version: reviewerAssignment.body.assignment.version, reason: "屏障测试" } }]);
 expectStatus(await request(`/api/admin/reviewer-assignments/${reviewerAssignment.body.assignment.id}/revoke`, {
   method: "POST", cookie: adminCookie, csrf: adminCsrf,
   body: { version: reviewerAssignment.body.assignment.version, reason: "本地撤销审核人指派验证" },
@@ -1249,6 +1265,7 @@ const staleCounts = execFileSync("npx", ["wrangler", "d1", "execute", "DB", "--l
 assert.deepEqual(JSON.parse(staleCounts)[0].results[0], { people: 0, audits: anchorAuditsBeforeFence });
 expectStatus(await request("/api/admin/persons", { method: "POST", cookie: adminCookie, csrf: adminCsrf, body: { displayName: "新代次正常人物", visibility: "MEMBER" } }), 201);
 
+await frozenBatchRequests([{ path: `/api/admin/accounts/${member.id}/reset-password`, body: { password: newPassword } }]);
 const passwordReset = await request(`/api/admin/accounts/${member.id}/reset-password`, {
   method: "POST",
   cookie: adminCookie,

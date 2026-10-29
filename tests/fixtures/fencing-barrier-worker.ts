@@ -19,9 +19,13 @@ export default {
     let released = false;
     const gate = { release: () => { released = true; }, ready: false };
     gates.set(id, gate);
+    let batchNumber = 0;
+    const targetBatch = Number(request.headers.get("x-test-fencing-batch") ?? "1");
     const db = new Proxy(env.DB, {
       get(target, property) {
         if (property === "batch") return async (statements: D1PreparedStatement[]) => {
+          batchNumber += 1;
+          if (batchNumber !== targetBatch) return target.batch(statements);
           gate.ready = true;
           while (!released) await new Promise((resolve) => setTimeout(resolve, 20));
           gates.delete(id);

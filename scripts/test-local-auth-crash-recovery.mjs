@@ -1,12 +1,12 @@
 /* global process, console, fetch, setTimeout */
 import assert from "node:assert/strict";
-import { randomUUID } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 import { execFileSync, spawn } from "node:child_process";
 import { mkdtemp, readdir, readFile, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { DatabaseSync } from "node:sqlite";
-import { recoverLocalAdmission } from "./local-admission-recovery-fixture.mjs";
+import { createRecoveryFixtureSchema, recoverLocalAdmission } from "./local-admission-recovery-fixture.mjs";
 
 // Owns one isolated local Worker and its process group, never any remote DB.
 const root = await mkdtemp(path.join(tmpdir(), "cg-auth-crash-"));
@@ -105,6 +105,7 @@ try {
   // The live process group is not proof of a terminated request; no recovery.
   assert.equal(await groupHasLiveMembers(worker.pid), true);
   assert.throws(() => recoverLocalAdmission(null, { stopped: () => worker === undefined, reason: "live" }), /worker_group_still_running/u);
+  const crashedGroupId = worker.pid;
   const crashed = await stopWorker();
   assert.equal(crashed.signal, "SIGKILL");
   await interrupted;
@@ -121,28 +122,90 @@ try {
   db.exec("PRAGMA foreign_keys = ON; PRAGMA busy_timeout = 5000;");
   assert.equal(db.prepare("SELECT COUNT(*) AS n FROM account WHERE username = 'crash.pending'").get().n, 0);
   const actorId = db.prepare("SELECT id FROM account WHERE username = 'crash.admin'").get().id;
-  const fixture = { admissionId, freezeId: freeze.body.freeze.id, actorId, stopped: () => worker === undefined, reason: "隔离进程组已终止" };
+  const reviewerId = randomUUID();
+  const fixtureTime = new Date().toISOString();
+  db.prepare("INSERT INTO account (id, username, display_name, password_scheme, password_hash, status, created_at, updated_at) VALUES (?, ?, ?, ?, ?, 'active', ?, ?)").run(reviewerId, "fixture.reviewer", "测试复核人", "fixture", "fixture", fixtureTime, fixtureTime);
+  db.prepare("INSERT INTO account_role (account_id, role_id, granted_at, granted_by_account_id) VALUES (?, 'role-admin', ?, ?)").run(reviewerId, fixtureTime, actorId);
+  createRecoveryFixtureSchema(db);
+  const fixture = { requestId: randomUUID(), admissionId, freezeId: freeze.body.freeze.id, actorId, reviewerId, stopped: () => worker === undefined, reason: "隔离进程组已终止", evidence: { kind: "isolated_process_group_stopped", supervisorId: "isolated-local-test", processGroupId: crashedGroupId, observedAt: fixtureTime } };
   const currentId = randomUUID();
   db.prepare("INSERT INTO backup_write_admission (id, admitted_at, epoch) SELECT ?, ?, epoch FROM backup_write_epoch WHERE id = 1").run(currentId, new Date().toISOString());
   assert.throws(() => recoverLocalAdmission(db, { ...fixture, admissionId: currentId }), /admission_not_fenced/u);
-  // Synthetic fixture row is closed only by the test that created it.
   db.prepare("UPDATE backup_write_admission SET completed_at = ? WHERE id = ?").run(new Date().toISOString(), currentId);
   assert.throws(() => recoverLocalAdmission(db, { ...fixture, freezeId: randomUUID() }), /active_freeze_or_open_admission_missing/u);
-  assert.throws(() => recoverLocalAdmission(db, { ...fixture, actorId: randomUUID() }), /FOREIGN KEY constraint failed/u);
+  assert.throws(() => recoverLocalAdmission(db, { ...fixture, reviewerId: actorId }), /two_distinct_approvers_required/u);
+  assert.throws(() => recoverLocalAdmission(db, { ...fixture, reviewerId: randomUUID() }), /approver_not_active_admin/u);
+  assert.throws(() => recoverLocalAdmission(db, { ...fixture, evidence: { kind: "unsupported" } }), /recovery_evidence_invalid/u);
   assert.throws(() => recoverLocalAdmission(db, { ...fixture, injectAuditFailure: true }), /injected_recovery_failure/u);
   assert.equal(db.prepare("SELECT completed_at FROM backup_write_admission WHERE id = ?").get(admissionId).completed_at, null);
+  assert.equal(db.prepare("SELECT COUNT(*) AS n FROM local_fixture_admission_recovery").get().n, 0);
   assert.equal(db.prepare("SELECT COUNT(*) AS n FROM audit_log WHERE action = 'backup.local_fixture_admission_recovered'").get().n, 0);
-  recoverLocalAdmission(db, fixture);
-  assert.throws(() => recoverLocalAdmission(db, fixture), /active_freeze_or_open_admission_missing/u);
+  db.close(); db = undefined;
+
+  // Kill an isolated SQLite writer before COMMIT, then after COMMIT but before
+  // acknowledgement. This tests transaction boundaries, not Cloudflare D1.
+  const childScript = path.resolve("scripts/local-admission-recovery-child.mjs");
+  const childInput = { requestId: fixture.requestId, admissionId, freezeId: fixture.freezeId, actorId, reviewerId, reason: fixture.reason, evidence: fixture.evidence };
+  async function killAt(checkpoint) {
+    const child = spawn(process.execPath, [childScript, dbPath, JSON.stringify(childInput), checkpoint], { stdio: ["ignore", "pipe", "pipe"] });
+    let output = "", errors = "";
+    child.stdout.on("data", (data) => { output += data.toString(); });
+    child.stderr.on("data", (data) => { errors += data.toString(); });
+    const closed = new Promise((resolve) => child.once("exit", (code, signal) => resolve({ code, signal })));
+    let observed = false;
+    for (let i = 0; i < 300; i += 1) {
+      if (output.includes(`${checkpoint}\n`)) { observed = true; break; }
+      if (child.exitCode !== null || child.signalCode !== null) break;
+      await delay(50);
+    }
+    if (!observed) { child.kill("SIGKILL"); await closed; throw new Error(`checkpoint ${checkpoint} not reached: ${errors}`); }
+    child.kill("SIGKILL");
+    assert.equal((await closed).signal, "SIGKILL");
+  }
+  await killAt("before_commit");
+  db = new DatabaseSync(dbPath); db.exec("PRAGMA foreign_keys = ON; PRAGMA busy_timeout = 5000;");
+  assert.equal(db.prepare("SELECT COUNT(*) AS n FROM local_fixture_admission_recovery").get().n, 0);
+  assert.equal(db.prepare("SELECT COUNT(*) AS n FROM audit_log WHERE action = 'backup.local_fixture_admission_recovered'").get().n, 0);
+  db.close(); db = undefined;
+  await killAt("after_commit");
+  db = new DatabaseSync(dbPath); db.exec("PRAGMA foreign_keys = ON; PRAGMA busy_timeout = 5000;");
+  assert.deepEqual(recoverLocalAdmission(db, fixture), { state: "recovered", alreadyApplied: true });
+  assert.throws(() => recoverLocalAdmission(db, { ...fixture, requestId: randomUUID() }), /recovery_request_conflict/u);
+  assert.throws(() => recoverLocalAdmission(db, { ...fixture, evidence: { ...fixture.evidence, supervisorId: "changed" } }), /recovery_request_conflict/u);
+  assert.throws(() => db.prepare("UPDATE local_fixture_admission_recovery SET reason = 'changed' WHERE admission_id = ?").run(admissionId), /recovery_record_immutable/u);
+  assert.throws(() => db.prepare("DELETE FROM local_fixture_admission_recovery WHERE admission_id = ?").run(admissionId), /recovery_record_immutable/u);
+  assert.equal(db.prepare("SELECT COUNT(*) AS n FROM local_fixture_admission_recovery WHERE admission_id = ? AND state = 'recovered'").get(admissionId).n, 1);
+  assert.equal(db.prepare("SELECT completed_at FROM backup_write_admission WHERE id = ?").get(admissionId).completed_at, null);
   assert.equal(db.prepare("SELECT COUNT(*) AS n FROM audit_log WHERE action = 'backup.local_fixture_admission_recovered' AND object_id = ?").get(admissionId).n, 1);
+  const recorded = db.prepare("SELECT * FROM local_fixture_admission_recovery WHERE admission_id = ?").get(admissionId);
+  const metadata = JSON.parse(db.prepare("SELECT metadata_json FROM audit_log WHERE action = 'backup.local_fixture_admission_recovered' AND object_id = ?").get(admissionId).metadata_json);
+  assert.equal(recorded.evidence_sha256, createHash("sha256").update(recorded.evidence_json).digest("hex"));
+  assert.equal(metadata.evidenceSha256, recorded.evidence_sha256);
+  assert.equal(metadata.reviewerId, reviewerId);
+
+  // Two independent recovery processes race with one request and admission.
+  const concurrentId = randomUUID();
+  db.prepare("INSERT INTO backup_write_admission (id, admitted_at, epoch) VALUES (?, ?, ?)").run(concurrentId, fixtureTime, recorded.admission_epoch);
+  const concurrentInput = { ...childInput, admissionId: concurrentId, requestId: randomUUID() };
+  db.close(); db = undefined;
+  const concurrentChildren = Array.from({ length: 2 }, () => spawn(process.execPath, [childScript, dbPath, JSON.stringify(concurrentInput), "none"], { stdio: ["ignore", "ignore", "pipe"] }));
+  const childResults = await Promise.all(concurrentChildren.map((child) => new Promise((resolve) => {
+    let stderr = "";
+    child.stderr.on("data", (chunk) => { stderr += chunk.toString(); });
+    child.on("exit", (code, signal) => resolve({ code, signal, stderr }));
+  })));
+  assert.deepEqual(childResults.map((result) => result.code), [0, 0], JSON.stringify(childResults));
+  db = new DatabaseSync(dbPath); db.exec("PRAGMA foreign_keys = ON; PRAGMA busy_timeout = 5000;");
+  assert.equal(db.prepare("SELECT COUNT(*) AS n FROM local_fixture_admission_recovery WHERE admission_id = ?").get(concurrentId).n, 1);
+  assert.equal(db.prepare("SELECT COUNT(*) AS n FROM audit_log WHERE action = 'backup.local_fixture_admission_recovered' AND object_id = ?").get(concurrentId).n, 1);
   db.close(); db = undefined;
   await startWorker();
   const afterRecovery = await api("/api/admin/backup-write-freeze/readiness", { cookie });
-  assert.equal(afterRecovery.body.activeWrites, 0);
-  assert.equal(afterRecovery.body.apiWritesDrained, true);
+  assert.equal(afterRecovery.body.activeWrites, 2);
+  assert.equal(afterRecovery.body.apiWritesDrained, false);
   assert.equal(afterRecovery.body.uploadsDrained, false);
   assert.equal(afterRecovery.body.remoteExecutionAvailable, false);
-  console.log("本地认证 Worker SIGKILL、重启、保守阻断与隔离夹具审计恢复通过。");
+  console.log("本地认证 Worker SIGKILL、独立恢复状态、提交前后中断与重试通过。");
 } finally {
   if (db) db.close();
   await stopWorker();

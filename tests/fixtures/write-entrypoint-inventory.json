@@ -1,0 +1,431 @@
+[
+  {
+    "method": "GET",
+    "path": "/api/health",
+    "kind": "read"
+  },
+  {
+    "method": "GET",
+    "path": "/api/me",
+    "kind": "read"
+  },
+  {
+    "method": "GET",
+    "path": "/api/admin/media-assets/upload-availability",
+    "kind": "read"
+  },
+  {
+    "method": "GET",
+    "path": "/api/admin/backup-write-freeze",
+    "kind": "read"
+  },
+  {
+    "method": "GET",
+    "path": "/api/admin/backup-write-freeze/readiness",
+    "kind": "read"
+  },
+  {
+    "method": "GET",
+    "path": "/api/admin/backup-write-freeze/blockers",
+    "kind": "read"
+  },
+  {
+    "method": "POST",
+    "path": "/api/admin/backup-write-freeze",
+    "kind": "control"
+  },
+  {
+    "method": "POST",
+    "path": "/api/admin/backup-write-freeze/release",
+    "kind": "control"
+  },
+  {
+    "method": "POST",
+    "path": "/api/admin/media-assets/upload-intents",
+    "kind": "guarded",
+    "marker": "activeWriteAdmissionGuard"
+  },
+  {
+    "method": "POST",
+    "path": "/api/admin/media-assets/:assetId/complete",
+    "kind": "guarded",
+    "marker": "fencedLifecycleUpdate"
+  },
+  {
+    "method": "GET",
+    "path": "/api/media-assets/:assetId",
+    "kind": "read"
+  },
+  {
+    "method": "POST",
+    "path": "/api/setup/bootstrap",
+    "kind": "guarded",
+    "marker": "fencedBatch"
+  },
+  {
+    "method": "POST",
+    "path": "/api/auth/register",
+    "kind": "guarded",
+    "marker": "fencedBatch"
+  },
+  {
+    "method": "POST",
+    "path": "/api/auth/login",
+    "kind": "guarded",
+    "marker": "fencedBatch"
+  },
+  {
+    "method": "POST",
+    "path": "/api/auth/logout",
+    "kind": "guarded",
+    "marker": "fencedBatch"
+  },
+  {
+    "method": "GET",
+    "path": "/api/admin/lineages",
+    "kind": "read"
+  },
+  {
+    "method": "GET",
+    "path": "/api/admin/lineages/:lineageId/branch-workbench",
+    "kind": "read"
+  },
+  {
+    "method": "GET",
+    "path": "/api/admin/genealogy-editions",
+    "kind": "read"
+  },
+  {
+    "method": "POST",
+    "path": "/api/admin/lineages",
+    "kind": "guarded",
+    "marker": "fencedBatch"
+  },
+  {
+    "method": "POST",
+    "path": "/api/admin/lineages/:lineageId/revisions/preview",
+    "kind": "preview"
+  },
+  {
+    "method": "GET",
+    "path": "/api/admin/lineages/:lineageId/projection",
+    "kind": "read"
+  },
+  {
+    "method": "GET",
+    "path": "/api/admin/lineages/:lineageId/hanging-chart",
+    "kind": "read"
+  },
+  {
+    "method": "GET",
+    "path": "/api/admin/source-relation-semantics",
+    "kind": "read"
+  },
+  {
+    "method": "POST",
+    "path": "/api/admin/source-relation-semantics",
+    "kind": "guarded",
+    "marker": "activeWriteAdmissionGuard"
+  },
+  {
+    "method": "POST",
+    "path": "/api/admin/source-relation-semantics/:ruleId/retire",
+    "kind": "guarded",
+    "marker": "fencedLifecycleUpdate"
+  },
+  {
+    "method": "GET",
+    "path": "/api/admin/genealogy-editions/:editionId/historical-projection",
+    "kind": "read"
+  },
+  {
+    "method": "GET",
+    "path": "/api/admin/lineages/:lineageId/historical-comparison",
+    "kind": "read"
+  },
+  {
+    "method": "GET",
+    "path": "/api/admin/lineages/:lineageId/kinship",
+    "kind": "read"
+  },
+  {
+    "method": "POST",
+    "path": "/api/admin/lineages/:lineageId/change-requests",
+    "kind": "guarded",
+    "marker": "fencedBatch"
+  },
+  {
+    "method": "POST",
+    "path": "/api/admin/lineages/:lineageId/revisions/:revisionId/rollback-change-request",
+    "kind": "guarded",
+    "marker": "fencedBatch"
+  },
+  {
+    "method": "GET",
+    "path": "/api/admin/change-requests/:changeRequestId/preview",
+    "kind": "read"
+  },
+  {
+    "method": "POST",
+    "path": "/api/admin/change-requests/:changeRequestId/discard",
+    "kind": "guarded",
+    "marker": "fencedBatch"
+  },
+  {
+    "method": "POST",
+    "path": "/api/admin/change-requests/:changeRequestId/submit",
+    "kind": "guarded",
+    "marker": "fencedBatch"
+  },
+  {
+    "method": "POST",
+    "path": "/api/admin/change-requests/:changeRequestId/approve",
+    "kind": "guarded",
+    "marker": "fencedBatch"
+  },
+  {
+    "method": "POST",
+    "path": "/api/admin/change-requests/:changeRequestId/reject",
+    "kind": "guarded",
+    "marker": "fencedLifecycleUpdate"
+  },
+  {
+    "method": "POST",
+    "path": "/api/admin/change-requests/:changeRequestId/publish",
+    "kind": "guarded",
+    "marker": "publishSuccessionRevision"
+  },
+  {
+    "method": "POST",
+    "path": "/api/admin/lineages/:lineageId/revisions/publish",
+    "kind": "guarded",
+    "marker": "publishSuccessionRevision"
+  },
+  {
+    "method": "POST",
+    "path": "/api/admin/lineages/:lineageId/revisions/rollback",
+    "kind": "guarded",
+    "marker": "rollbackSuccessionRevision"
+  },
+  {
+    "method": "GET",
+    "path": "/api/admin/change-requests",
+    "kind": "read"
+  },
+  {
+    "method": "GET",
+    "path": "/api/admin/accounts/pending",
+    "kind": "read"
+  },
+  {
+    "method": "GET",
+    "path": "/api/admin/accounts/reviewers",
+    "kind": "read"
+  },
+  {
+    "method": "GET",
+    "path": "/api/admin/persons",
+    "kind": "read"
+  },
+  {
+    "method": "GET",
+    "path": "/api/admin/media-assets",
+    "kind": "read"
+  },
+  {
+    "method": "GET",
+    "path": "/api/admin/media-assets/cleanup-preview",
+    "kind": "read"
+  },
+  {
+    "method": "POST",
+    "path": "/api/admin/media-cleanup-runs",
+    "kind": "guarded",
+    "marker": "fencedBatch"
+  },
+  {
+    "method": "GET",
+    "path": "/api/admin/media-cleanup-runs/:cleanupRunId",
+    "kind": "read"
+  },
+  {
+    "method": "GET",
+    "path": "/api/admin/media-cleanup-runs/:cleanupRunId/preflight",
+    "kind": "read"
+  },
+  {
+    "method": "POST",
+    "path": "/api/admin/media-cleanup-runs/:cleanupRunId/confirm",
+    "kind": "guarded",
+    "marker": "fencedLifecycleUpdate"
+  },
+  {
+    "method": "POST",
+    "path": "/api/admin/media-cleanup-runs/:cleanupRunId/cancel",
+    "kind": "guarded",
+    "marker": "fencedLifecycleUpdate"
+  },
+  {
+    "method": "POST",
+    "path": "/api/admin/persons",
+    "kind": "guarded",
+    "marker": "backup_write_admission"
+  },
+  {
+    "method": "POST",
+    "path": "/api/admin/persons/:personId/names",
+    "kind": "guarded",
+    "marker": "activeWriteAdmissionGuard"
+  },
+  {
+    "method": "POST",
+    "path": "/api/admin/persons/:personId/facts",
+    "kind": "guarded",
+    "marker": "activeWriteAdmissionGuard"
+  },
+  {
+    "method": "POST",
+    "path": "/api/admin/persons/:personId/media",
+    "kind": "guarded",
+    "marker": "activeWriteAdmissionGuard"
+  },
+  {
+    "method": "GET",
+    "path": "/api/admin/persons/:personId/media",
+    "kind": "read"
+  },
+  {
+    "method": "POST",
+    "path": "/api/admin/person-media/:personMediaId/order",
+    "kind": "guarded",
+    "marker": "fencedLifecycleUpdate"
+  },
+  {
+    "method": "POST",
+    "path": "/api/admin/person-media/:personMediaId/retire",
+    "kind": "guarded",
+    "marker": "activeWriteAdmissionGuard"
+  },
+  {
+    "method": "GET",
+    "path": "/api/admin/persons/:personId",
+    "kind": "read"
+  },
+  {
+    "method": "POST",
+    "path": "/api/admin/person-names/:nameId/retire",
+    "kind": "guarded",
+    "marker": "fencedLifecycleUpdate"
+  },
+  {
+    "method": "POST",
+    "path": "/api/admin/person-facts/:factId/retire",
+    "kind": "guarded",
+    "marker": "fencedLifecycleUpdate"
+  },
+  {
+    "method": "GET",
+    "path": "/api/admin/places",
+    "kind": "read"
+  },
+  {
+    "method": "POST",
+    "path": "/api/admin/places/:placeId/retire",
+    "kind": "guarded",
+    "marker": "fencedLifecycleUpdate"
+  },
+  {
+    "method": "POST",
+    "path": "/api/admin/genealogies",
+    "kind": "guarded",
+    "marker": "activeWriteAdmissionGuard"
+  },
+  {
+    "method": "POST",
+    "path": "/api/admin/genealogies/:genealogyId/editions",
+    "kind": "guarded",
+    "marker": "activeWriteAdmissionGuard"
+  },
+  {
+    "method": "POST",
+    "path": "/api/admin/genealogy-editions/:editionId/source-person-records",
+    "kind": "guarded",
+    "marker": "activeWriteAdmissionGuard"
+  },
+  {
+    "method": "POST",
+    "path": "/api/admin/source-person-records/:sourceRecordId/links",
+    "kind": "guarded",
+    "marker": "activeWriteAdmissionGuard"
+  },
+  {
+    "method": "POST",
+    "path": "/api/admin/genealogy-editions/:editionId/source-fact-claims",
+    "kind": "guarded",
+    "marker": "activeWriteAdmissionGuard"
+  },
+  {
+    "method": "POST",
+    "path": "/api/admin/genealogy-editions/:editionId/source-relation-claims",
+    "kind": "guarded",
+    "marker": "activeWriteAdmissionGuard"
+  },
+  {
+    "method": "GET",
+    "path": "/api/admin/genealogy-editions/:editionId/source-claims",
+    "kind": "read"
+  },
+  {
+    "method": "POST",
+    "path": "/api/admin/source-fact-claims/:claimId/retract",
+    "kind": "guarded",
+    "marker": "retractSourceClaim"
+  },
+  {
+    "method": "POST",
+    "path": "/api/admin/source-relation-claims/:claimId/retract",
+    "kind": "guarded",
+    "marker": "retractSourceClaim"
+  },
+  {
+    "method": "POST",
+    "path": "/api/admin/accounts/:accountId/approve",
+    "kind": "guarded",
+    "marker": "fencedBatch"
+  },
+  {
+    "method": "PUT",
+    "path": "/api/admin/accounts/:accountId/scopes",
+    "kind": "guarded",
+    "marker": "fencedBatch"
+  },
+  {
+    "method": "GET",
+    "path": "/api/admin/lineages/:lineageId/reviewer-assignments",
+    "kind": "read"
+  },
+  {
+    "method": "POST",
+    "path": "/api/admin/lineages/:lineageId/reviewer-assignments",
+    "kind": "guarded",
+    "marker": "fencedBatch"
+  },
+  {
+    "method": "POST",
+    "path": "/api/admin/reviewer-assignments/:assignmentId/revoke",
+    "kind": "guarded",
+    "marker": "fencedLifecycleUpdate"
+  },
+  {
+    "method": "POST",
+    "path": "/api/admin/accounts/:accountId/reject",
+    "kind": "guarded",
+    "marker": "fencedLifecycleUpdate"
+  },
+  {
+    "method": "POST",
+    "path": "/api/admin/accounts/:accountId/reset-password",
+    "kind": "guarded",
+    "marker": "fencedBatch"
+  }
+]

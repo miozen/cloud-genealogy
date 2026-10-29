@@ -13,7 +13,7 @@ export interface RevisionAuditEntry {
 
 export interface PublishRevisionInput {
   lineageId: string;
-  admissionId?: string;
+  admissionId: string;
   revisionId: string;
   basedOnRevisionId?: string;
   baseEdges: readonly SuccessionEdgeCandidate[];
@@ -44,6 +44,7 @@ export async function publishSuccessionRevision(
   database: D1Database,
   input: PublishRevisionInput,
 ): Promise<PublishRevisionResult> {
+  if (typeof input.admissionId !== "string" || !input.admissionId.trim()) throw new Error("backup_admission_missing");
   const preview = previewSuccessionRevision(input);
   if (!preview.valid) return { published: false, issues: preview.issues };
 
@@ -117,8 +118,7 @@ export async function publishSuccessionRevision(
       ),
     ],
   ];
-  if (input.admissionId) await fencedBatch(database, input.admissionId, statements);
-  else await database.batch(statements);
+  await fencedBatch(database, input.admissionId, statements);
   return { published: true, revisionId: input.revisionId };
 }
 
@@ -134,7 +134,7 @@ export async function buildRollbackRelations(database: D1Database, revisionId: s
 }
 
 export interface RollbackRevisionInput {
-  admissionId?: string;
+  admissionId: string;
   lineageId: string;
   targetRevisionId: string;
   newRevisionId: string;
@@ -148,6 +148,7 @@ export async function rollbackSuccessionRevision(
   database: D1Database,
   input: RollbackRevisionInput,
 ): Promise<PublishRevisionResult> {
+  if (typeof input.admissionId !== "string" || !input.admissionId.trim()) throw new Error("backup_admission_missing");
   const current = await database.prepare(
     "SELECT revision_id FROM lineage_published_pointer WHERE lineage_id = ?",
   ).bind(input.lineageId).first<{ revision_id: string }>();

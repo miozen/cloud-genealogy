@@ -1144,9 +1144,10 @@ export function createApp() {
     if (!await structureRetirementsAreSafe(context.env.DB, preview.memberships, structurePreview.branches)) return context.json({ code: "branch_retirement_in_use" }, 409);
     if (!membershipsUseActiveStructures(preview.memberships, structurePreview.branches)) return context.json({ code: "membership_branch_not_active" }, 409);
     const publishTime = now();
-    if (!context.get("backupAdmissionId")) return context.json({ code: "backup_admission_missing" }, 503);
+    const admissionId = context.get("backupAdmissionId");
+    if (!admissionId) return context.json({ code: "backup_admission_missing" }, 503);
     const result = await publishSuccessionRevision(context.env.DB, {
-      admissionId: context.get("backupAdmissionId"),
+      admissionId,
       lineageId: request.lineage_id, revisionId: parsed.data.revisionId, basedOnRevisionId: request.base_revision_id ?? undefined,
       baseEdges: (edges.results as SuccessionRow[]).map((edge) => ({ parentPersonId: edge.parent_person_id, childPersonId: edge.child_person_id })),
       proposedEdges: preview.edges, proposedRelations: preview.relations, proposedBranchMemberships: preview.memberships.map((membership) => ({ branch_id: membership.branchId, person_id: membership.personId, membership_kind: membership.membershipKind })), proposedBranchStructures: structurePreview.branches.map((branch) => ({ branch_id: branch.branchId, parent_branch_id: branch.parentBranchId, name: branch.name, branch_kind: branch.branchKind, retired_at: branch.retiredAt === "__PROPOSED_RETIREMENT__" ? publishTime : branch.retiredAt })), branchStructureMutations: toStructureChangeCandidates(structureItems.results as StructureChangeItemRow[]), expectedPointerVersion: request.base_pointer_version, now: publishTime,
@@ -1171,9 +1172,10 @@ export function createApp() {
     const base = await context.env.DB.prepare(
       "SELECT s.parent_person_id, s.child_person_id FROM lineage_published_pointer p JOIN lineage_succession_snapshot s ON s.revision_id = p.revision_id WHERE p.lineage_id = ? ORDER BY s.order_key",
     ).bind(lineageId).all<SuccessionRow>();
-    if (!context.get("backupAdmissionId")) return context.json({ code: "backup_admission_missing" }, 503);
+    const admissionId = context.get("backupAdmissionId");
+    if (!admissionId) return context.json({ code: "backup_admission_missing" }, 503);
     const result = await publishSuccessionRevision(context.env.DB, {
-      admissionId: context.get("backupAdmissionId"),
+      admissionId,
       lineageId, revisionId: parsed.data.revisionId, basedOnRevisionId: parsed.data.basedOnRevisionId,
       baseEdges: base.results.map((row) => ({ parentPersonId: row.parent_person_id, childPersonId: row.child_person_id })),
       proposedEdges: parsed.data.edges, expectedPointerVersion: parsed.data.expectedPointerVersion, now: now(),
@@ -1199,9 +1201,10 @@ export function createApp() {
     if (!parsed.success) return context.json({ code: "validation_failed", message: validationMessage(parsed) }, 400);
     const lineageId = context.req.param("lineageId");
     try {
-      if (!context.get("backupAdmissionId")) return context.json({ code: "backup_admission_missing" }, 503);
+      const admissionId = context.get("backupAdmissionId");
+      if (!admissionId) return context.json({ code: "backup_admission_missing" }, 503);
       const result = await rollbackSuccessionRevision(context.env.DB, {
-        admissionId: context.get("backupAdmissionId"),
+        admissionId,
         lineageId, targetRevisionId: parsed.data.targetRevisionId, newRevisionId: parsed.data.newRevisionId,
         expectedPointerVersion: parsed.data.expectedPointerVersion, now: now(),
         audit: {

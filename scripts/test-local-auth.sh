@@ -136,6 +136,45 @@ async function frozenBatchRequests(paths) {
   for (const result of await Promise.all(pending)) { expectStatus(result, 409); assert.equal(result.body.code, "backup_write_epoch_stale"); }
 }
 
+async function repeatedFreezePublish(entry, revisionId) {
+  const gates = [crypto.randomUUID(), crypto.randomUUID()];
+  const pending = gates.map((gate) => request(entry.path, { method: "POST", cookie: entry.cookie, csrf: entry.csrf, body: entry.body, gate, gateBatch: 2 }));
+  for (const gate of gates) {
+    let ready = false;
+    for (let attempt = 0; attempt < 100; attempt += 1) {
+      if ((await (await fetch(`${baseUrl}/api/__test/fencing/${gate}`)).json()).ready) { ready = true; break; }
+      await new Promise((resolve) => setTimeout(resolve, 50));
+    }
+    assert.equal(ready, true, "publication must pause immediately before its write batch");
+  }
+  const query = `SELECT (SELECT revision_id FROM lineage_published_pointer WHERE lineage_id = '${lineageId}') AS pointer, (SELECT version FROM lineage_published_pointer WHERE lineage_id = '${lineageId}') AS version, (SELECT COUNT(*) FROM lineage_revision WHERE id = '${revisionId}') AS revisions, (SELECT COUNT(*) FROM audit_log WHERE action = 'lineage.change_request_published' AND metadata_json LIKE '%${revisionId}%') AS audits, (SELECT epoch FROM backup_write_epoch WHERE id = 1) AS epoch;`;
+  const before = localSql(query)[0];
+  const first = await request("/api/admin/backup-write-freeze", { method: "POST", cookie: adminCookie, csrf: adminCsrf, body: { reason: "第一个冻结窗口" } });
+  expectStatus(first, 201);
+  const firstReadiness = await request("/api/admin/backup-write-freeze/readiness", { cookie: adminCookie });
+  assert.equal(firstReadiness.body.freezeId, first.body.freeze.id);
+  expectStatus(await request("/api/admin/backup-write-freeze/release", { method: "POST", cookie: adminCookie, csrf: adminCsrf, body: { freezeId: first.body.freeze.id, reason: "解除第一个窗口" } }), 204);
+  const between = await request("/api/admin/backup-write-freeze/readiness", { cookie: adminCookie });
+  assert.equal(between.body.freezeId, null);
+  const second = await request("/api/admin/backup-write-freeze", { method: "POST", cookie: adminCookie, csrf: adminCsrf, body: { reason: "第二个冻结窗口" } });
+  expectStatus(second, 201);
+  assert.notEqual(second.body.freeze.id, first.body.freeze.id);
+  assert.equal(localSql(query)[0].epoch, before.epoch + 2);
+  assert.equal((await fetch(`${baseUrl}/api/__test/fencing/${gates[0]}`, { method: "POST" })).status, 204);
+  const frozenResult = await pending[0];
+  expectStatus(frozenResult, 409);
+  assert.equal(frozenResult.body.code, "backup_write_epoch_stale");
+  const secondReadiness = await request("/api/admin/backup-write-freeze/readiness", { cookie: adminCookie });
+  assert.equal(secondReadiness.body.freezeId, second.body.freeze.id);
+  expectStatus(await request("/api/admin/backup-write-freeze/release", { method: "POST", cookie: adminCookie, csrf: adminCsrf, body: { freezeId: second.body.freeze.id, reason: "解除第二个窗口" } }), 204);
+  assert.equal((await fetch(`${baseUrl}/api/__test/fencing/${gates[1]}`, { method: "POST" })).status, 204);
+  const releasedResult = await pending[1];
+  expectStatus(releasedResult, 409);
+  assert.equal(releasedResult.body.code, "backup_write_epoch_stale");
+  const after = localSql(query)[0];
+  assert.deepEqual({ ...after, epoch: before.epoch }, before);
+}
+
 function expectStatus(result, expected) {
   assert.equal(result.response.status, expected, JSON.stringify(result.body));
 }
@@ -750,6 +789,7 @@ const changeApproval = await request(`/api/admin/change-requests/${changeRequest
 expectStatus(changeApproval, 200);
 await frozenBatchRequests([{ path: `/api/admin/change-requests/${changeRequest.body.changeRequest.id}/publish`, cookie: reviewerCookie, csrf: reviewerCsrf, body: { version: changeApproval.body.version, revisionId: "66666666-6666-4666-8666-666666666666" }, gateBatch: 2 }]);
 await lifecycleAuditFailure(`/api/admin/change-requests/${changeRequest.body.changeRequest.id}/publish`, "lineage.change_request_published", "change_request", "state", changeRequest.body.changeRequest.id, "approved", { cookie: reviewerCookie, csrf: reviewerCsrf, body: { version: changeApproval.body.version, revisionId: "66666666-6666-4666-8666-666666666666" } });
+await repeatedFreezePublish({ path: `/api/admin/change-requests/${changeRequest.body.changeRequest.id}/publish`, cookie: reviewerCookie, csrf: reviewerCsrf, body: { version: changeApproval.body.version, revisionId: "66666666-6666-4666-8666-666666666666" } }, "66666666-6666-4666-8666-666666666666");
 const changePublish = await request(`/api/admin/change-requests/${changeRequest.body.changeRequest.id}/publish`, {
   method: "POST", cookie: reviewerCookie, csrf: reviewerCsrf,
   body: { version: changeApproval.body.version, revisionId: "66666666-6666-4666-8666-666666666666" },

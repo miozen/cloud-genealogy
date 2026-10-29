@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { buildRollbackEdges, rollbackSuccessionRevision } from "../worker/lineage/revision-publish";
+import { buildRollbackEdges, rollbackSuccessionRevision, type RollbackRevisionInput } from "../worker/lineage/revision-publish";
 
 describe("revision rollback", () => {
   it("reads historical snapshot edges without changing the historical revision", async () => {
@@ -19,12 +19,20 @@ describe("revision rollback", () => {
 });
 
 describe("rollback publishing", () => {
+  it("rejects a missing admission before querying", async () => {
+    let queries = 0;
+    const database = { prepare: () => { queries += 1; throw new Error("unexpected query"); } } as unknown as D1Database;
+    const input = { lineageId: "lineage", targetRevisionId: "old", newRevisionId: "new", expectedPointerVersion: 1, now: "2026-01-01T00:00:00Z", audit: { id: "a", actorAccountId: "admin", action: "rollback", objectType: "revision", objectId: "new", metadataJson: "{}" } } as unknown as RollbackRevisionInput;
+    await expect(rollbackSuccessionRevision(database, input)).rejects.toThrow("backup_admission_missing");
+    expect(queries).toBe(0);
+  });
+
   it("refuses a lineage without a current published pointer", async () => {
     const database = {
       prepare: () => ({ bind: () => ({ first: async () => null }) }),
     } as unknown as D1Database;
     await expect(rollbackSuccessionRevision(database, {
-      lineageId: "lineage", targetRevisionId: "old", newRevisionId: "new", expectedPointerVersion: 1, now: "2026-01-01T00:00:00Z",
+      admissionId: "fixture-admission", lineageId: "lineage", targetRevisionId: "old", newRevisionId: "new", expectedPointerVersion: 1, now: "2026-01-01T00:00:00Z",
       audit: { id: "audit-rollback", actorAccountId: "admin", action: "lineage.revision_rolled_back", objectType: "lineage_revision", objectId: "new", metadataJson: "{}" },
     })).rejects.toThrow("no published revision");
   });

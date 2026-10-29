@@ -70,6 +70,19 @@ const activeWriteAdmissionGuard = `EXISTS (
     AND NOT EXISTS (SELECT 1 FROM backup_write_freeze WHERE released_at IS NULL)
 )`;
 
+// The audit insert observes only the immediately preceding update in the same
+// D1 transaction. The final read distinguishes a stale admission from a
+// missing or concurrently changed business row.
+async function fencedLifecycleUpdate(context: Context<AppEnv>, statement: D1PreparedStatement, admissionId: string, actorId: string, action: string, objectType: string, objectId: string, metadata: object, timestamp: string) {
+  const results = await context.env.DB.batch([
+    statement,
+    context.env.DB.prepare("INSERT INTO audit_log (id, actor_account_id, action, object_type, object_id, metadata_json, created_at) SELECT ?, ?, ?, ?, ?, ?, ? WHERE changes() = 1")
+      .bind(crypto.randomUUID(), actorId, action, objectType, objectId, JSON.stringify(metadata), timestamp),
+    context.env.DB.prepare(`SELECT ${activeWriteAdmissionGuard} AS valid`).bind(admissionId),
+  ]);
+  return { changed: results[0]?.meta.changes === 1, valid: (results[2]?.results[0] as { valid: number } | undefined)?.valid === 1 };
+}
+
 interface AccountRow {
   id: string;
   username: string;
@@ -746,14 +759,16 @@ export function createApp() {
     if (!parsed.success) return context.json({ code: "validation_failed", message: validationMessage(parsed) }, 400);
     const id = crypto.randomUUID();
     const timestamp = now();
+    const admissionId = context.get("backupAdmissionId");
+    if (!admissionId) return context.json({ code: "backup_admission_missing" }, 503);
     try {
-      await context.env.DB.batch([
-        context.env.DB.prepare(
-          "INSERT INTO source_relation_semantic_rule (id, relation_kind, graph_kind, parent_kind, created_at) VALUES (?, ?, ?, ?, ?)",
-        ).bind(id, parsed.data.relationKind, parsed.data.graphKind, parsed.data.parentKind ?? null, timestamp),
-        context.env.DB.prepare("INSERT INTO audit_log (id, actor_account_id, action, object_type, object_id, metadata_json, created_at) VALUES (?, ?, ?, ?, ?, ?, ?)")
-          .bind(crypto.randomUUID(), auth.accountId, "source.relation_semantic_created", "source_relation_semantic_rule", id, JSON.stringify({ relationKind: parsed.data.relationKind }), timestamp),
+      const results = await context.env.DB.batch([
+        context.env.DB.prepare(`INSERT INTO source_relation_semantic_rule (id, relation_kind, graph_kind, parent_kind, created_at) SELECT ?, ?, ?, ?, ? WHERE ${activeWriteAdmissionGuard}`)
+          .bind(id, parsed.data.relationKind, parsed.data.graphKind, parsed.data.parentKind ?? null, timestamp, admissionId),
+        context.env.DB.prepare("INSERT INTO audit_log (id, actor_account_id, action, object_type, object_id, metadata_json, created_at) SELECT ?, ?, ?, ?, ?, ?, ? WHERE EXISTS (SELECT 1 FROM source_relation_semantic_rule WHERE id = ?)")
+          .bind(crypto.randomUUID(), auth.accountId, "source.relation_semantic_created", "source_relation_semantic_rule", id, JSON.stringify({ relationKind: parsed.data.relationKind }), timestamp, id),
       ]);
+      if (results[0]?.meta.changes !== 1) return context.json({ code: "backup_write_epoch_stale" }, 409);
     } catch (error) {
       if (error instanceof Error && /UNIQUE constraint failed/.test(error.message)) return context.json({ code: "relation_semantic_exists" }, 409);
       throw error;
@@ -765,9 +780,12 @@ export function createApp() {
     const auth = context.get("auth")!;
     if (!hasPermission(auth.roles, "system.manage")) return context.json({ code: "forbidden" }, 403);
     const ruleId = context.req.param("ruleId");
-    const result = await context.env.DB.prepare("UPDATE source_relation_semantic_rule SET retired_at = ? WHERE id = ? AND retired_at IS NULL").bind(now(), ruleId).run();
-    if (result.meta.changes !== 1) return context.json({ code: "relation_semantic_not_found" }, 404);
-    await writeAudit(context.env.DB, auth.accountId, "source.relation_semantic_retired", "source_relation_semantic_rule", ruleId, {});
+    const admissionId = context.get("backupAdmissionId");
+    if (!admissionId) return context.json({ code: "backup_admission_missing" }, 503);
+    const timestamp = now();
+    const result = await fencedLifecycleUpdate(context, context.env.DB.prepare(`UPDATE source_relation_semantic_rule SET retired_at = ? WHERE id = ? AND retired_at IS NULL AND ${activeWriteAdmissionGuard}`).bind(timestamp, ruleId, admissionId), admissionId, auth.accountId, "source.relation_semantic_retired", "source_relation_semantic_rule", ruleId, {}, timestamp);
+    if (!result.valid) return context.json({ code: "backup_write_epoch_stale" }, 409);
+    if (!result.changed) return context.json({ code: "relation_semantic_not_found" }, 404);
     return context.json({ retired: true });
   });
 
@@ -1595,10 +1613,12 @@ export function createApp() {
     const name = await context.env.DB.prepare("SELECT person_id, is_primary FROM person_name WHERE id = ? AND retired_at IS NULL").bind(nameId).first<{ person_id: string; is_primary: number }>();
     if (!name) return context.json({ code: "person_name_not_found" }, 404);
     if (name.is_primary) return context.json({ code: "primary_name_requires_replacement" }, 409);
-    await context.env.DB.batch([
-      context.env.DB.prepare("UPDATE person_name SET retired_at = ? WHERE id = ? AND retired_at IS NULL").bind(now(), nameId),
-      context.env.DB.prepare("INSERT INTO audit_log (id, actor_account_id, action, object_type, object_id, metadata_json, created_at) VALUES (?, ?, ?, ?, ?, ?, ?)").bind(crypto.randomUUID(), auth.accountId, "person.name_retired", "person_name", nameId, JSON.stringify({ personId: name.person_id }), now()),
-    ]);
+    const admissionId = context.get("backupAdmissionId");
+    if (!admissionId) return context.json({ code: "backup_admission_missing" }, 503);
+    const timestamp = now();
+    const result = await fencedLifecycleUpdate(context, context.env.DB.prepare(`UPDATE person_name SET retired_at = ? WHERE id = ? AND retired_at IS NULL AND is_primary = 0 AND ${activeWriteAdmissionGuard}`).bind(timestamp, nameId, admissionId), admissionId, auth.accountId, "person.name_retired", "person_name", nameId, { personId: name.person_id }, timestamp);
+    if (!result.valid) return context.json({ code: "backup_write_epoch_stale" }, 409);
+    if (!result.changed) return context.json({ code: "person_name_changed" }, 409);
     return context.json({ status: "retired" });
   });
 
@@ -1609,10 +1629,11 @@ export function createApp() {
     const fact = await context.env.DB.prepare("SELECT person_id FROM person_fact WHERE id = ? AND retired_at IS NULL").bind(factId).first<{ person_id: string }>();
     if (!fact) return context.json({ code: "person_fact_not_found" }, 404);
     const timestamp = now();
-    await context.env.DB.batch([
-      context.env.DB.prepare("UPDATE person_fact SET retired_at = ? WHERE id = ? AND retired_at IS NULL").bind(timestamp, factId),
-      context.env.DB.prepare("INSERT INTO audit_log (id, actor_account_id, action, object_type, object_id, metadata_json, created_at) VALUES (?, ?, ?, ?, ?, ?, ?)").bind(crypto.randomUUID(), auth.accountId, "person.fact_retired", "person_fact", factId, JSON.stringify({ personId: fact.person_id }), timestamp),
-    ]);
+    const admissionId = context.get("backupAdmissionId");
+    if (!admissionId) return context.json({ code: "backup_admission_missing" }, 503);
+    const result = await fencedLifecycleUpdate(context, context.env.DB.prepare(`UPDATE person_fact SET retired_at = ? WHERE id = ? AND retired_at IS NULL AND ${activeWriteAdmissionGuard}`).bind(timestamp, factId, admissionId), admissionId, auth.accountId, "person.fact_retired", "person_fact", factId, { personId: fact.person_id }, timestamp);
+    if (!result.valid) return context.json({ code: "backup_write_epoch_stale" }, 409);
+    if (!result.changed) return context.json({ code: "person_fact_not_found" }, 404);
     return context.json({ status: "retired" });
   });
 
@@ -1633,10 +1654,11 @@ export function createApp() {
     const use = await context.env.DB.prepare("SELECT 1 FROM person_fact WHERE place_id = ? AND retired_at IS NULL LIMIT 1").bind(placeId).first();
     if (use) return context.json({ code: "place_in_use" }, 409);
     const timestamp = now();
-    await context.env.DB.batch([
-      context.env.DB.prepare("UPDATE place SET retired_at = ? WHERE id = ? AND retired_at IS NULL").bind(timestamp, placeId),
-      context.env.DB.prepare("INSERT INTO audit_log (id, actor_account_id, action, object_type, object_id, metadata_json, created_at) VALUES (?, ?, ?, ?, ?, ?, ?)").bind(crypto.randomUUID(), auth.accountId, "place.retired", "place", placeId, "{}", timestamp),
-    ]);
+    const admissionId = context.get("backupAdmissionId");
+    if (!admissionId) return context.json({ code: "backup_admission_missing" }, 503);
+    const result = await fencedLifecycleUpdate(context, context.env.DB.prepare(`UPDATE place SET retired_at = ? WHERE id = ? AND retired_at IS NULL AND NOT EXISTS (SELECT 1 FROM person_fact WHERE place_id = ? AND retired_at IS NULL) AND ${activeWriteAdmissionGuard}`).bind(timestamp, placeId, placeId, admissionId), admissionId, auth.accountId, "place.retired", "place", placeId, {}, timestamp);
+    if (!result.valid) return context.json({ code: "backup_write_epoch_stale" }, 409);
+    if (!result.changed) return context.json({ code: "place_changed_or_in_use" }, 409);
     return context.json({ status: "retired" });
   });
 
@@ -1790,9 +1812,11 @@ export function createApp() {
     const claimId = context.req.param("claimId");
     if (!claimId) return context.json({ code: "not_found" }, 404);
     const timestamp = now();
-    const result = await context.env.DB.prepare(`UPDATE ${table} SET retracted_at = ? WHERE id = ? AND retracted_at IS NULL`).bind(timestamp, claimId).run();
-    if (result.meta.changes !== 1) return context.json({ code: "source_claim_not_found" }, 404);
-    await writeAudit(context.env.DB, auth.accountId, "source.claim_retracted", table, claimId, { claimKind });
+    const admissionId = context.get("backupAdmissionId");
+    if (!admissionId) return context.json({ code: "backup_admission_missing" }, 503);
+    const result = await fencedLifecycleUpdate(context, context.env.DB.prepare(`UPDATE ${table} SET retracted_at = ? WHERE id = ? AND retracted_at IS NULL AND ${activeWriteAdmissionGuard}`).bind(timestamp, claimId, admissionId), admissionId, auth.accountId, "source.claim_retracted", table, claimId, { claimKind }, timestamp);
+    if (!result.valid) return context.json({ code: "backup_write_epoch_stale" }, 409);
+    if (!result.changed) return context.json({ code: "source_claim_not_found" }, 404);
     return context.json({ status: "retracted" });
   };
   app.post("/api/admin/source-fact-claims/:claimId/retract", requireAuthentication, retractSourceClaim("source_fact_claim", "fact"));

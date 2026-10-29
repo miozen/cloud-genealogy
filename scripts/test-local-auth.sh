@@ -290,6 +290,17 @@ const personDetail = await request(`/api/admin/persons/${personResult.body.perso
 expectStatus(personDetail, 200);
 assert.equal(personDetail.body.names.length, 2);
 assert.equal(personDetail.body.facts.length, 1);
+// Audit failures must roll back each lifecycle change, and duplicate requests
+// must produce one state transition and one audit record.
+async function lifecycleAuditFailure(path, action, table, column, id) {
+  const sql = (command) => execFileSync("npx", ["wrangler", "d1", "execute", "DB", "--local", "--persist-to", ".wrangler/local-auth-integration", "--command", command, "--json"], { encoding: "utf8" });
+  sql(`CREATE TRIGGER local_lifecycle_audit_failure BEFORE INSERT ON audit_log WHEN NEW.action = '${action}' BEGIN SELECT RAISE(ABORT, 'injected lifecycle audit failure'); END;`);
+  expectStatus(await request(path, { method: "POST", cookie: adminCookie, csrf: adminCsrf }), 500);
+  assert.equal(JSON.parse(sql(`SELECT ${column} AS value FROM ${table} WHERE id = '${id}';`))[0].results[0].value, null);
+  sql("DROP TRIGGER local_lifecycle_audit_failure;");
+}
+await lifecycleAuditFailure(`/api/admin/person-names/${aliasName.body.personName.id}/retire`, "person.name_retired", "person_name", "retired_at", aliasName.body.personName.id);
+await lifecycleAuditFailure(`/api/admin/person-facts/${personFact.body.personFact.id}/retire`, "person.fact_retired", "person_fact", "retired_at", personFact.body.personFact.id);
 expectStatus(await request(`/api/admin/person-names/${aliasName.body.personName.id}/retire`, {
   method: "POST", cookie: adminCookie, csrf: adminCsrf,
 }), 200);
@@ -303,6 +314,7 @@ assert.equal(retiredDetail.body.facts.length, 0);
 const places = await request("/api/admin/places?query=%E6%9C%AC%E5%9C%B0%E6%B5%8B%E8%AF%95%E6%9D%91", { cookie: adminCookie });
 expectStatus(places, 200);
 assert.equal(places.body.places.length, 1);
+await lifecycleAuditFailure(`/api/admin/places/${personFact.body.personFact.placeId}/retire`, "place.retired", "place", "retired_at", personFact.body.personFact.placeId);
 expectStatus(await request(`/api/admin/places/${personFact.body.personFact.placeId}/retire`, {
   method: "POST", cookie: adminCookie, csrf: adminCsrf,
 }), 200);
@@ -391,6 +403,13 @@ assert.deepEqual(historicalProjection.body.projection.parentChildEdges, [{
   rawText: "父某某",
 }]);
 assert.equal(historicalProjection.body.projection.nodes.find((node) => node.sourceRecordId === relatedSourceRecord.body.sourcePersonRecord.id).confirmedPersonId, null);
+await lifecycleAuditFailure(`/api/admin/source-relation-semantics/${semanticRule.body.rule.id}/retire`, "source.relation_semantic_retired", "source_relation_semantic_rule", "retired_at", semanticRule.body.rule.id);
+await lifecycleAuditFailure(`/api/admin/source-relation-claims/${sourceRelationClaim.body.sourceRelationClaim.id}/retract`, "source.claim_retracted", "source_relation_claim", "retracted_at", sourceRelationClaim.body.sourceRelationClaim.id);
+await lifecycleAuditFailure(`/api/admin/source-fact-claims/${sourceFactClaim.body.sourceFactClaim.id}/retract`, "source.claim_retracted", "source_fact_claim", "retracted_at", sourceFactClaim.body.sourceFactClaim.id);
+const simultaneousRetractions = await Promise.all(Array.from({ length: 2 }, () => request(`/api/admin/source-fact-claims/${sourceFactClaim.body.sourceFactClaim.id}/retract`, { method: "POST", cookie: adminCookie, csrf: adminCsrf })));
+assert.deepEqual(simultaneousRetractions.map((result) => result.response.status).sort(), [200, 404]);
+const retractAuditCount = JSON.parse(execFileSync("npx", ["wrangler", "d1", "execute", "DB", "--local", "--persist-to", ".wrangler/local-auth-integration", "--command", `SELECT COUNT(*) AS n FROM audit_log WHERE action = 'source.claim_retracted' AND object_id = '${sourceFactClaim.body.sourceFactClaim.id}';`, "--json"], { encoding: "utf8" }))[0].results[0].n;
+assert.equal(retractAuditCount, 1);
 expectStatus(await request(`/api/admin/source-relation-semantics/${semanticRule.body.rule.id}/retire`, {
   method: "POST", cookie: adminCookie, csrf: adminCsrf,
 }), 200);
@@ -1113,6 +1132,7 @@ function delayedWrite(path, body) {
 const delayedWrites = [
   delayedWrite(`/api/admin/persons/${personResult.body.person.id}/names`, { nameText: "旧代次主名", nameKind: "genealogy", isPrimary: true, visibility: "MEMBER" }),
   delayedWrite(`/api/admin/persons/${personResult.body.person.id}/facts`, { factKind: "birth", placeName: "旧代次地点", visibility: "MEMBER" }),
+  delayedWrite("/api/admin/source-relation-semantics", { relationKind: "biological_parent", graphKind: "child_to_parent", parentKind: "biological_parent" }),
   delayedWrite("/api/admin/genealogies", { title: "旧代次谱书" }),
   delayedWrite(`/api/admin/genealogies/${genealogy.body.genealogy.id}/editions`, { title: "旧代次版本" }),
   delayedWrite(`/api/admin/genealogy-editions/${edition.body.edition.id}/source-person-records`, { rawText: "旧代次来源人物" }),

@@ -28,6 +28,18 @@ function reportValid(report, scope) {
   return exactKeys(report, ["evidence", "sha256"]) && exactKeys(report.evidence, ["version", "fixtureOnly", "attemptId", "recordedState", "windowState", "expectedDirectory", "observedDirectory", "marker", "audit", "outcome", "remoteExecutionAvailable"]) && report.evidence.fixtureOnly === true && report.evidence.version === 1 && report.evidence.attemptId === scope.attemptId && report.evidence.outcome === "review_required" && report.evidence.remoteExecutionAvailable === false && typeof report.sha256 === "string" && report.sha256 === digest(JSON.stringify(report.evidence));
 }
 
+// Stateless cryptographic check for test fixtures; it does not consume a challenge.
+export function verifyFixtureSignature(publicKey, envelope, expectedScope, expectedChallenge) {
+  try {
+    if (!publicKey || publicKey.type !== "public" || publicKey.asymmetricKeyType !== "ed25519" || !scopeValid(expectedScope) || typeof expectedChallenge !== "string" || !challengePattern.test(expectedChallenge)) return false;
+    if (!exactKeys(envelope, ["payload", "signature"]) || typeof envelope.signature !== "string" || !hexSignature.test(envelope.signature)) return false;
+    const p = envelope.payload;
+    if (!exactKeys(p, ["protocol", "scope", "challenge", "report"]) || p.protocol !== protocol || !scopeValid(p.scope) || p.challenge !== expectedChallenge || canonical(expectedScope) !== canonical(p.scope) || !reportValid(p.report, p.scope)) return false;
+    return verify(null, bytes(p), publicKey, Buffer.from(envelope.signature, "hex"));
+  } catch { return false; }
+}
+export function isFixtureScope(scope) { return scopeValid(scope); }
+
 // New in-memory keypair for each isolated test; private key is never exported.
 export function createFixtureSigner() {
   const { privateKey, publicKey } = generateKeyPairSync("ed25519");
@@ -55,13 +67,9 @@ export function createFixtureVerifier(publicKey, { challengeFactory = () => rand
     },
     verifyOnce(envelope) {
       try {
-        if (!exactKeys(envelope, ["payload", "signature"]) || typeof envelope.signature !== "string" || !hexSignature.test(envelope.signature)) return false;
-        const p = envelope.payload;
-        if (!exactKeys(p, ["protocol", "scope", "challenge", "report"]) || p.protocol !== protocol || !scopeValid(p.scope) || typeof p.challenge !== "string" || !challengePattern.test(p.challenge)) return false;
-        const expected = pending.get(p.challenge);
-        if (!expected || canonical(expected) !== canonical(p.scope) || !reportValid(p.report, p.scope)) return false;
-        if (!verify(null, bytes(p), publicKey, Buffer.from(envelope.signature, "hex"))) return false;
-        pending.delete(p.challenge); return true;
+        const challenge = envelope?.payload?.challenge; const expected = pending.get(challenge);
+        if (!expected || !verifyFixtureSignature(publicKey, envelope, expected, challenge)) return false;
+        pending.delete(challenge); return true;
       } catch { return false; }
     },
   };

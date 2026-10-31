@@ -8,6 +8,10 @@ process.on("message", ({ id, kind, before, after }) => {
   else if (kind === "check") ok = current !== null && pending === null && current === before;
   else if (kind === "prepare" && current !== null && pending === null && current === before && digest(after) && after !== before) { pending = { before, after }; ok = true; }
   else if (kind === "finalize" && pending !== null && pending.before === before && pending.after === after) { current = after; pending = null; ok = true; }
+  else if (kind === "inspect") {
+    const comparison = pending === null ? "unavailable" : before === pending.before ? "matches_before" : before === pending.after ? "matches_after" : "mismatch";
+    process.send({ id, comparison }); return;
+  }
   else if (kind === "status") { process.send({ id, state: current === null ? "uninitialized" : pending ? "pending" : "ready" }); return; }
   process.send({ id, ok });
 });

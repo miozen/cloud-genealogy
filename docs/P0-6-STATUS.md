@@ -174,3 +174,7 @@
 ## 2026-10-31：本地挑战账本的独立测试锚点
 
 新增独立监督器内存摘要与测试工作进程；受控消费在 SQLite 写锁内核对摘要，提交前先记录 pending，提交后再推进锚点，跨边界中断保守阻塞。测试覆盖工作进程重启、监督器丢失、并发、提交前后 SIGKILL、库回退、schema 修改以及锚点重置反例。该实验未接管旧 `consume`/`issue`，测试已证明旧路径可绕过；监督器/IPC 无可信隔离，新基线可被重新设置。没有真实信任锚、审批或远程执行。详见 `P0-6-LOCAL-ORPHAN-ANCHOR-FIXTURE.md`。
+
+## 2026-10-31：本地挑战受控签发与 pending 观察
+
+本地锚点夹具新增受控签发，与受控消费共用 SQLite 锁、监督器准备及提交后推进；受控签发/消费竞争和签发审计失败均有独立进程测试。pending 观察只比较当前摘要与 before/after，返回 blocked，不能解锁。测试展示提交后恢复旧库也能表现为 matches_before；旧 issue/consume、直接 SQL 和 bootstrap 仍可绕过或破坏实验边界，没有真实审批、可信锚点或远程执行。详见 `P0-6-LOCAL-ORPHAN-CONTROLLED-OPERATIONS.md`。

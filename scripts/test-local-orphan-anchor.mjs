@@ -18,7 +18,7 @@ function setup() {
   const attempt = orphan.fixture.plan("window"); mkdirSync(attempt.output); orphan.fixture.attest(attempt.id, attempt.nonce); model.restart();
   const report = observeLocalOrphan(orphan.fixture, attempt.id); const scope = { runId: randomUUID(), rootId: randomUUID(), attemptId: attempt.id };
   const signer = createFixtureSigner(); const holder = createLocalChallengeFixture(signer.publicKey); const challenge = holder.fixture.issue(scope);
-  return { orphan, attempt, scope, signer, ...holder, challenge, envelope: signer.signObservation(scope, challenge, report), dispose() { this.fixture.close(); rmSync(this.root, { recursive: true, force: true }); orphan.fixture.close(); rmSync(orphan.root, { recursive: true, force: true }); } };
+  return { orphan, attempt, scope, report, signer, ...holder, challenge, envelope: signer.signObservation(scope, challenge, report), dispose() { this.fixture.close(); rmSync(this.root, { recursive: true, force: true }); orphan.fixture.close(); rmSync(orphan.root, { recursive: true, force: true }); } };
 }
 function makeSupervisor() {
   const child = spawn(process.execPath, [path.resolve("scripts/local-orphan-anchor-supervisor-child.mjs")], { stdio: ["ignore", "ignore", "pipe", "ipc"] });
@@ -34,7 +34,7 @@ function makeSupervisor() {
   });
   return { child, ready, closed, rpc, async stop() { if (child.exitCode === null && child.signalCode === null) child.kill("SIGTERM"); await closed; } };
 }
-function makeWorker(x, supervisor, phase = "", envelope = x.envelope) {
+function makeWorker(x, supervisor, phase = "", envelope = x.envelope, operation = "consume", scope = x.scope) {
   const child = spawn(process.execPath, [path.resolve("scripts/local-orphan-anchor-worker-child.mjs")], { stdio: ["ignore", "pipe", "pipe", "ipc"] });
   let stdout = "", stderr = "", readyResolve;
   child.stdout.on("data", (chunk) => { stdout += chunk.toString(); }); child.stderr.on("data", (chunk) => { stderr += chunk.toString(); });
@@ -43,13 +43,13 @@ function makeWorker(x, supervisor, phase = "", envelope = x.envelope) {
   child.on("exit", () => readyResolve());
   child.on("message", async (message) => {
     if (message.kind === "ready") readyResolve();
-    if (message.kind === "rpc") { const result = await supervisor.rpc(message.method, message.before, message.after); if (child.connected) child.send({ kind: "reply", id: message.id, ok: result.ok === true }, () => {}); }
+    if (message.kind === "rpc") { const result = await supervisor.rpc(message.method, message.before, message.after); if (child.connected) child.send({ kind: "reply", id: message.id, ok: result.ok === true, comparison: result.comparison }, () => {}); }
   });
-  child.send({ kind: "init", root: x.root, capability: x.capability, publicKey: x.signer.publicKey.export({ format: "pem", type: "spki" }), envelope, phase });
+  child.send({ kind: "init", root: x.root, capability: x.capability, publicKey: x.signer.publicKey.export({ format: "pem", type: "spki" }), envelope, phase, operation, scope });
   return { child, ready, closed, get stdout() { return stdout; }, get stderr() { return stderr; } };
 }
-async function runWorker(x, supervisor) {
-  const worker = makeWorker(x, supervisor); await worker.ready;
+async function runWorker(x, supervisor, operation = "consume", envelope = x.envelope) {
+  const worker = makeWorker(x, supervisor, "", envelope, operation); await worker.ready;
   if (!worker.child.connected) throw new Error(`worker failed: ${worker.stderr}`);
   worker.child.send({ kind: "go" }); const result = await worker.closed;
   assert.equal(result.code, 0, result.stderr); return JSON.parse(result.stdout.trim());
@@ -99,6 +99,61 @@ test("database state or audit tampering invalidates anchor without consuming", a
   } finally { await anchor.stop(); x.dispose(); }
 });
 
+test("guarded issue advances the anchor and its challenge can be signed and consumed", async () => {
+  const x = setup(); const anchor = await boot(x);
+  try {
+    const issued = await runWorker(x, anchor, "issue"); assert.match(issued.challenge, /^[0-9a-f]{64}$/u); assert.notEqual(issued.challenge, x.challenge);
+    assert.equal(x.fixture.db.prepare("SELECT COUNT(*) n FROM fixture_challenge").get().n, 2);
+    const envelope = x.signer.signObservation(x.scope, issued.challenge, x.report);
+    assert.deepEqual(await runWorker(x, anchor, "consume", envelope), { accepted: true });
+    assert.deepEqual(await runWorker(x, anchor), { accepted: true });
+    assert.equal((await anchor.rpc("check", challengeLedgerDigest(x.fixture.db))).ok, true);
+  } finally { await anchor.stop(); x.dispose(); }
+});
+
+test("guarded issue audit failure rolls back and leaves the existing challenge usable", async () => {
+  const x = setup(); x.fixture.db.exec("CREATE TRIGGER injected_issue_failure BEFORE INSERT ON fixture_challenge_audit WHEN NEW.action='issued' BEGIN SELECT RAISE(ABORT,'injected_issue_failure'); END;");
+  const anchor = await boot(x);
+  try {
+    assert.deepEqual(await runWorker(x, anchor, "issue"), { error: "injected_issue_failure" });
+    assert.equal(x.fixture.db.prepare("SELECT COUNT(*) n FROM fixture_challenge").get().n, 1);
+    assert.equal((await anchor.rpc("status")).state, "ready"); assert.deepEqual(await runWorker(x, anchor), { accepted: true });
+  } finally { await anchor.stop(); x.dispose(); }
+});
+
+test("pending inspection without a pending or available anchor refuses without mutation", async () => {
+  const x = setup(); const anchor = await boot(x); let fresh;
+  try {
+    assert.deepEqual(await runWorker(x, anchor, "inspect"), { error: "anchor_inspect_unavailable" });
+    anchor.child.kill("SIGKILL"); await anchor.closed; fresh = makeSupervisor(); await fresh.ready;
+    assert.deepEqual(await runWorker(x, fresh, "inspect"), { error: "anchor_inspect_unavailable" });
+    assert.equal(consumed(x), 0); assert.equal(x.fixture.db.prepare("SELECT COUNT(*) n FROM fixture_challenge").get().n, 1);
+  } finally { if (fresh) await fresh.stop(); x.dispose(); }
+});
+
+test("unguarded issue or direct SQL changes drift the anchor and block guarded operations", async () => {
+  for (const change of ["issue", "sql"]) {
+    const x = setup(); const anchor = await boot(x);
+    try {
+      if (change === "issue") x.fixture.issue(x.scope);
+      else x.fixture.db.prepare("UPDATE fixture_challenge SET consumed=1 WHERE challenge=?").run(x.challenge);
+      assert.deepEqual(await runWorker(x, anchor, "issue"), { error: "anchor_state_unavailable_or_mismatch" });
+      assert.deepEqual(await runWorker(x, anchor), { error: "anchor_state_unavailable_or_mismatch" });
+    } finally { await anchor.stop(); x.dispose(); }
+  }
+});
+
+test("guarded issue and consume in independent processes serialize and preserve the anchor", async () => {
+  const x = setup(); const anchor = await boot(x); const workers = [makeWorker(x, anchor, "", x.envelope, "issue"), makeWorker(x, anchor)];
+  try {
+    await Promise.all(workers.map((worker) => worker.ready)); workers.forEach((worker) => worker.child.send({ kind: "go" }));
+    const result = await Promise.all(workers.map((worker) => worker.closed)); assert.deepEqual(result.map((r) => r.code), [0, 0]);
+    assert.match(JSON.parse(result[0].stdout).challenge, /^[0-9a-f]{64}$/u); assert.deepEqual(JSON.parse(result[1].stdout), { accepted: true });
+    assert.equal(consumed(x), 1); assert.equal(x.fixture.db.prepare("SELECT COUNT(*) n FROM fixture_challenge").get().n, 2);
+    assert.equal((await anchor.rpc("check", challengeLedgerDigest(x.fixture.db))).ok, true);
+  } finally { for (const worker of workers) if (worker.child.exitCode === null && worker.child.signalCode === null) worker.child.kill("SIGKILL"); await Promise.all(workers.map((worker) => worker.closed)); await anchor.stop(); x.dispose(); }
+});
+
 test("two independent guarded workers race; one consumes and the other refuses replay", async () => {
   const x = setup(); const anchor = await boot(x); const workers = [makeWorker(x, anchor), makeWorker(x, anchor)];
   try {
@@ -139,10 +194,51 @@ for (const phase of ["before_commit", "after_commit"]) {
       await worker.ready; worker.child.send({ kind: "go" }); await waitCheckpoint(worker, phase);
       worker.child.kill("SIGKILL"); assert.equal((await worker.closed).signal, "SIGKILL");
       assert.equal((await anchor.rpc("status")).state, "pending"); assert.equal(consumed(x), phase === "before_commit" ? 0 : 1);
+      const inspection = { comparison: phase === "before_commit" ? "matches_before" : "matches_after", disposition: "blocked", remoteExecutionAvailable: false };
+      assert.deepEqual(await runWorker(x, anchor, "inspect"), { inspection });
+      assert.deepEqual(await runWorker(x, anchor, "inspect"), { inspection }); assert.equal((await anchor.rpc("status")).state, "pending");
       assert.deepEqual(await runWorker(x, anchor), { error: "anchor_state_unavailable_or_mismatch" });
     } finally { if (worker.child.exitCode === null && worker.child.signalCode === null) { worker.child.kill("SIGKILL"); await worker.closed; } await anchor.stop(); x.dispose(); }
   });
 }
+
+for (const phase of ["before_commit", "after_commit"]) {
+  test(`guarded issue SIGKILL ${phase} leaves inspectable pending and never releases challenge`, async () => {
+    const x = setup(); const anchor = await boot(x); const worker = makeWorker(x, anchor, phase, x.envelope, "issue");
+    try {
+      await worker.ready; worker.child.send({ kind: "go" }); await waitCheckpoint(worker, phase);
+      worker.child.kill("SIGKILL"); assert.equal((await worker.closed).signal, "SIGKILL");
+      assert.equal(x.fixture.db.prepare("SELECT COUNT(*) n FROM fixture_challenge").get().n, phase === "before_commit" ? 1 : 2);
+      assert.deepEqual(await runWorker(x, anchor, "inspect"), { inspection: { comparison: phase === "before_commit" ? "matches_before" : "matches_after", disposition: "blocked", remoteExecutionAvailable: false } });
+      assert.equal((await anchor.rpc("status")).state, "pending");
+      assert.deepEqual(await runWorker(x, anchor, "issue"), { error: "anchor_state_unavailable_or_mismatch" });
+    } finally { if (worker.child.exitCode === null && worker.child.signalCode === null) { worker.child.kill("SIGKILL"); await worker.closed; } await anchor.stop(); x.dispose(); }
+  });
+}
+
+test("unknown drift while pending is inspectable as mismatch and cannot clear pending", async () => {
+  const x = setup(); const anchor = await boot(x); const worker = makeWorker(x, anchor, "before_commit");
+  try {
+    await worker.ready; worker.child.send({ kind: "go" }); await waitCheckpoint(worker, "before_commit"); worker.child.kill("SIGKILL"); await worker.closed;
+    x.fixture.issue(x.scope);
+    assert.deepEqual(await runWorker(x, anchor, "inspect"), { inspection: { comparison: "mismatch", disposition: "blocked", remoteExecutionAvailable: false } });
+    assert.equal((await anchor.rpc("status")).state, "pending");
+    assert.deepEqual(await runWorker(x, anchor), { error: "anchor_state_unavailable_or_mismatch" });
+  } finally { if (worker.child.exitCode === null && worker.child.signalCode === null) { worker.child.kill("SIGKILL"); await worker.closed; } await anchor.stop(); x.dispose(); }
+});
+
+test("a rollback after commit can look like before: inspection is not proof of transaction history", async () => {
+  const x = setup(); const anchor = await boot(x); const snapshot = path.join(x.root, "old.sqlite");
+  x.fixture.close(); copyFileSync(path.join(x.root, "challenge.sqlite"), snapshot); x.fixture = reopenLocalChallengeFixture(x.root, x.capability, x.signer.publicKey);
+  const worker = makeWorker(x, anchor, "after_commit");
+  try {
+    await worker.ready; worker.child.send({ kind: "go" }); await waitCheckpoint(worker, "after_commit"); worker.child.kill("SIGKILL"); await worker.closed;
+    assert.equal(consumed(x), 1); x.fixture.close(); copyFileSync(snapshot, path.join(x.root, "challenge.sqlite")); x.fixture = reopenLocalChallengeFixture(x.root, x.capability, x.signer.publicKey);
+    assert.equal(consumed(x), 0);
+    assert.deepEqual(await runWorker(x, anchor, "inspect"), { inspection: { comparison: "matches_before", disposition: "blocked", remoteExecutionAvailable: false } });
+    assert.equal((await anchor.rpc("status")).state, "pending"); assert.deepEqual(await runWorker(x, anchor), { error: "anchor_state_unavailable_or_mismatch" });
+  } finally { if (worker.child.exitCode === null && worker.child.signalCode === null) { worker.child.kill("SIGKILL"); await worker.closed; } await anchor.stop(); x.dispose(); }
+});
 
 test("a fresh supervisor bootstrapped from a rolled-back database permits replay: anchor reset counterexample", async () => {
   const x = setup(); const anchor = await boot(x); let reset; const snapshot = path.join(x.root, "old.sqlite");

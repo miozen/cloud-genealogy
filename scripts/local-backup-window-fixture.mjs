@@ -122,9 +122,14 @@ export class LocalBackupWindowFixture {
       return { step, alreadyFinished: false };
     }, beforeCommit);
   }
-  finishWindow(id, owner, now) {
+  finishWindow(id, owner, now, publish = () => {}) {
     return this.checked(id, owner, now, (item) => {
       if (item.inflight || item.step_index !== steps.length) return { error: "steps_incomplete" };
+      // Only a local fixture may run this synchronous callback while the
+      // SQLite write transaction prevents a concurrent fixture release.
+      if (publish.constructor?.name === "AsyncFunction") throw new Error("async_publication_forbidden");
+      const result = publish();
+      if (result && typeof result.then === "function") throw new Error("async_publication_forbidden");
       this.db.prepare("UPDATE fixture_backup_window SET state='completed' WHERE id=?").run(id);
       this.audit(id, "completed", "fixture-only");
       return { state: "completed", remoteExecutionAvailable: false };

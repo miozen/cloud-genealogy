@@ -15,30 +15,39 @@ export function requireQuiescence(snapshot, expectedFreezeId) {
 }
 
 // Only injected local test adapters are supported. The CLI remains disabled.
-export async function runMockBackup({ output, migrationDir, gitCommit, adapter, freezeId }) {
+export async function runMockBackup({ output, migrationDir, gitCommit, adapter, freezeId, fixtureStage }) {
   if (!path.isAbsolute(output) || !path.isAbsolute(migrationDir)) throw new Error("Absolute paths required.");
+  // Optional injection is solely for isolated mock fixtures, not a remote adapter.
+  const stage = fixtureStage ?? (async (_name, operation) => operation());
   requireQuiescence(await adapter.quiescence(), freezeId);
   await mkdir(output, { mode: 0o700 });
   try {
     const packageDir = path.join(output, "package");
     await mkdir(path.join(packageDir, "d1"), { recursive: true, mode: 0o700 });
-    await adapter.exportD1(path.join(packageDir, "d1", "schema-and-data.sql"));
-    const inventory = await adapter.inventory();
-    if (inventory?.formatVersion !== 2 || inventory.source !== "local_d1" || !Array.isArray(inventory.mediaAssets)) throw new Error("Invalid fixture inventory.");
-    for (const asset of inventory.mediaAssets) {
-      if (!/^media\/[a-zA-Z0-9_-]+$/u.test(asset.objectKey)) throw new Error("Unsafe object key.");
-      const objectPath = path.join(packageDir, "r2", asset.objectKey);
-      await mkdir(path.dirname(objectPath), { recursive: true, mode: 0o700 });
-      await adapter.downloadObject(asset.objectKey, objectPath);
-    }
-    // Catch an invalidated freeze or newly observed activity before manifest.
-    requireQuiescence(await adapter.quiescence(), freezeId);
-    const countsFile = path.join(output, "counts.json");
-    await writeFile(countsFile, JSON.stringify(inventory), { flag: "wx", mode: 0o600 });
-    const script = path.join(import.meta.dirname, "backup-package.mjs");
-    await execute(process.execPath, [script, "create", "--package", packageDir, "--migration-dir", migrationDir, "--source-environment", "local", "--git-commit", gitCommit, "--counts-file", countsFile]);
-    await execute(process.execPath, [script, "verify", "--package", packageDir, "--migration-dir", migrationDir]);
-    return JSON.parse(await readFile(path.join(packageDir, "manifest.json"), "utf8"));
+    await stage("d1_export", () => adapter.exportD1(path.join(packageDir, "d1", "schema-and-data.sql")));
+    const inventory = await stage("media_inventory", async () => {
+      const result = await adapter.inventory();
+      if (result?.formatVersion !== 2 || result.source !== "local_d1" || !Array.isArray(result.mediaAssets)) throw new Error("Invalid fixture inventory.");
+      return result;
+    });
+    await stage("media_download", async () => {
+      for (const asset of inventory.mediaAssets) {
+        if (!/^media\/[a-zA-Z0-9_-]+$/u.test(asset.objectKey)) throw new Error("Unsafe object key.");
+        const objectPath = path.join(packageDir, "r2", asset.objectKey);
+        await mkdir(path.dirname(objectPath), { recursive: true, mode: 0o700 });
+        await adapter.downloadObject(asset.objectKey, objectPath);
+      }
+    });
+    await stage("verify", async () => {
+      // Catch an invalidated freeze or newly observed activity before manifest.
+      requireQuiescence(await adapter.quiescence(), freezeId);
+      const countsFile = path.join(output, "counts.json");
+      await writeFile(countsFile, JSON.stringify(inventory), { flag: "wx", mode: 0o600 });
+      const script = path.join(import.meta.dirname, "backup-package.mjs");
+      await execute(process.execPath, [script, "create", "--package", packageDir, "--migration-dir", migrationDir, "--source-environment", "local", "--git-commit", gitCommit, "--counts-file", countsFile]);
+      await execute(process.execPath, [script, "verify", "--package", packageDir, "--migration-dir", migrationDir]);
+    });
+    return await stage("finalize", async () => JSON.parse(await readFile(path.join(packageDir, "manifest.json"), "utf8")));
   } catch (error) {
     await rm(output, { recursive: true, force: true });
     throw error;

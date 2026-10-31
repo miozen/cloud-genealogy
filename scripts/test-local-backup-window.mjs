@@ -36,6 +36,15 @@ test("ordered steps complete only in the same synthetic window; remote stays dis
   db.close();
 });
 
+test("asynchronous publish callbacks cannot commit a false window completion", () => {
+  const { db, m } = setup(); let now = 4;
+  for (const step of steps) { m.startStep("window", "owner", step, now++); m.finishStep("window", "owner", step, now++); }
+  assert.throws(() => m.finishWindow("window", "owner", now, async () => {}), /async_publication_forbidden/u);
+  assert.equal(m.window("window").state, "held");
+  assert.equal(db.prepare("SELECT COUNT(*) AS n FROM fixture_window_audit WHERE action='completed'").get().n, 0);
+  db.close();
+});
+
 test("release invalidates a held window and keeps invalidation in audit", () => {
   const { db, m } = setup(); m.startStep("window", "owner", steps[0], 4); m.release("freeze", 5);
   assertInvalid(m, "freeze_released");

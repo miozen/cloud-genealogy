@@ -96,6 +96,44 @@ test("a change between checks is detected and failure stays auditable", () => {
   } finally { x.dispose(); }
 });
 
+test("replacement of the attempt directory during anchored cleanup never follows the replacement", () => {
+  const x = setup(); const outside = mkdtempSync(path.join(tmpdir(), "cg-orphan-swap-"));
+  try {
+    const keep = path.join(outside, "counts.json"); writeFileSync(keep, "keep");
+    assert.throws(() => x.fixture.recover(x.attempt.id, { beforeEntry: () => {
+      renameSync(x.attempt.output, path.join(x.root, "displaced")); symlinkSync(outside, x.attempt.output);
+    } }), /fixture_directory_changed/u);
+    assert.equal(readFileSync(keep, "utf8"), "keep"); assert.equal(x.fixture.record(x.attempt.id).state, "failed");
+    assert.equal(audit(x.fixture, x.attempt.id, "cleanup_completed"), 0);
+  } finally { x.dispose(); rmSync(outside, { recursive: true, force: true }); }
+});
+
+test("replaced leaf is refused and a no-op remover cannot claim cleanup completed", () => {
+  const x = setup(); try {
+    const target = path.join(x.attempt.output, ".fixture-staging", "counts.json");
+    assert.throws(() => x.fixture.recover(x.attempt.id, { beforeEntry: (entry) => {
+      if (entry.endsWith("counts.json")) { unlinkSync(target); symlinkSync("/dev/null", target); }
+    } }), /fixture_entry_changed/u);
+    assert.equal(audit(x.fixture, x.attempt.id, "cleanup_completed"), 0);
+    unlinkSync(target); writeFileSync(target, "fixture");
+    assert.throws(() => x.fixture.recover(x.attempt.id, { remove: () => {} }), /cleanup_output_remains/u);
+    assert.equal(x.fixture.record(x.attempt.id).state, "failed"); assert.equal(audit(x.fixture, x.attempt.id, "cleanup_completed"), 0);
+    assert.equal(x.fixture.recover(x.attempt.id).state, "cleaned");
+  } finally { x.dispose(); }
+});
+
+test("an attempt moved away during a failed cleanup cannot be mistaken for completed deletion", () => {
+  const x = setup(); try {
+    assert.throws(() => x.fixture.recover(x.attempt.id, { beforeEntry: () => {
+      renameSync(x.attempt.output, path.join(x.root, "displaced"));
+    } }), /ENOENT/u);
+    assert.equal(x.fixture.record(x.attempt.id).state, "failed");
+    assert.equal(audit(x.fixture, x.attempt.id, "cleanup_failed"), 1); assert.equal(audit(x.fixture, x.attempt.id, "cleanup_completed"), 0);
+    assert.throws(() => x.fixture.recover(x.attempt.id), /attempt_missing_without_cleanup_intent/u);
+    assert.equal(existsSync(path.join(x.root, "displaced", ".fixture-owner.json")), true);
+  } finally { x.dispose(); }
+});
+
 test("failed removal is auditable and can be retried without duplicate completion", () => {
   const x = setup(); try {
     assert.throws(() => x.fixture.recover(x.attempt.id, { remove: () => { throw new Error("injected_remove_failure"); } }), /injected_remove_failure/u);
@@ -165,6 +203,44 @@ test("SIGKILL after physical removal preserves intent; process restart finishes 
     try { assert.equal(resumed.recover(x.attempt.id).state, "cleaned"); assert.equal(resumed.recover(x.attempt.id).alreadyApplied, true); assert.equal(audit(resumed, x.attempt.id, "cleanup_completed"), 1); }
     finally { resumed.close(); }
   } finally { if (child.exitCode === null && child.signalCode === null) { child.kill("SIGKILL"); await closed; } x.dispose(); }
+});
+
+for (const checkpoint of [".fixture-staging/counts.json", ".fixture-owner.json"]) {
+  test(`SIGKILL during anchored deletion at ${checkpoint} leaves a conservative restart state`, async () => {
+    const x = setup(); const child = spawn(process.execPath, [path.resolve("scripts/local-orphan-cleanup-child.mjs")], { stdio: ["ignore", "pipe", "pipe", "ipc"] });
+    let stdout = "", stderr = ""; child.stdout.on("data", (chunk) => { stdout += chunk.toString(); }); child.stderr.on("data", (chunk) => { stderr += chunk.toString(); });
+    const closed = new Promise((resolve) => child.once("exit", (code, signal) => resolve({ code, signal })));
+    try {
+      await new Promise((resolve, reject) => { child.once("message", resolve); child.once("error", reject); });
+      child.send({ root: x.root, capability: x.capability, attemptId: x.attempt.id, checkpoint });
+      let ready = false; for (let i = 0; i < 300; i += 1) { if (stdout.includes(`entry:${checkpoint}\n`)) { ready = true; break; } if (child.exitCode !== null || child.signalCode !== null) break; await new Promise((resolve) => setTimeout(resolve, 50)); }
+      assert.equal(ready, true, `cleanup checkpoint not reached: ${stderr}`); child.kill("SIGKILL"); assert.equal((await closed).signal, "SIGKILL");
+      assert.equal(x.fixture.record(x.attempt.id).state, "cleaning"); assert.equal(audit(x.fixture, x.attempt.id, "cleanup_completed"), 0);
+      const resumed = reopenLocalOrphanFixture(x.root, x.capability, () => true);
+      try {
+        if (checkpoint === ".fixture-owner.json") { assert.throws(() => resumed.recover(x.attempt.id), /ENOENT/u); assert.equal(existsSync(x.attempt.output), true); }
+        else { assert.equal(resumed.recover(x.attempt.id).state, "cleaned"); assert.equal(resumed.recover(x.attempt.id).alreadyApplied, true); assert.equal(audit(resumed, x.attempt.id, "cleanup_completed"), 1); }
+      } finally { resumed.close(); }
+    } finally { if (child.exitCode === null && child.signalCode === null) { child.kill("SIGKILL"); await closed; } x.dispose(); }
+  });
+}
+
+test("another process replacing the attempt while cleanup is paused cannot redirect deletion", async () => {
+  const x = setup(); const outside = mkdtempSync(path.join(tmpdir(), "cg-orphan-concurrent-"));
+  const child = spawn(process.execPath, [path.resolve("scripts/local-orphan-cleanup-child.mjs")], { stdio: ["ignore", "pipe", "pipe", "ipc"] });
+  let stdout = "", stderr = ""; child.stdout.on("data", (chunk) => { stdout += chunk.toString(); }); child.stderr.on("data", (chunk) => { stderr += chunk.toString(); });
+  const closed = new Promise((resolve) => child.once("exit", (code, signal) => resolve({ code, signal })));
+  try {
+    const keep = path.join(outside, "keep"); writeFileSync(keep, "outside");
+    await new Promise((resolve, reject) => { child.once("message", resolve); child.once("error", reject); });
+    child.send({ root: x.root, capability: x.capability, attemptId: x.attempt.id, checkpoint: "before:.fixture-staging/counts.json" });
+    let ready = false; for (let i = 0; i < 300; i += 1) { if (stdout.includes("before:.fixture-staging/counts.json\n")) { ready = true; break; } if (child.exitCode !== null || child.signalCode !== null) break; await new Promise((resolve) => setTimeout(resolve, 20)); }
+    assert.equal(ready, true, `cleanup checkpoint not reached: ${stderr}`);
+    renameSync(x.attempt.output, path.join(x.root, "displaced")); symlinkSync(outside, x.attempt.output);
+    const result = await closed; assert.notEqual(result.code, 0); assert.match(stderr, /fixture_directory_changed/u);
+    assert.equal(readFileSync(keep, "utf8"), "outside"); assert.equal(audit(x.fixture, x.attempt.id, "cleanup_completed"), 0);
+    assert.equal(x.fixture.record(x.attempt.id).state, "failed");
+  } finally { if (child.exitCode === null && child.signalCode === null) { child.kill("SIGKILL"); await closed; } x.dispose(); rmSync(outside, { recursive: true, force: true }); }
 });
 
 test("competing recovery processes serialize and produce one completion audit", async () => {

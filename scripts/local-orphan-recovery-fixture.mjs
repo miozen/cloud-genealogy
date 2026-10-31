@@ -2,7 +2,7 @@
 // TEST FIXTURE ONLY: creates its own private temporary root. This is not a
 // general-purpose cleanup tool, Cloudflare adapter, or trusted stop proof.
 import { createHash, randomBytes, randomUUID, timingSafeEqual } from "node:crypto";
-import { constants, fstatSync, lstatSync, mkdtempSync, openSync, closeSync, readFileSync, readdirSync, realpathSync, rmSync, writeFileSync } from "node:fs";
+import { constants, fstatSync, lstatSync, mkdtempSync, openSync, closeSync, readFileSync, readdirSync, realpathSync, rmdirSync, unlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { DatabaseSync } from "node:sqlite";
@@ -79,7 +79,56 @@ class Fixture {
     if (entryExists(path.join(dir, ".fixture-staging")) && entryExists(path.join(dir, "complete"))) throw new Error("ambiguous_fixture_layout");
     return dir;
   }
-  recover(id, { remove = (dir) => rmSync(dir, { recursive: true }), beforeRemove = () => {}, afterRemove = () => {} } = {}) {
+  // Linux-only test helper. Each operation is relative to held directory
+  // descriptors via procfs; it does not establish a hostile-process boundary.
+  removeAnchored(id, row, { beforeEntry, afterEntry }) {
+    const rootFd = openSync(this.root, constants.O_RDONLY | constants.O_DIRECTORY | constants.O_NOFOLLOW);
+    const fdPath = (fd, name = "") => `/proc/self/fd/${fd}${name ? `/${name}` : ""}`;
+    const opened = [rootFd];
+    try {
+      if (!same(identity(fstatSync(rootFd, { bigint: true })), this.rootId)) throw new Error("fixture_root_changed");
+      const attemptName = `attempt-${id}`;
+      const attemptFd = openSync(fdPath(rootFd, attemptName), constants.O_RDONLY | constants.O_DIRECTORY | constants.O_NOFOLLOW);
+      opened.push(attemptFd);
+      if (!same(identity(fstatSync(attemptFd, { bigint: true })), { dev: row.device, ino: row.inode })) throw new Error("attempt_identity_changed");
+      const chain = [{ fd: rootFd, expected: this.rootId }, { fd: attemptFd, parent: rootFd, name: attemptName, expected: { dev: row.device, ino: row.inode } }];
+      const check = () => {
+        this.verifyRoot();
+        if (this.stopped() !== true) throw new Error("supervisor_not_stopped");
+        for (const item of chain) {
+          if (!same(identity(fstatSync(item.fd, { bigint: true })), item.expected)) throw new Error("fixture_directory_changed");
+          if (item.parent !== undefined) {
+            const current = lstatSync(fdPath(item.parent, item.name), { bigint: true });
+            if (!current.isDirectory() || current.isSymbolicLink() || !same(identity(current), item.expected)) throw new Error("fixture_directory_changed");
+          }
+        }
+      };
+      const removeTree = (fd, prefix = "") => {
+        const names = readdirSync(fdPath(fd)).sort((a, b) => (a === ".fixture-owner.json" ? 1 : b === ".fixture-owner.json" ? -1 : a.localeCompare(b)));
+        for (const name of names) {
+          const rel = prefix ? `${prefix}/${name}` : name; const target = fdPath(fd, name); check();
+          const original = lstatSync(target, { bigint: true });
+          if (original.isSymbolicLink()) throw new Error("fixture_symlink_forbidden");
+          if (original.isDirectory()) {
+            if (!allowedDirectories.has(rel)) throw new Error("unrecognized_fixture_entry");
+            const child = openSync(target, constants.O_RDONLY | constants.O_DIRECTORY | constants.O_NOFOLLOW); opened.push(child);
+            const expected = identity(original);
+            if (!same(identity(fstatSync(child, { bigint: true })), expected)) throw new Error("fixture_directory_changed");
+            chain.push({ fd: child, parent: fd, name, expected });
+            try { removeTree(child, rel); check(); beforeEntry(rel); check(); rmdirSync(target); afterEntry(rel); }
+            finally { chain.pop(); closeSync(opened.pop()); }
+          } else {
+            if (!original.isFile() || original.nlink !== 1n || !allowedFiles.has(rel)) throw new Error("unrecognized_fixture_entry");
+            beforeEntry(rel); check(); const current = lstatSync(target, { bigint: true });
+            if (!current.isFile() || current.nlink !== 1n || !same(identity(current), identity(original))) throw new Error("fixture_entry_changed");
+            unlinkSync(target); afterEntry(rel);
+          }
+        }
+      };
+      removeTree(attemptFd); check(); beforeEntry("."); check(); rmdirSync(fdPath(rootFd, attemptName)); afterEntry(".");
+    } finally { while (opened.length) closeSync(opened.pop()); }
+  }
+  recover(id, { remove, beforeRemove = () => {}, afterRemove = () => {}, beforeEntry = () => {}, afterEntry = () => {} } = {}) {
     this.verifyRoot(); validId(id); if (typeof this.stopped !== "function" || this.stopped() !== true) throw new Error("supervisor_not_stopped");
     const dir = this.output(id);
     const inspect = () => {
@@ -113,6 +162,7 @@ class Fixture {
       return null;
     });
     if (intent) return intent;
+    let removalConfirmed = false;
     try {
       return this.tx(() => {
         const state = inspect();
@@ -122,9 +172,11 @@ class Fixture {
           beforeRemove();
           if (this.stopped() !== true) throw new Error("supervisor_not_stopped");
           this.validateTree(id, state.row);
-          remove(dir);
+          if (remove) remove(dir); else this.removeAnchored(id, state.row, { beforeEntry, afterEntry });
+          if (entryExists(dir)) throw new Error("cleanup_output_remains");
+          removalConfirmed = true;
           afterRemove();
-        }
+        } else removalConfirmed = true; // prior durable intent and missing output
         this.db.prepare("UPDATE fixture_orphan_attempt SET state='cleaned' WHERE id=? AND state='cleaning'").run(id);
         this.audit(id, "cleanup_completed");
         return { state: "cleaned", alreadyApplied: false, remoteExecutionAvailable: false };
@@ -132,7 +184,7 @@ class Fixture {
     } catch (error) {
       // A competing recovery may already have completed. Never overwrite its
       // terminal state or append a false failure record.
-      if (entryExists(dir)) this.tx(() => {
+      if (!removalConfirmed || entryExists(dir)) this.tx(() => {
         const current = this.record(id);
         if (current?.state === "cleaning") { this.db.prepare("UPDATE fixture_orphan_attempt SET state='failed' WHERE id=? AND state='cleaning'").run(id); this.audit(id, "cleanup_failed", error instanceof Error ? error.message : "unknown"); }
       });

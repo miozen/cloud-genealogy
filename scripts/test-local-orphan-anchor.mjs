@@ -34,7 +34,7 @@ function makeSupervisor() {
   });
   return { child, ready, closed, rpc, async stop() { if (child.exitCode === null && child.signalCode === null) child.kill("SIGTERM"); await closed; } };
 }
-function makeWorker(x, supervisor, phase = "", envelope = x.envelope, operation = "consume", scope = x.scope) {
+function makeWorker(x, supervisor, phase = "", envelope = x.envelope, operation = "consume", scope = x.scope, requestId) {
   const child = spawn(process.execPath, [path.resolve("scripts/local-orphan-anchor-worker-child.mjs")], { stdio: ["ignore", "pipe", "pipe", "ipc"] });
   let stdout = "", stderr = "", readyResolve;
   child.stdout.on("data", (chunk) => { stdout += chunk.toString(); }); child.stderr.on("data", (chunk) => { stderr += chunk.toString(); });
@@ -50,11 +50,11 @@ function makeWorker(x, supervisor, phase = "", envelope = x.envelope, operation 
       if (child.connected) child.send({ kind: "reply", id: message.id, ok: result.ok === true, comparison: result.comparison, state: result.state }, () => {});
     }
   });
-  child.send({ kind: "init", root: x.root, capability: x.capability, publicKey: x.signer.publicKey.export({ format: "pem", type: "spki" }), envelope, phase, operation, scope });
+  child.send({ kind: "init", root: x.root, capability: x.capability, publicKey: x.signer.publicKey.export({ format: "pem", type: "spki" }), envelope, phase, operation, scope, requestId });
   return { child, ready, closed, get stdout() { return stdout; }, get stderr() { return stderr; } };
 }
-async function runWorker(x, supervisor, operation = "consume", envelope = x.envelope) {
-  const worker = makeWorker(x, supervisor, "", envelope, operation); await worker.ready;
+async function runWorker(x, supervisor, operation = "consume", envelope = x.envelope, requestId, scope = x.scope) {
+  const worker = makeWorker(x, supervisor, "", envelope, operation, scope, requestId); await worker.ready;
   if (!worker.child.connected) throw new Error(`worker failed: ${worker.stderr}`);
   worker.child.send({ kind: "go" }); const result = await worker.closed;
   assert.equal(result.code, 0, result.stderr); return JSON.parse(result.stdout.trim());
@@ -66,6 +66,115 @@ async function waitCheckpoint(worker, phase) {
 async function boot(x) { const anchor = makeSupervisor(); await anchor.ready; assert.equal((await anchor.rpc("bootstrap", challengeLedgerDigest(x.fixture.db))).ok, true); return anchor; }
 function consumed(x) { return x.fixture.db.prepare("SELECT consumed FROM fixture_challenge WHERE challenge=?").get(x.challenge).consumed; }
 const evidence = (supervisorState, ledgerComparison) => ({ version: 1, fixtureOnly: true, supervisorState, ledgerComparison, outcome: "review_required", remoteExecutionAvailable: false });
+const requestCount = (x) => x.fixture.db.prepare("SELECT COUNT(*) n FROM fixture_challenge_request").get().n;
+
+for (const kind of ["issue", "consume"]) {
+  test(`concurrent ${kind} requests with one ID return the same recorded result once`, async () => {
+    const x = setup(); const anchor = await boot(x); const requestId = randomUUID();
+    const operation = `request_${kind}`; const workers = [makeWorker(x, anchor, "", x.envelope, operation, x.scope, requestId), makeWorker(x, anchor, "", x.envelope, operation, x.scope, requestId)];
+    try {
+      await Promise.all(workers.map((w) => w.ready)); workers.forEach((w) => w.child.send({ kind: "go" }));
+      const results = await Promise.all(workers.map((w) => w.closed)); assert.deepEqual(results.map((v) => v.code), [0, 0]);
+      const first = JSON.parse(results[0].stdout).result; const second = JSON.parse(results[1].stdout).result;
+      assert.deepEqual(first, second); assert.equal(first.kind, kind); assert.equal(first.outcome, "review_required"); assert.equal(first.remoteExecutionAvailable, false);
+      assert.equal(requestCount(x), 1); assert.equal(x.fixture.db.prepare("SELECT COUNT(*) n FROM fixture_challenge").get().n, kind === "issue" ? 2 : 1);
+      assert.equal(x.fixture.db.prepare("SELECT COUNT(*) n FROM fixture_challenge_audit WHERE challenge=? AND action=?").get(first.challenge, kind === "issue" ? "issued" : "consumed").n, 1);
+      assert.deepEqual(await runWorker(x, anchor, `query_${kind}`, x.envelope, requestId), { result: first });
+      assert.deepEqual(await runWorker(x, anchor, operation, x.envelope, requestId), { result: first });
+    } finally { for (const w of workers) if (w.child.exitCode === null && w.child.signalCode === null) w.child.kill("SIGKILL"); await Promise.all(workers.map((w) => w.closed)); await anchor.stop(); x.dispose(); }
+  });
+}
+
+test("request ID cannot be reused with a different scope, operation or envelope", async () => {
+  const x = setup(); const anchor = await boot(x); const requestId = randomUUID();
+  try {
+    const first = await runWorker(x, anchor, "request_issue", x.envelope, requestId);
+    assert.equal(first.result.status, "recorded");
+    const reordered = { attemptId: x.scope.attemptId, rootId: x.scope.rootId, runId: x.scope.runId };
+    assert.deepEqual(await runWorker(x, anchor, "query_issue", x.envelope, requestId, reordered), first);
+    assert.deepEqual(await runWorker(x, anchor, "request_issue", x.envelope, requestId, { ...x.scope, rootId: randomUUID() }), { error: "request_conflict" });
+    assert.deepEqual(await runWorker(x, anchor, "query_issue", x.envelope, requestId, { ...x.scope, rootId: randomUUID() }), { error: "request_conflict" });
+    assert.deepEqual(await runWorker(x, anchor, "request_consume", x.envelope, requestId), { error: "request_conflict" });
+    const consumeId = randomUUID(); assert.equal((await runWorker(x, anchor, "request_consume", x.envelope, consumeId)).result.accepted, true);
+    const altered = structuredClone(x.envelope); altered.signature = "00".repeat(64);
+    assert.deepEqual(await runWorker(x, anchor, "query_consume", altered, consumeId), { error: "request_conflict" });
+    assert.equal(requestCount(x), 2); assert.equal((await anchor.rpc("status")).state, "ready");
+    assert.throws(() => x.fixture.db.exec("DELETE FROM fixture_challenge_request"), /request_immutable/u);
+  } finally { await anchor.stop(); x.dispose(); }
+});
+
+test("historical issue result does not claim the challenge remains available after consumption", async () => {
+  const x = setup(); const anchor = await boot(x); const issueId = randomUUID();
+  try {
+    const issued = await runWorker(x, anchor, "request_issue", x.envelope, issueId);
+    const signed = x.signer.signObservation(x.scope, issued.result.challenge, x.report);
+    const consumedRequest = await runWorker(x, anchor, "request_consume", signed, randomUUID());
+    assert.equal(consumedRequest.result.accepted, true);
+    assert.equal(x.fixture.db.prepare("SELECT consumed FROM fixture_challenge WHERE challenge=?").get(issued.result.challenge).consumed, 1);
+    const historical = await runWorker(x, anchor, "query_issue", x.envelope, issueId);
+    assert.deepEqual(historical, issued); assert.equal(historical.result.accepted, null); assert.equal(historical.result.outcome, "review_required");
+  } finally { await anchor.stop(); x.dispose(); }
+});
+
+test("request prepare acknowledgement loss preserves pending and refuses result query", async () => {
+  const x = setup(); const anchor = await boot(x); const requestId = randomUUID(); const worker = makeWorker(x, anchor, "drop_prepare", x.envelope, "request_issue", x.scope, requestId);
+  try {
+    await worker.ready; worker.child.send({ kind: "go" }); const result = await worker.closed;
+    assert.equal(result.code, 0, result.stderr); assert.deepEqual(JSON.parse(result.stdout), { error: "anchor_prepare_refused" });
+    assert.equal(requestCount(x), 0); assert.equal((await anchor.rpc("status")).state, "pending");
+    assert.deepEqual(await runWorker(x, anchor, "query_issue", x.envelope, requestId), { error: "anchor_state_unavailable_or_mismatch" });
+    assert.deepEqual(await runWorker(x, anchor, "request_issue", x.envelope, requestId), { error: "anchor_state_unavailable_or_mismatch" });
+  } finally { if (worker.child.exitCode === null && worker.child.signalCode === null) { worker.child.kill("SIGKILL"); await worker.closed; } await anchor.stop(); x.dispose(); }
+});
+
+test("invalid signature reserves no request ID and cannot consume the challenge", async () => {
+  const x = setup(); const anchor = await boot(x); const requestId = randomUUID(); const invalid = structuredClone(x.envelope); invalid.signature = "00".repeat(64);
+  try {
+    assert.deepEqual(await runWorker(x, anchor, "request_consume", invalid, requestId), { result: { status: "rejected", outcome: "review_required", remoteExecutionAvailable: false } });
+    assert.equal(requestCount(x), 0); assert.equal(consumed(x), 0);
+    assert.equal((await runWorker(x, anchor, "request_consume", x.envelope, requestId)).result.accepted, true);
+  } finally { await anchor.stop(); x.dispose(); }
+});
+
+for (const kind of ["issue", "consume"]) {
+  test(`${kind} finalize response loss can be queried and retried with the same ID`, async () => {
+    const x = setup(); const anchor = await boot(x); const requestId = randomUUID(); const operation = `request_${kind}`;
+    const worker = makeWorker(x, anchor, "drop_finalize", x.envelope, operation, x.scope, requestId);
+    try {
+      await worker.ready; worker.child.send({ kind: "go" }); const stopped = await worker.closed;
+      assert.equal(stopped.code, 0, stopped.stderr); assert.deepEqual(JSON.parse(stopped.stdout), { error: "anchor_finalize_refused" });
+      const query = await runWorker(x, anchor, `query_${kind}`, x.envelope, requestId); assert.equal(query.result.status, "recorded");
+      assert.equal(query.result.outcome, "review_required"); assert.equal(query.result.remoteExecutionAvailable, false);
+      assert.deepEqual(await runWorker(x, anchor, operation, x.envelope, requestId), query);
+      assert.equal(requestCount(x), 1); assert.equal(x.fixture.db.prepare("SELECT COUNT(*) n FROM fixture_challenge").get().n, kind === "issue" ? 2 : 1);
+    } finally { if (worker.child.exitCode === null && worker.child.signalCode === null) { worker.child.kill("SIGKILL"); await worker.closed; } await anchor.stop(); x.dispose(); }
+  });
+}
+
+for (const phase of ["before_commit", "after_commit"]) {
+  test(`request SIGKILL ${phase} leaves pending and prevents query or retry`, async () => {
+    const x = setup(); const anchor = await boot(x); const requestId = randomUUID(); const worker = makeWorker(x, anchor, phase, x.envelope, "request_issue", x.scope, requestId);
+    try {
+      await worker.ready; worker.child.send({ kind: "go" }); await waitCheckpoint(worker, phase); worker.child.kill("SIGKILL"); await worker.closed;
+      assert.equal(requestCount(x), phase === "before_commit" ? 0 : 1); assert.equal((await anchor.rpc("status")).state, "pending");
+      assert.deepEqual(await runWorker(x, anchor, "query_issue", x.envelope, requestId), { error: "anchor_state_unavailable_or_mismatch" });
+      assert.deepEqual(await runWorker(x, anchor, "request_issue", x.envelope, requestId), { error: "anchor_state_unavailable_or_mismatch" });
+    } finally { if (worker.child.exitCode === null && worker.child.signalCode === null) { worker.child.kill("SIGKILL"); await worker.closed; } await anchor.stop(); x.dispose(); }
+  });
+}
+
+test("database and supervisor reset can forget a request and issue a different challenge", async () => {
+  const x = setup(); const anchor = await boot(x); const requestId = randomUUID(); const snapshot = path.join(x.root, "request-old.sqlite"); let reset;
+  try {
+    x.fixture.close(); copyFileSync(path.join(x.root, "challenge.sqlite"), snapshot); x.fixture = reopenLocalChallengeFixture(x.root, x.capability, x.signer.publicKey);
+    const original = await runWorker(x, anchor, "request_issue", x.envelope, requestId); await anchor.stop();
+    x.fixture.close(); copyFileSync(snapshot, path.join(x.root, "challenge.sqlite")); x.fixture = reopenLocalChallengeFixture(x.root, x.capability, x.signer.publicKey);
+    reset = makeSupervisor(); await reset.ready; assert.equal((await reset.rpc("bootstrap", challengeLedgerDigest(x.fixture.db))).ok, true);
+    assert.equal((await runWorker(x, reset, "query_issue", x.envelope, requestId)).result.status, "not_found");
+    const repeated = await runWorker(x, reset, "request_issue", x.envelope, requestId);
+    assert.notEqual(repeated.result.challenge, original.result.challenge); assert.equal(repeated.result.outcome, "review_required");
+  } finally { if (reset) await reset.stop(); x.dispose(); }
+});
 
 test("test worker exposes only the guarded facade, rejects legacy operations and hides raw db", async () => {
   const x = setup(); const anchor = await boot(x);

@@ -8,6 +8,7 @@ export function challengeLedgerDigest(db) {
     db.prepare("SELECT id,root_dev,root_ino,capability_hash,key_hash FROM fixture_challenge_meta ORDER BY id").all(),
     db.prepare("SELECT challenge,run_id,root_id,attempt_id,consumed FROM fixture_challenge ORDER BY challenge").all(),
     db.prepare("SELECT id,challenge,action FROM fixture_challenge_audit ORDER BY id").all(),
+    db.prepare("SELECT request_id,kind,input_hash,challenge,accepted FROM fixture_challenge_request ORDER BY request_id").all(),
     db.prepare("SELECT type,name,tbl_name,sql FROM sqlite_schema WHERE name NOT LIKE 'sqlite_%' ORDER BY type,name").all(),
   ];
   return createHash("sha256").update(JSON.stringify({ domain: "cg-test-challenge-ledger-v1", tables })).digest("hex");

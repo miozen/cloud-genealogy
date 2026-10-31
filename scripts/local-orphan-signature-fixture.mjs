@@ -22,6 +22,7 @@ function bytes(value) {
   if (result.length > 65536) throw new Error("fixture_payload_invalid");
   return result;
 }
+export function fixtureCanonicalBytes(value) { return bytes(value); }
 function exactKeys(value, keys) { return value && typeof value === "object" && !Array.isArray(value) && Object.keys(value).sort().join(",") === [...keys].sort().join(","); }
 function scopeValid(scope) { return exactKeys(scope, ["runId", "rootId", "attemptId"]) && Object.values(scope).every((part) => typeof part === "string" && uuid.test(part)); }
 function reportValid(report, scope) {

@@ -6,13 +6,13 @@ import { isFixtureScope, verifyFixtureSignature } from "./local-orphan-signature
 
 const uuid = /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/u;
 const challengePattern = /^[0-9a-f]{64}$/u;
-function requestDescriptor(requestId, kind, input) {
+export function fixtureRequestDescriptor(requestId, kind, input) {
   if (typeof requestId !== "string" || !uuid.test(requestId) || !["issue", "consume"].includes(kind)) throw new Error("request_invalid");
   if (kind === "issue" && !isFixtureScope(input)) throw new Error("request_invalid");
   if (kind === "consume" && (typeof input?.payload?.challenge !== "string" || !challengePattern.test(input.payload.challenge))) throw new Error("request_invalid");
   return { requestId, kind, input, inputHash: fixtureRequestHash(kind, input) };
 }
-function lookup(fixture, descriptor) {
+export function lookupFixtureRequest(fixture, descriptor) {
   const row = fixture.db.prepare("SELECT kind,input_hash,challenge,accepted FROM fixture_challenge_request WHERE request_id=?").get(descriptor.requestId);
   if (!row) return null;
   if (row.kind !== descriptor.kind || row.input_hash !== descriptor.inputHash) throw new Error("request_conflict");
@@ -28,16 +28,16 @@ async function checkAnchor(fixture, anchor) {
   validateFixtureLedger(fixture.db);
 }
 export async function queryFixtureRequest(fixture, anchor, requestId, kind, input) {
-  const descriptor = requestDescriptor(requestId, kind, input); fixture.db.exec("BEGIN IMMEDIATE");
-  try { await checkAnchor(fixture, anchor); return lookup(fixture, descriptor) ?? { status: "not_found", outcome: "review_required", remoteExecutionAvailable: false }; }
+  const descriptor = fixtureRequestDescriptor(requestId, kind, input); fixture.db.exec("BEGIN IMMEDIATE");
+  try { await checkAnchor(fixture, anchor); return lookupFixtureRequest(fixture, descriptor) ?? { status: "not_found", outcome: "review_required", remoteExecutionAvailable: false }; }
   finally { fixture.db.exec("ROLLBACK"); }
 }
 export async function executeFixtureRequest(fixture, anchor, requestId, kind, input, { beforeCommit = () => {}, afterCommit = () => {} } = {}) {
-  const descriptor = requestDescriptor(requestId, kind, input); fixture.db.exec("BEGIN IMMEDIATE"); let transaction = true;
+  const descriptor = fixtureRequestDescriptor(requestId, kind, input); fixture.db.exec("BEGIN IMMEDIATE"); let transaction = true;
   try {
     const before = challengeLedgerDigest(fixture.db); if (await anchor.check(before) !== true) throw new Error("anchor_state_unavailable_or_mismatch");
     validateFixtureLedger(fixture.db);
-    const prior = lookup(fixture, descriptor);
+    const prior = lookupFixtureRequest(fixture, descriptor);
     if (prior) { fixture.db.exec("ROLLBACK"); transaction = false; return prior; }
     let challenge;
     if (kind === "issue") {
@@ -56,7 +56,7 @@ export async function executeFixtureRequest(fixture, anchor, requestId, kind, in
     }
     fixture.db.prepare("INSERT INTO fixture_challenge_request(request_id,kind,input_hash,challenge,accepted) VALUES(?,?,?,?,1)").run(requestId, kind, descriptor.inputHash, challenge);
     validateFixtureLedger(fixture.db);
-    const result = lookup(fixture, descriptor); const after = challengeLedgerDigest(fixture.db);
+    const result = lookupFixtureRequest(fixture, descriptor); const after = challengeLedgerDigest(fixture.db);
     if (await anchor.prepare(before, after) !== true) throw new Error("anchor_prepare_refused");
     beforeCommit(); fixture.db.exec("COMMIT"); transaction = false; afterCommit();
     if (await anchor.finalize(before, after) !== true) throw new Error("anchor_finalize_refused");

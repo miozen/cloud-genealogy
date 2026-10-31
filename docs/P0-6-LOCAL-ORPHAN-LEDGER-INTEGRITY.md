@@ -23,3 +23,5 @@
 本轮不修复损坏、不删除数据、不自动解锁 pending 或重设锚点，也不提供真实审批。监督器失陷、旧入口/直接 SQLite 写入、密钥被盗、可信时间缺失、SQLite COMMIT 内部或掉电故障仍未解决；不得启用远程执行。
 
 `npm run test:local-orphan-anchor` 包含关联漂移及反例；challenge、signature、recovery、windowed mock 回归需分别执行。
+
+后续独立监督器绑定摘要实验见 `P0-6-LOCAL-ORPHAN-HISTORY-WITNESS.md`；该绑定只属于测试路径，由工作进程经未认证 IPC 提供，不能独立证明真实历史。

@@ -12,6 +12,7 @@ import { createFixtureSigner } from "./local-orphan-signature-fixture.mjs";
 import { createLocalChallengeFixture, reopenLocalChallengeFixture } from "./local-orphan-challenge-fixture.mjs";
 import { challengeLedgerDigest } from "./local-orphan-anchor-fixture.mjs";
 import { fixtureRequestHash } from "./local-orphan-ledger-integrity-fixture.mjs";
+import { fixtureBindingHash } from "./local-orphan-witness-fixture.mjs";
 
 function setup() {
   const orphan = createLocalOrphanFixture(() => true); const model = new LocalBackupWindowFixture(orphan.fixture.db);
@@ -29,9 +30,9 @@ function makeSupervisor() {
   const closed = new Promise((resolve) => child.once("close", (code, signal) => resolve({ code, signal })));
   child.on("message", (message) => { if (message.ready) readyResolve(); else { waiting.get(message.id)?.(message); waiting.delete(message.id); } });
   child.on("exit", () => { for (const resolve of waiting.values()) resolve({ ok: false }); waiting.clear(); readyResolve(); });
-  const rpc = (kind, before, after) => new Promise((resolve) => {
+  const rpc = (kind, before, after, binding) => new Promise((resolve) => {
     if (!child.connected) { resolve({ ok: false }); return; }
-    const request = ++id; waiting.set(request, resolve); child.send({ id: request, kind, before, after }, (error) => { if (error) { waiting.delete(request); resolve({ ok: false }); } });
+    const request = ++id; waiting.set(request, resolve); child.send({ id: request, kind, before, after, binding }, (error) => { if (error) { waiting.delete(request); resolve({ ok: false }); } });
   });
   return { child, ready, closed, rpc, async stop() { if (child.exitCode === null && child.signalCode === null) child.kill("SIGTERM"); await closed; } };
 }
@@ -45,10 +46,10 @@ function makeWorker(x, supervisor, phase = "", envelope = x.envelope, operation 
   child.on("message", async (message) => {
     if (message.kind === "ready") readyResolve();
     if (message.kind === "rpc") {
-      const result = await supervisor.rpc(message.method, message.before, message.after);
+      const result = await supervisor.rpc(message.method, message.before, message.after, message.binding);
       if (phase === `drop_${message.method}`) return;
       if (phase === `kill_${message.method}`) { child.kill("SIGKILL"); return; }
-      if (child.connected) child.send({ kind: "reply", id: message.id, ok: result.ok === true, comparison: result.comparison, state: result.state }, () => {});
+      if (child.connected) child.send({ kind: "reply", id: message.id, ok: result.ok === true, comparison: result.comparison, state: result.state, status: result.status }, () => {});
     }
   });
   child.send({ kind: "init", root: x.root, capability: x.capability, publicKey: x.signer.publicKey.export({ format: "pem", type: "spki" }), envelope, phase, operation, scope, requestId });
@@ -68,6 +69,124 @@ async function boot(x) { const anchor = makeSupervisor(); await anchor.ready; as
 function consumed(x) { return x.fixture.db.prepare("SELECT consumed FROM fixture_challenge WHERE challenge=?").get(x.challenge).consumed; }
 const evidence = (supervisorState, ledgerComparison) => ({ version: 1, fixtureOnly: true, supervisorState, ledgerComparison, outcome: "review_required", remoteExecutionAvailable: false });
 const requestCount = (x) => x.fixture.db.prepare("SELECT COUNT(*) n FROM fixture_challenge_request").get().n;
+
+test("supervisor binding preserves witnessed history without claiming current challenge availability", async () => {
+  const x = setup(); const anchor = await boot(x); const issueId = randomUUID(), consumeId = randomUUID();
+  try {
+    const issued = await runWorker(x, anchor, "witness_issue", x.envelope, issueId);
+    assert.equal(issued.result.historical, true); assert.equal(issued.result.currentAvailability, "not_evaluated");
+    const signed = x.signer.signObservation(x.scope, issued.result.challenge, x.report);
+    const used = await runWorker(x, anchor, "witness_consume", signed, consumeId); assert.equal(used.result.accepted, true);
+    assert.deepEqual(await runWorker(x, anchor, "witness_query_issue", x.envelope, issueId), issued);
+    assert.deepEqual(await runWorker(x, anchor, "witness_query_consume", signed, consumeId), used);
+    assert.deepEqual(await runWorker(x, anchor, "witness_consume", signed, consumeId), used);
+    assert.equal(x.fixture.db.prepare("SELECT consumed FROM fixture_challenge WHERE challenge=?").get(issued.result.challenge).consumed, 1);
+  } finally { await anchor.stop(); x.dispose(); }
+});
+
+test("two witnessed issue workers with one request ID return the same witnessed binding", async () => {
+  const x = setup(); const anchor = await boot(x); const requestId = randomUUID();
+  const workers = [makeWorker(x, anchor, "", x.envelope, "witness_issue", x.scope, requestId), makeWorker(x, anchor, "", x.envelope, "witness_issue", x.scope, requestId)];
+  try {
+    await Promise.all(workers.map((w) => w.ready)); workers.forEach((w) => w.child.send({ kind: "go" }));
+    const outputs = await Promise.all(workers.map((w) => w.closed)); assert.deepEqual(outputs.map((v) => v.code), [0, 0]);
+    const first = JSON.parse(outputs[0].stdout); assert.deepEqual(JSON.parse(outputs[1].stdout), first);
+    assert.equal(requestCount(x), 1); assert.deepEqual(await runWorker(x, anchor, "witness_query_issue", x.envelope, requestId), first);
+  } finally { for (const w of workers) if (w.child.exitCode === null && w.child.signalCode === null) w.child.kill("SIGKILL"); await Promise.all(workers.map((w) => w.closed)); await anchor.stop(); x.dispose(); }
+});
+
+test("existing un-witnessed request cannot be promoted from database contents", async () => {
+  const x = setup(); const anchor = await boot(x); const requestId = randomUUID();
+  try {
+    assert.equal((await runWorker(x, anchor, "request_issue", x.envelope, requestId)).result.status, "recorded");
+    assert.deepEqual(await runWorker(x, anchor, "witness_query_issue", x.envelope, requestId), { error: "witness_binding_missing" });
+    assert.deepEqual(await runWorker(x, anchor, "witness_issue", x.envelope, requestId), { error: "witness_binding_missing" });
+  } finally { await anchor.stop(); x.dispose(); }
+});
+
+test("finalize acknowledgement loss preserves witnessed result while supervisor survives", async () => {
+  const x = setup(); const anchor = await boot(x); const requestId = randomUUID(); const worker = makeWorker(x, anchor, "drop_finalize", x.envelope, "witness_issue", x.scope, requestId);
+  try {
+    await worker.ready; worker.child.send({ kind: "go" }); const result = await worker.closed;
+    assert.equal(result.code, 0, result.stderr); assert.deepEqual(JSON.parse(result.stdout), { error: "anchor_finalize_refused" });
+    const observed = await runWorker(x, anchor, "witness_query_issue", x.envelope, requestId);
+    assert.equal(observed.result.historical, true); assert.equal(observed.result.currentAvailability, "not_evaluated");
+    assert.deepEqual(await runWorker(x, anchor, "witness_issue", x.envelope, requestId), observed); assert.equal(requestCount(x), 1);
+  } finally { if (worker.child.exitCode === null && worker.child.signalCode === null) { worker.child.kill("SIGKILL"); await worker.closed; } await anchor.stop(); x.dispose(); }
+});
+
+test("lost witness blocks old signed history and is never rebuilt from SQLite", async () => {
+  const x = setup(); const anchor = await boot(x); const requestId = randomUUID();
+  try {
+    assert.equal((await runWorker(x, anchor, "witness_consume", x.envelope, requestId)).result.accepted, true);
+    const before = challengeLedgerDigest(x.fixture.db); assert.equal((await anchor.rpc("test_forget", requestId)).ok, true);
+    assert.deepEqual(await runWorker(x, anchor, "witness_query_consume", x.envelope, requestId), { error: "witness_binding_missing" });
+    assert.deepEqual(await runWorker(x, anchor, "witness_consume", x.envelope, requestId), { error: "witness_binding_missing" });
+    assert.equal(challengeLedgerDigest(x.fixture.db), before); assert.equal(requestCount(x), 1);
+  } finally { await anchor.stop(); x.dispose(); }
+});
+
+test("record cleanup with a surviving witness is refused even after unsafe rebase", async () => {
+  const x = setup(); const anchor = await boot(x); const requestId = randomUUID();
+  try {
+    assert.equal((await runWorker(x, anchor, "witness_issue", x.envelope, requestId)).result.status, "recorded");
+    x.fixture.db.exec("DROP TRIGGER fixture_challenge_request_no_delete"); x.fixture.db.prepare("DELETE FROM fixture_challenge_request WHERE request_id=?").run(requestId);
+    assert.equal((await anchor.rpc("test_rebase", challengeLedgerDigest(x.fixture.db))).ok, true);
+    assert.deepEqual(await runWorker(x, anchor, "witness_query_issue", x.envelope, requestId), { error: "witness_record_missing" });
+    assert.deepEqual(await runWorker(x, anchor, "witness_issue", x.envelope, requestId), { error: "witness_record_missing" });
+  } finally { await anchor.stop(); x.dispose(); }
+});
+
+test("live independent bindings detect same-scope swaps even if test anchor is unsafely rebased", async () => {
+  const x = setup(); const anchor = await boot(x); const a = randomUUID(), b = randomUUID();
+  try {
+    const first = await runWorker(x, anchor, "witness_issue", x.envelope, a); const second = await runWorker(x, anchor, "witness_issue", x.envelope, b);
+    x.fixture.db.exec("DROP TRIGGER fixture_challenge_request_no_update; DROP INDEX fixture_challenge_one_request_per_kind;");
+    x.fixture.db.prepare("UPDATE fixture_challenge_request SET challenge=CASE request_id WHEN ? THEN ? WHEN ? THEN ? ELSE challenge END WHERE request_id IN (?,?)").run(a, second.result.challenge, b, first.result.challenge, a, b);
+    assert.equal((await anchor.rpc("test_rebase", challengeLedgerDigest(x.fixture.db))).ok, true);
+    assert.deepEqual(await runWorker(x, anchor, "witness_query_issue", x.envelope, a), { error: "witness_binding_mismatch" });
+    assert.deepEqual(await runWorker(x, anchor, "witness_query_issue", x.envelope, b), { error: "witness_binding_mismatch" });
+    assert.equal((await runWorker(x, anchor, "query_issue", x.envelope, a)).result.challenge, second.result.challenge);
+  } finally { await anchor.stop(); x.dispose(); }
+});
+
+test("supervisor loss leaves history blocked and an empty replacement cannot reconstruct witnesses", async () => {
+  const x = setup(); const anchor = await boot(x); const requestId = randomUUID(); let replacement;
+  try {
+    assert.equal((await runWorker(x, anchor, "witness_issue", x.envelope, requestId)).result.status, "recorded");
+    anchor.child.kill("SIGKILL"); await anchor.closed;
+    assert.deepEqual(await runWorker(x, anchor, "witness_query_issue", x.envelope, requestId), { error: "anchor_state_unavailable_or_mismatch" });
+    replacement = makeSupervisor(); await replacement.ready;
+    assert.deepEqual(await runWorker(x, replacement, "witness_query_issue", x.envelope, requestId), { error: "anchor_state_unavailable_or_mismatch" });
+    assert.equal((await replacement.rpc("bootstrap", challengeLedgerDigest(x.fixture.db))).ok, true);
+    assert.deepEqual(await runWorker(x, replacement, "witness_query_issue", x.envelope, requestId), { error: "witness_binding_missing" });
+  } finally { if (replacement) await replacement.stop(); x.dispose(); }
+});
+
+test("database and supervisor compromise can forge both binding and history", async () => {
+  const x = setup(); const anchor = await boot(x); const a = randomUUID(), b = randomUUID();
+  try {
+    const first = await runWorker(x, anchor, "witness_issue", x.envelope, a); const second = await runWorker(x, anchor, "witness_issue", x.envelope, b);
+    x.fixture.db.exec("DROP TRIGGER fixture_challenge_request_no_update; DROP INDEX fixture_challenge_one_request_per_kind;");
+    x.fixture.db.prepare("UPDATE fixture_challenge_request SET challenge=CASE request_id WHEN ? THEN ? WHEN ? THEN ? ELSE challenge END WHERE request_id IN (?,?)").run(a, second.result.challenge, b, first.result.challenge, a, b);
+    assert.equal((await anchor.rpc("test_rebase", challengeLedgerDigest(x.fixture.db))).ok, true);
+    assert.equal((await anchor.rpc("test_force_binding", a, fixtureBindingHash(x.fixture.db, a))).ok, true);
+    const forged = await runWorker(x, anchor, "witness_query_issue", x.envelope, a);
+    assert.equal(forged.result.challenge, second.result.challenge); assert.equal(forged.result.outcome, "review_required");
+  } finally { await anchor.stop(); x.dispose(); }
+});
+
+for (const phase of ["before_commit", "after_commit"]) {
+  test(`witnessed issue ${phase} crash remains pending without reconstructed evidence`, async () => {
+    const x = setup(); const anchor = await boot(x); const requestId = randomUUID(); const worker = makeWorker(x, anchor, phase, x.envelope, "witness_issue", x.scope, requestId);
+    try {
+      await worker.ready; worker.child.send({ kind: "go" }); await waitCheckpoint(worker, phase); worker.child.kill("SIGKILL"); await worker.closed;
+      assert.equal((await anchor.rpc("status")).state, "pending");
+      assert.deepEqual(await runWorker(x, anchor, "witness_query_issue", x.envelope, requestId), { error: "anchor_state_unavailable_or_mismatch" });
+      assert.deepEqual(await runWorker(x, anchor, "witness_issue", x.envelope, requestId), { error: "anchor_state_unavailable_or_mismatch" });
+    } finally { if (worker.child.exitCode === null && worker.child.signalCode === null) { worker.child.kill("SIGKILL"); await worker.closed; } await anchor.stop(); x.dispose(); }
+  });
+}
 
 for (const corruption of ["issue_hash", "missing_audit", "consumed_without_audit", "rejected_record", "consume_without_commit", "duplicate_issue", "duplicate_consume", "orphan_reference"]) {
   test(`pre-existing ${corruption} corruption remains blocked even if anchored as a baseline`, async () => {

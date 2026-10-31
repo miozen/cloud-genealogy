@@ -17,6 +17,7 @@
     "test": "vitest run",
     "test:local-auth": "bash scripts/test-local-auth.sh",
     "test:local-auth-crash-recovery": "node scripts/test-local-auth-crash-recovery.mjs",
+    "test:local-backup-window": "node scripts/test-local-backup-window.mjs",
     "test:local-core-model": "bash scripts/test-local-core-model.sh",
     "test:local-chart-scale": "bash scripts/test-local-chart-scale.sh",
     "test:local-backup-recovery": "bash scripts/test-local-backup-recovery.sh",

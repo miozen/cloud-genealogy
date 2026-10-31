@@ -3,7 +3,7 @@ import { test } from "node:test";
 import assert from "node:assert/strict";
 import { spawn } from "node:child_process";
 import { randomUUID } from "node:crypto";
-import { existsSync, linkSync, mkdirSync, mkdtempSync, readFileSync, renameSync, rmSync, symlinkSync, unlinkSync, writeFileSync } from "node:fs";
+import { chmodSync, existsSync, linkSync, mkdirSync, mkdtempSync, readFileSync, renameSync, rmSync, symlinkSync, unlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { LocalBackupWindowFixture } from "./local-backup-window-fixture.mjs";
@@ -192,11 +192,67 @@ test("review does not follow a marker symlink and detects subsequent audit chang
     const keep = path.join(outside, "keep"); writeFileSync(keep, "outside"); symlinkSync(keep, marker);
     const report = observeLocalOrphan(x.fixture, x.attempt.id); assert.equal(report.evidence.marker, "invalid");
     assert.equal(readFileSync(keep, "utf8"), "outside"); assert.equal(verifyLocalOrphanObservation(x.fixture, report), true);
-    x.fixture.tx(() => x.fixture.audit(x.attempt.id, "fixture_test_event"));
+    x.fixture.tx(() => x.fixture.audit(x.attempt.id, "cleanup_failed"));
     assert.equal(verifyLocalOrphanObservation(x.fixture, report), false);
-    assert.equal(observeLocalOrphan(x.fixture, x.attempt.id).evidence.audit.at(-1).action, "fixture_test_event");
+    assert.equal(observeLocalOrphan(x.fixture, x.attempt.id).evidence.audit.at(-1).action, "cleanup_failed");
   } finally { x.dispose(); rmSync(outside, { recursive: true, force: true }); }
 });
+
+test("permissions are not reported as missing and errors do not expose paths", (t) => {
+  if (process.getuid?.() === 0) { t.skip("root can bypass file mode permissions"); return; }
+  const x = setup(); const marker = path.join(x.attempt.output, ".fixture-owner.json");
+  try {
+    chmodSync(marker, 0);
+    assert.throws(() => observeLocalOrphan(x.fixture, x.attempt.id), (error) => error.message === "review_access_denied" && !error.message.includes(x.root));
+    chmodSync(marker, 0o600); unlinkSync(marker);
+    assert.equal(observeLocalOrphan(x.fixture, x.attempt.id).evidence.marker, "missing");
+    assert.throws(() => x.fixture.recover(x.attempt.id), /ENOENT/u);
+  } finally { if (existsSync(marker)) chmodSync(marker, 0o600); x.dispose(); }
+});
+
+test("database owner can forge allowed audit records; an unkeyed fresh observation cannot authenticate them", () => {
+  const x = setup(); try {
+    const original = observeLocalOrphan(x.fixture, x.attempt.id);
+    x.fixture.db.exec("DROP TRIGGER fixture_orphan_audit_no_update");
+    x.fixture.db.prepare("UPDATE fixture_orphan_audit SET detail='fabricated' WHERE id=?").run(original.evidence.audit[0].id);
+    // Stable omitted details can change without changing the public observation.
+    assert.equal(verifyLocalOrphanObservation(x.fixture, original), true);
+    x.fixture.db.prepare("UPDATE fixture_orphan_audit SET action='cleanup_completed',detail='fabricated' WHERE id=?").run(original.evidence.audit[0].id);
+    assert.equal(verifyLocalOrphanObservation(x.fixture, original), false);
+    const forged = observeLocalOrphan(x.fixture, x.attempt.id);
+    assert.equal(forged.evidence.audit[0].action, "cleanup_completed");
+    assert.equal(verifyLocalOrphanObservation(x.fixture, forged), true);
+    assert.equal(forged.evidence.outcome, "review_required"); assert.equal(forged.evidence.remoteExecutionAvailable, false);
+    assert.equal(JSON.stringify(forged).includes("fabricated"), false);
+    x.fixture.db.prepare("UPDATE fixture_orphan_audit SET action=? WHERE id=?").run("secret-content", original.evidence.audit[0].id);
+    assert.throws(() => observeLocalOrphan(x.fixture, x.attempt.id), (error) => error.message === "review_audit_invalid");
+  } finally { x.dispose(); }
+});
+
+for (const kind of ["directory", "marker", "late_marker", "audit_detail"]) {
+  test(`read-only review rejects concurrent ${kind} change by another process`, async () => {
+    const x = setup(); const point = kind === "audit_detail" ? "after_db_snapshot" : kind === "late_marker" ? "after_db_recheck" : "after_files_observed";
+    if (kind === "audit_detail") { x.fixture.db.exec("PRAGMA journal_mode=WAL; DROP TRIGGER fixture_orphan_audit_no_update;"); }
+    const child = spawn(process.execPath, [path.resolve("scripts/local-orphan-review-child.mjs")], { stdio: ["ignore", "pipe", "pipe", "ipc"] });
+    let stdout = "", stderr = ""; child.stdout.on("data", (chunk) => { stdout += chunk.toString(); }); child.stderr.on("data", (chunk) => { stderr += chunk.toString(); });
+    const closed = new Promise((resolve) => child.once("close", (code, signal) => resolve({ code, signal })));
+    try {
+      await new Promise((resolve, reject) => { child.once("message", resolve); child.once("error", reject); });
+      child.send({ root: x.root, capability: x.capability, attemptId: x.attempt.id, point });
+      let ready = false; for (let i = 0; i < 500; i += 1) { if (stdout.includes(`checkpoint:${point}\n`)) { ready = true; break; } if (child.exitCode !== null || child.signalCode !== null) break; await new Promise((resolve) => setTimeout(resolve, 20)); }
+      assert.equal(ready, true, `checkpoint not reached: ${stderr}`);
+      if (kind === "directory") renameSync(x.attempt.output, path.join(x.root, "displaced"));
+      else if (kind === "marker" || kind === "late_marker") unlinkSync(path.join(x.attempt.output, ".fixture-owner.json"));
+      else x.fixture.db.prepare("UPDATE fixture_orphan_audit SET detail='concurrent-secret' WHERE attempt_id=? AND action='attested'").run(x.attempt.id);
+      writeFileSync(path.join(x.root, "review-continue"), "go");
+      const result = await closed; assert.equal(result.code, 0, stderr);
+      const reply = JSON.parse(stdout.trim().split("\n").at(-1));
+      assert.deepEqual(reply, { error: "review_snapshot_changed" }); assert.equal(stdout.includes("concurrent-secret"), false);
+      assert.equal(audit(x.fixture, x.attempt.id, "cleanup_completed"), 0);
+      if (kind === "directory") assert.equal(existsSync(path.join(x.root, "displaced", ".fixture-owner.json")), true);
+    } finally { if (child.exitCode === null && child.signalCode === null) { child.kill("SIGKILL"); await closed; } x.dispose(); }
+  });
+}
 
 test("audit failure before cleanup leaves files and state unchanged", () => {
   const x = setup(); try {

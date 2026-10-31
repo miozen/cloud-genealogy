@@ -70,6 +70,7 @@ export function createLocalChallengeFixture(publicKey) {
       CREATE TABLE fixture_challenge(challenge TEXT PRIMARY KEY,run_id TEXT NOT NULL,root_id TEXT NOT NULL,attempt_id TEXT NOT NULL,consumed INTEGER NOT NULL CHECK(consumed IN (0,1)));
       CREATE TABLE fixture_challenge_audit(id INTEGER PRIMARY KEY,challenge TEXT NOT NULL REFERENCES fixture_challenge(challenge),action TEXT NOT NULL CHECK(action IN ('issued','consumed')),UNIQUE(challenge,action));
       CREATE TABLE fixture_challenge_request(request_id TEXT PRIMARY KEY,kind TEXT NOT NULL CHECK(kind IN ('issue','consume')),input_hash TEXT NOT NULL,challenge TEXT NOT NULL REFERENCES fixture_challenge(challenge),accepted INTEGER NOT NULL CHECK(accepted IN (0,1)));
+      CREATE UNIQUE INDEX fixture_challenge_one_request_per_kind ON fixture_challenge_request(kind,challenge);
       CREATE TRIGGER fixture_challenge_audit_no_update BEFORE UPDATE ON fixture_challenge_audit BEGIN SELECT RAISE(ABORT,'audit_immutable'); END;
       CREATE TRIGGER fixture_challenge_audit_no_delete BEFORE DELETE ON fixture_challenge_audit BEGIN SELECT RAISE(ABORT,'audit_immutable'); END;
       CREATE TRIGGER fixture_challenge_request_no_update BEFORE UPDATE ON fixture_challenge_request BEGIN SELECT RAISE(ABORT,'request_immutable'); END;

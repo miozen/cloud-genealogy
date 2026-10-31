@@ -11,6 +11,7 @@ import { observeLocalOrphan } from "./local-orphan-review-fixture.mjs";
 import { createFixtureSigner } from "./local-orphan-signature-fixture.mjs";
 import { createLocalChallengeFixture, reopenLocalChallengeFixture } from "./local-orphan-challenge-fixture.mjs";
 import { challengeLedgerDigest } from "./local-orphan-anchor-fixture.mjs";
+import { fixtureRequestHash } from "./local-orphan-ledger-integrity-fixture.mjs";
 
 function setup() {
   const orphan = createLocalOrphanFixture(() => true); const model = new LocalBackupWindowFixture(orphan.fixture.db);
@@ -67,6 +68,82 @@ async function boot(x) { const anchor = makeSupervisor(); await anchor.ready; as
 function consumed(x) { return x.fixture.db.prepare("SELECT consumed FROM fixture_challenge WHERE challenge=?").get(x.challenge).consumed; }
 const evidence = (supervisorState, ledgerComparison) => ({ version: 1, fixtureOnly: true, supervisorState, ledgerComparison, outcome: "review_required", remoteExecutionAvailable: false });
 const requestCount = (x) => x.fixture.db.prepare("SELECT COUNT(*) n FROM fixture_challenge_request").get().n;
+
+for (const corruption of ["issue_hash", "missing_audit", "consumed_without_audit", "rejected_record", "consume_without_commit", "duplicate_issue", "duplicate_consume", "orphan_reference"]) {
+  test(`pre-existing ${corruption} corruption remains blocked even if anchored as a baseline`, async () => {
+    const x = setup(); const requestId = randomUUID(); let anchor;
+    try {
+      let kind = "issue", target = x.challenge, inputHash = fixtureRequestHash("issue", x.scope);
+      if (corruption === "issue_hash") inputHash = "a".repeat(64);
+      if (corruption === "missing_audit") { x.fixture.db.exec("DROP TRIGGER fixture_challenge_audit_no_delete"); x.fixture.db.prepare("DELETE FROM fixture_challenge_audit WHERE challenge=? AND action='issued'").run(x.challenge); }
+      if (corruption === "consumed_without_audit") x.fixture.db.prepare("UPDATE fixture_challenge SET consumed=1 WHERE challenge=?").run(x.challenge);
+      if (corruption === "consume_without_commit") { kind = "consume"; inputHash = fixtureRequestHash("consume", x.envelope); }
+      if (corruption === "duplicate_issue" || corruption === "duplicate_consume") x.fixture.db.exec("DROP INDEX fixture_challenge_one_request_per_kind");
+      if (corruption === "duplicate_consume") { kind = "consume"; inputHash = fixtureRequestHash("consume", x.envelope); x.fixture.db.prepare("UPDATE fixture_challenge SET consumed=1 WHERE challenge=?").run(x.challenge); x.fixture.db.prepare("INSERT INTO fixture_challenge_audit(challenge,action) VALUES(?,'consumed')").run(x.challenge); }
+      if (corruption === "orphan_reference") { x.fixture.db.exec("PRAGMA foreign_keys=OFF"); target = "b".repeat(64); }
+      x.fixture.db.prepare("INSERT INTO fixture_challenge_request VALUES(?,?,?,?,?)").run(requestId, kind, inputHash, target, corruption === "rejected_record" ? 0 : 1);
+      if (corruption === "duplicate_issue" || corruption === "duplicate_consume") x.fixture.db.prepare("INSERT INTO fixture_challenge_request VALUES(?,?,?,?,1)").run(randomUUID(), kind, inputHash, target);
+      anchor = await boot(x);
+      assert.deepEqual(await runWorker(x, anchor, kind === "issue" ? "query_issue" : "query_consume", x.envelope, requestId), { error: "ledger_integrity_invalid" });
+      assert.deepEqual(await runWorker(x, anchor, "request_issue", x.envelope, randomUUID()), { error: "ledger_integrity_invalid" });
+      if (corruption === "issue_hash") assert.deepEqual(await runWorker(x, anchor, "observe"), { evidence: evidence("ready", "matches_current") });
+      assert.equal((await anchor.rpc("status")).state, "ready");
+    } finally { if (anchor) await anchor.stop(); x.dispose(); }
+  });
+}
+
+test("schema blocks multiple requests for the same challenge and operation", () => {
+  const x = setup(); try {
+    const stmt = x.fixture.db.prepare("INSERT INTO fixture_challenge_request VALUES(?,'issue',?,?,1)"); const hash = fixtureRequestHash("issue", x.scope);
+    stmt.run(randomUUID(), hash, x.challenge); assert.throws(() => stmt.run(randomUUID(), hash, x.challenge), /UNIQUE constraint failed/u);
+  } finally { x.dispose(); }
+});
+
+test("consume history linked to a different challenge is rejected even with a matching input hash", async () => {
+  const x = setup(); let anchor; const requestId = randomUUID();
+  try {
+    const other = x.fixture.issue(x.scope); const signedOther = x.signer.signObservation(x.scope, other, x.report); assert.equal(x.fixture.consume(signedOther), true);
+    x.fixture.db.prepare("INSERT INTO fixture_challenge_request VALUES(?,'consume',?,?,1)").run(requestId, fixtureRequestHash("consume", x.envelope), other);
+    anchor = await boot(x);
+    assert.deepEqual(await runWorker(x, anchor, "query_consume", x.envelope, requestId), { error: "ledger_integrity_invalid" });
+  } finally { if (anchor) await anchor.stop(); x.dispose(); }
+});
+
+test("recorded result remains inaccessible after supervisor loss, even after process restart", async () => {
+  const x = setup(); const anchor = await boot(x); let fresh; const requestId = randomUUID();
+  try {
+    const original = await runWorker(x, anchor, "request_issue", x.envelope, requestId); assert.equal(original.result.status, "recorded");
+    const before = challengeLedgerDigest(x.fixture.db); anchor.child.kill("SIGKILL"); await anchor.closed;
+    assert.deepEqual(await runWorker(x, anchor, "query_issue", x.envelope, requestId), { error: "anchor_state_unavailable_or_mismatch" });
+    fresh = makeSupervisor(); await fresh.ready;
+    assert.deepEqual(await runWorker(x, fresh, "query_issue", x.envelope, requestId), { error: "anchor_state_unavailable_or_mismatch" });
+    assert.equal(challengeLedgerDigest(x.fixture.db), before); assert.equal(requestCount(x), 1);
+  } finally { if (fresh) await fresh.stop(); x.dispose(); }
+});
+
+test("request record modified after anchoring blocks query before returning history", async () => {
+  const x = setup(); const anchor = await boot(x); const requestId = randomUUID();
+  try {
+    assert.equal((await runWorker(x, anchor, "request_issue", x.envelope, requestId)).result.status, "recorded");
+    x.fixture.db.exec("DROP TRIGGER fixture_challenge_request_no_update");
+    x.fixture.db.prepare("UPDATE fixture_challenge_request SET input_hash=? WHERE request_id=?").run("f".repeat(64), requestId);
+    assert.deepEqual(await runWorker(x, anchor, "query_issue", x.envelope, requestId), { error: "anchor_state_unavailable_or_mismatch" });
+    assert.deepEqual(await runWorker(x, anchor, "request_issue", x.envelope, randomUUID()), { error: "anchor_state_unavailable_or_mismatch" });
+  } finally { await anchor.stop(); x.dispose(); }
+});
+
+test("same-scope issue record swaps survive structural checks after malicious re-bootstrap", async () => {
+  const x = setup(); const anchor = await boot(x); let reset; const a = randomUUID(), b = randomUUID();
+  try {
+    const first = await runWorker(x, anchor, "request_issue", x.envelope, a); const second = await runWorker(x, anchor, "request_issue", x.envelope, b);
+    await anchor.stop(); x.fixture.db.exec("DROP TRIGGER fixture_challenge_request_no_update; DROP INDEX fixture_challenge_one_request_per_kind;");
+    x.fixture.db.prepare("UPDATE fixture_challenge_request SET challenge=CASE request_id WHEN ? THEN ? WHEN ? THEN ? ELSE challenge END WHERE request_id IN (?,?)").run(a, second.result.challenge, b, first.result.challenge, a, b);
+    reset = await boot(x);
+    const forged = await runWorker(x, reset, "query_issue", x.envelope, a);
+    assert.equal(forged.result.challenge, second.result.challenge); assert.notEqual(forged.result.challenge, first.result.challenge);
+    assert.equal(forged.result.outcome, "review_required");
+  } finally { if (reset) await reset.stop(); x.dispose(); }
+});
 
 for (const kind of ["issue", "consume"]) {
   test(`concurrent ${kind} requests with one ID return the same recorded result once`, async () => {

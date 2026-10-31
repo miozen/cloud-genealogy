@@ -23,3 +23,5 @@
 记录没有过期、撤销、容量清理或可信时间设计；测试规范化格式不是通用互操作协议。返回的 `not_found` 只表示当前匹配锚点的测试数据库未见该记录，不能证明请求从未发生。不能据此对远程资源执行任何操作。
 
 `npm run test:local-orphan-anchor` 运行本轮并发、冲突、响应丢失和回滚实验；challenge、signature、recovery 和 mock 备份测试保持独立。
+
+后续测试账本结构检查、唯一索引及同 scope 记录交换反例见 `P0-6-LOCAL-ORPHAN-LEDGER-INTEGRITY.md`。关联检查不能独立证明请求历史；旧入口及数据库所有者仍可能绕过。

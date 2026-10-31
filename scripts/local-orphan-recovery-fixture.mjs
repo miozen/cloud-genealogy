@@ -144,7 +144,7 @@ class Fixture {
       if (window.state === "completed") { this.validateTree(id, row); return { row, terminal: "preserved" }; }
       if (window.state !== "invalidated" || row.state === "preserved") throw new Error("window_not_recoverable");
       const present = entryExists(dir);
-      if (!present && row.state !== "cleaning") throw new Error("attempt_missing_without_cleanup_intent");
+      if (!present) throw new Error(row.state === "cleaning" ? "attempt_missing_requires_review" : "attempt_missing_without_cleanup_intent");
       if (present) this.validateTree(id, row);
       return { row, present };
     };
@@ -176,7 +176,7 @@ class Fixture {
           if (entryExists(dir)) throw new Error("cleanup_output_remains");
           removalConfirmed = true;
           afterRemove();
-        } else removalConfirmed = true; // prior durable intent and missing output
+        }
         this.db.prepare("UPDATE fixture_orphan_attempt SET state='cleaned' WHERE id=? AND state='cleaning'").run(id);
         this.audit(id, "cleanup_completed");
         return { state: "cleaned", alreadyApplied: false, remoteExecutionAvailable: false };

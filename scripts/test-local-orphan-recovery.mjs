@@ -1,4 +1,4 @@
-/* global process, setTimeout */
+/* global process, setTimeout, structuredClone */
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { spawn } from "node:child_process";
@@ -8,6 +8,7 @@ import { tmpdir } from "node:os";
 import path from "node:path";
 import { LocalBackupWindowFixture } from "./local-backup-window-fixture.mjs";
 import { createLocalOrphanFixture, reopenLocalOrphanFixture } from "./local-orphan-recovery-fixture.mjs";
+import { observeLocalOrphan, verifyLocalOrphanObservation } from "./local-orphan-review-fixture.mjs";
 
 function setup({ invalidated = true, stopped = true } = {}) {
   const supervisor = { stopped }; const { root, capability, fixture } = createLocalOrphanFixture(() => supervisor.stopped);
@@ -151,6 +152,52 @@ test("partial deletion losing ownership marker requires manual review", () => {
   } finally { x.dispose(); }
 });
 
+test("read-only observation of a missing marker is stable, verifiable and cannot authorize cleanup", () => {
+  const x = setup(); try {
+    unlinkSync(path.join(x.attempt.output, ".fixture-owner.json"));
+    const total = x.fixture.db.prepare("SELECT COUNT(*) AS n FROM fixture_orphan_audit").get().n;
+    x.fixture.db.exec("PRAGMA query_only=ON");
+    const report = observeLocalOrphan(x.fixture, x.attempt.id);
+    assert.equal(report.evidence.marker, "missing"); assert.equal(report.evidence.outcome, "review_required");
+    assert.equal(report.evidence.remoteExecutionAvailable, false); assert.deepEqual(observeLocalOrphan(x.fixture, x.attempt.id), report);
+    assert.equal(verifyLocalOrphanObservation(x.fixture, report), true);
+    const forged = structuredClone(report); forged.evidence.marker = "matches"; assert.equal(verifyLocalOrphanObservation(x.fixture, forged), false);
+    assert.equal(x.fixture.db.prepare("SELECT COUNT(*) AS n FROM fixture_orphan_audit").get().n, total);
+    assert.equal(x.fixture.record(x.attempt.id).state, "owned"); assert.equal(existsSync(x.attempt.output), true);
+    x.fixture.db.exec("PRAGMA query_only=OFF"); assert.throws(() => x.fixture.recover(x.attempt.id), /ENOENT/u);
+    const resumed = reopenLocalOrphanFixture(x.root, x.capability, () => true);
+    try { assert.equal(verifyLocalOrphanObservation(resumed, report), true); } finally { resumed.close(); }
+  } finally { x.fixture.db.exec("PRAGMA query_only=OFF"); x.dispose(); }
+});
+
+test("observation refuses traversal, ignores symlink targets, and detects stale evidence", () => {
+  const x = setup(); const outside = mkdtempSync(path.join(tmpdir(), "cg-review-outside-"));
+  try {
+    assert.throws(() => observeLocalOrphan(x.fixture, "../escape"), /invalid_attempt_id/u);
+    assert.throws(() => observeLocalOrphan(x.fixture, randomUUID()), /attempt_not_attested/u);
+    const before = observeLocalOrphan(x.fixture, x.attempt.id); assert.equal(before.evidence.marker, "matches");
+    renameSync(x.attempt.output, path.join(x.root, "displaced"));
+    writeFileSync(path.join(outside, "keep"), "untouched"); symlinkSync(outside, x.attempt.output);
+    assert.equal(verifyLocalOrphanObservation(x.fixture, before), false);
+    const changed = observeLocalOrphan(x.fixture, x.attempt.id);
+    assert.equal(changed.evidence.observedDirectory.type, "symlink"); assert.equal(changed.evidence.marker, "not_inspected");
+    assert.equal(readFileSync(path.join(outside, "keep"), "utf8"), "untouched");
+  } finally { x.dispose(); rmSync(outside, { recursive: true, force: true }); }
+});
+
+test("review does not follow a marker symlink and detects subsequent audit changes", () => {
+  const x = setup(); const outside = mkdtempSync(path.join(tmpdir(), "cg-review-marker-"));
+  try {
+    const marker = path.join(x.attempt.output, ".fixture-owner.json"); unlinkSync(marker);
+    const keep = path.join(outside, "keep"); writeFileSync(keep, "outside"); symlinkSync(keep, marker);
+    const report = observeLocalOrphan(x.fixture, x.attempt.id); assert.equal(report.evidence.marker, "invalid");
+    assert.equal(readFileSync(keep, "utf8"), "outside"); assert.equal(verifyLocalOrphanObservation(x.fixture, report), true);
+    x.fixture.tx(() => x.fixture.audit(x.attempt.id, "fixture_test_event"));
+    assert.equal(verifyLocalOrphanObservation(x.fixture, report), false);
+    assert.equal(observeLocalOrphan(x.fixture, x.attempt.id).evidence.audit.at(-1).action, "fixture_test_event");
+  } finally { x.dispose(); rmSync(outside, { recursive: true, force: true }); }
+});
+
 test("audit failure before cleanup leaves files and state unchanged", () => {
   const x = setup(); try {
     x.fixture.db.exec("CREATE TRIGGER inject_start_failure BEFORE INSERT ON fixture_orphan_audit WHEN NEW.action='cleanup_started' BEGIN SELECT RAISE(ABORT,'injected_audit_failure'); END;");
@@ -171,13 +218,13 @@ test("failure to audit a removal error preserves durable intent for retry", () =
   } finally { x.dispose(); }
 });
 
-test("audit failure after deletion leaves cleanup intent and retry records completion once", () => {
+test("audit failure after deletion leaves an ambiguous intent for review", () => {
   const x = setup(); try {
     x.fixture.db.exec("CREATE TRIGGER inject_finish_failure BEFORE INSERT ON fixture_orphan_audit WHEN NEW.action='cleanup_completed' BEGIN SELECT RAISE(ABORT,'injected_audit_failure'); END;");
     assert.throws(() => x.fixture.recover(x.attempt.id), /injected_audit_failure/u);
     assert.equal(existsSync(x.attempt.output), false); assert.equal(x.fixture.record(x.attempt.id).state, "cleaning");
-    x.fixture.db.exec("DROP TRIGGER inject_finish_failure"); assert.equal(x.fixture.recover(x.attempt.id).state, "cleaned");
-    assert.equal(audit(x.fixture, x.attempt.id, "cleanup_completed"), 1);
+    x.fixture.db.exec("DROP TRIGGER inject_finish_failure"); assert.throws(() => x.fixture.recover(x.attempt.id), /attempt_missing_requires_review/u);
+    assert.equal(audit(x.fixture, x.attempt.id, "cleanup_completed"), 0);
   } finally { x.dispose(); }
 });
 
@@ -189,7 +236,7 @@ test("reopen needs the original capability and private test root", () => {
   } finally { x.dispose(); }
 });
 
-test("SIGKILL after physical removal preserves intent; process restart finishes audit once", async () => {
+test("SIGKILL after physical removal preserves ambiguous intent and restart requires review", async () => {
   const x = setup(); const child = spawn(process.execPath, [path.resolve("scripts/local-orphan-cleanup-child.mjs")], { stdio: ["ignore", "pipe", "pipe", "ipc"] });
   let stdout = "", stderr = ""; child.stdout.on("data", (chunk) => { stdout += chunk.toString(); }); child.stderr.on("data", (chunk) => { stderr += chunk.toString(); });
   const closed = new Promise((resolve) => child.once("exit", (code, signal) => resolve({ code, signal })));
@@ -200,7 +247,7 @@ test("SIGKILL after physical removal preserves intent; process restart finishes 
     assert.equal(ready, true, `cleanup checkpoint not reached: ${stderr}`); child.kill("SIGKILL"); assert.equal((await closed).signal, "SIGKILL");
     assert.equal(existsSync(x.attempt.output), false); assert.equal(x.fixture.record(x.attempt.id).state, "cleaning");
     const resumed = reopenLocalOrphanFixture(x.root, x.capability, () => true);
-    try { assert.equal(resumed.recover(x.attempt.id).state, "cleaned"); assert.equal(resumed.recover(x.attempt.id).alreadyApplied, true); assert.equal(audit(resumed, x.attempt.id, "cleanup_completed"), 1); }
+    try { assert.throws(() => resumed.recover(x.attempt.id), /attempt_missing_requires_review/u); assert.equal(observeLocalOrphan(resumed, x.attempt.id).evidence.observedDirectory, null); assert.equal(audit(resumed, x.attempt.id, "cleanup_completed"), 0); }
     finally { resumed.close(); }
   } finally { if (child.exitCode === null && child.signalCode === null) { child.kill("SIGKILL"); await closed; } x.dispose(); }
 });
@@ -241,6 +288,28 @@ test("another process replacing the attempt while cleanup is paused cannot redir
     assert.equal(readFileSync(keep, "utf8"), "outside"); assert.equal(audit(x.fixture, x.attempt.id, "cleanup_completed"), 0);
     assert.equal(x.fixture.record(x.attempt.id).state, "failed");
   } finally { if (child.exitCode === null && child.signalCode === null) { child.kill("SIGKILL"); await closed; } x.dispose(); rmSync(outside, { recursive: true, force: true }); }
+});
+
+test("move followed by SIGKILL is ambiguous and read-only review never records successful cleanup", async () => {
+  const x = setup(); const child = spawn(process.execPath, [path.resolve("scripts/local-orphan-cleanup-child.mjs")], { stdio: ["ignore", "pipe", "pipe", "ipc"] });
+  let stdout = "", stderr = ""; child.stdout.on("data", (chunk) => { stdout += chunk.toString(); }); child.stderr.on("data", (chunk) => { stderr += chunk.toString(); });
+  const closed = new Promise((resolve) => child.once("exit", (code, signal) => resolve({ code, signal })));
+  try {
+    await new Promise((resolve, reject) => { child.once("message", resolve); child.once("error", reject); });
+    child.send({ root: x.root, capability: x.capability, attemptId: x.attempt.id, checkpoint: "before:.fixture-staging/counts.json" });
+    let ready = false; for (let i = 0; i < 300; i += 1) { if (stdout.includes("before:.fixture-staging/counts.json\n")) { ready = true; break; } if (child.exitCode !== null || child.signalCode !== null) break; await new Promise((resolve) => setTimeout(resolve, 20)); }
+    assert.equal(ready, true, `cleanup checkpoint not reached: ${stderr}`);
+    const displaced = path.join(x.root, "displaced"); renameSync(x.attempt.output, displaced);
+    child.kill("SIGKILL"); assert.equal((await closed).signal, "SIGKILL");
+    const resumed = reopenLocalOrphanFixture(x.root, x.capability, () => true);
+    try {
+      assert.throws(() => resumed.recover(x.attempt.id), /attempt_missing_requires_review/u);
+      const report = observeLocalOrphan(resumed, x.attempt.id);
+      assert.equal(report.evidence.recordedState, "cleaning"); assert.equal(report.evidence.observedDirectory, null); assert.equal(report.evidence.marker, "not_inspected");
+      assert.equal(verifyLocalOrphanObservation(resumed, report), true); assert.equal(audit(resumed, x.attempt.id, "cleanup_completed"), 0);
+      assert.equal(existsSync(path.join(displaced, ".fixture-owner.json")), true);
+    } finally { resumed.close(); }
+  } finally { if (child.exitCode === null && child.signalCode === null) { child.kill("SIGKILL"); await closed; } x.dispose(); }
 });
 
 test("competing recovery processes serialize and produce one completion audit", async () => {

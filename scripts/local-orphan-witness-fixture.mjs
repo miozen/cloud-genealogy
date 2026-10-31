@@ -24,6 +24,17 @@ async function witnessedLookup(fixture, anchor, descriptor) {
   if (!record && status !== "missing") throw new Error("witness_record_missing");
   return record && { ...record, historical: true, currentAvailability: "not_evaluated" };
 }
+// Aggregate observation only; no binding IDs or hashes are returned.
+export async function observeWitnessCapacity(fixture, anchor) {
+  fixture.db.exec("BEGIN IMMEDIATE");
+  try {
+    const answer = await anchor.capacity(challengeLedgerDigest(fixture.db));
+    const states = { uninitialized: ["unavailable"], ready: ["matches_current", "mismatch"], pending: ["matches_before", "matches_after", "mismatch"] };
+    const validCounts = answer?.state === "uninitialized" ? answer.used === null && answer.reserved === null && answer.remaining === null : Number.isSafeInteger(answer?.used) && answer.used >= 0 && answer.used <= 128 && [0, 1].includes(answer.reserved) && answer.remaining === 128 - answer.used - answer.reserved && answer.remaining >= 0 && (answer.state === "pending" || answer.reserved === 0);
+    if (!answer || !Object.hasOwn(states, answer.state) || !states[answer.state].includes(answer.comparison) || answer.limit !== 128 || !validCounts) throw new Error("witness_capacity_unavailable");
+    return { version: 1, fixtureOnly: true, supervisorState: answer.state, ledgerComparison: answer.comparison, used: answer.used, reserved: answer.reserved, limit: answer.limit, remaining: answer.remaining, outcome: "review_required", remoteExecutionAvailable: false };
+  } finally { fixture.db.exec("ROLLBACK"); }
+}
 export async function queryWitnessedFixtureRequest(fixture, anchor, requestId, kind, input) {
   const descriptor = fixtureRequestDescriptor(requestId, kind, input); fixture.db.exec("BEGIN IMMEDIATE");
   try { await anchored(fixture, anchor); return await witnessedLookup(fixture, anchor, descriptor) ?? { status: "not_found", outcome: "review_required", remoteExecutionAvailable: false }; }

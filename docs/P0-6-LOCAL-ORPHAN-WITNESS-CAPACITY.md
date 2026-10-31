@@ -23,3 +23,5 @@
 - SIGKILL 在测试可控边界触发，没有证明 SQLite COMMIT 指令内部崩溃、掉电、真实跨实例停写、直传 PUT 排空或 Cloudflare D1/R2 语义。
 
 `npm run test:local-orphan-anchor` 包含真实 128 条容量实验、近上限进程中断、只读容量证据及双份状态回退反例。所有结果仅供测试审阅，不授权远程执行。
+
+后续仅测试用途的严格保留门面和方案比较见 `P0-6-LOCAL-ORPHAN-RETENTION-POLICY.md`；该门面不能阻止旧入口绕过，且内存锁定不持久。

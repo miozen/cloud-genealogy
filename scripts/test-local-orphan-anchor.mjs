@@ -13,6 +13,7 @@ import { createLocalChallengeFixture, reopenLocalChallengeFixture } from "./loca
 import { challengeLedgerDigest } from "./local-orphan-anchor-fixture.mjs";
 import { fixtureRequestHash } from "./local-orphan-ledger-integrity-fixture.mjs";
 import { executeWitnessedFixtureRequest, fixtureBindingHash, observeWitnessCapacity, queryWitnessedFixtureRequest } from "./local-orphan-witness-fixture.mjs";
+import { createFixtureRetentionGate } from "./local-orphan-retention-gate-fixture.mjs";
 
 function setup() {
   const orphan = createLocalOrphanFixture(() => true); const model = new LocalBackupWindowFixture(orphan.fixture.db);
@@ -99,12 +100,98 @@ test("capacity 128: new issue and consume roll back while witnessed history rema
     assert.equal(x.fixture.db.prepare("SELECT COUNT(*) n FROM fixture_challenge_audit").get().n, auditBefore);
     assert.deepEqual(await queryWitnessedFixtureRequest(x.fixture, anchor, ids[0], "issue", x.scope), first);
     assert.deepEqual(await executeWitnessedFixtureRequest(x.fixture, anchor, ids[0], "issue", x.scope), first);
+    const gate = createFixtureRetentionGate(x.fixture, anchor);
+    assert.deepEqual(await gate.history(ids[0], "issue", x.scope), first); assert.deepEqual(await gate.issue(ids[0], x.scope), first);
+    assert.deepEqual(await gate.history(randomUUID(), "issue", x.scope), { status: "indeterminate", outcome: "review_required", remoteExecutionAvailable: false });
+    await assert.rejects(() => gate.issue(randomUUID(), x.scope), /retention_capacity_exhausted/u);
+    await assert.rejects(() => gate.consume(randomUUID(), x.envelope), /retention_capacity_exhausted/u);
+    assert.deepEqual(gate.state(), { latched: false, outcome: "review_required", remoteExecutionAvailable: false });
+    assert.equal(challengeLedgerDigest(x.fixture.db), before); assert.equal(requestCount(x), 128);
     assert.equal((await supervisor.rpc("status")).state, "ready");
     supervisor.child.kill("SIGKILL"); await supervisor.closed; replacement = makeSupervisor(); await replacement.ready;
+    await assert.rejects(() => gate.history(ids[0], "issue", x.scope), /retention_state_unavailable/u);
+    assert.equal(gate.state().latched, true);
     await assert.rejects(() => queryWitnessedFixtureRequest(x.fixture, directAnchor(replacement), ids[0], "issue", x.scope), /anchor_state_unavailable_or_mismatch/u);
     assert.deepEqual(await observeWitnessCapacity(x.fixture, directAnchor(replacement)), capacityEvidence("uninitialized", "unavailable", null, null));
     await assert.rejects(() => observeWitnessCapacity(x.fixture, anchor), /witness_capacity_unavailable/u);
   } finally { if (replacement) await replacement.stop(); await supervisor.stop(); x.dispose(); }
+});
+
+test("uninitialized supervisor latches test gate and later bootstrap cannot clear it", async () => {
+  const x = setup(); const supervisor = makeSupervisor(); await supervisor.ready; const gate = createFixtureRetentionGate(x.fixture, directAnchor(supervisor));
+  try {
+    const before = challengeLedgerDigest(x.fixture.db);
+    await assert.rejects(() => gate.issue(randomUUID(), x.scope), /retention_state_unavailable/u); assert.equal(gate.state().latched, true);
+    assert.equal((await supervisor.rpc("bootstrap", before)).ok, true);
+    await assert.rejects(() => gate.issue(randomUUID(), x.scope), /retention_gate_latched/u);
+    await assert.rejects(() => gate.history(randomUUID(), "issue", x.scope), /retention_gate_latched/u);
+    assert.equal(challengeLedgerDigest(x.fixture.db), before); assert.equal(requestCount(x), 0);
+  } finally { await supervisor.stop(); x.dispose(); }
+});
+
+test("healthy test gate still refuses unproven new request IDs", async () => {
+  const x = setup(); const supervisor = await boot(x); const gate = createFixtureRetentionGate(x.fixture, directAnchor(supervisor));
+  try {
+    const before = challengeLedgerDigest(x.fixture.db); const requestId = randomUUID();
+    assert.deepEqual(await gate.history(requestId, "issue", x.scope), { status: "indeterminate", outcome: "review_required", remoteExecutionAvailable: false });
+    await assert.rejects(() => gate.issue(requestId, x.scope), /retention_new_request_unproven/u);
+    await assert.rejects(() => gate.consume(randomUUID(), x.envelope), /retention_new_request_unproven/u);
+    assert.equal(gate.state().latched, false); assert.equal(challengeLedgerDigest(x.fixture.db), before); assert.equal(requestCount(x), 0);
+  } finally { await supervisor.stop(); x.dispose(); }
+});
+
+test("lost binding latches gate even if test supervisor later restores a matching value", async () => {
+  const x = setup(); const supervisor = await boot(x); const anchor = directAnchor(supervisor); const requestId = randomUUID();
+  try {
+    const issued = await executeWitnessedFixtureRequest(x.fixture, anchor, requestId, "issue", x.scope); const gate = createFixtureRetentionGate(x.fixture, anchor); const binding = fixtureBindingHash(x.fixture.db, requestId);
+    assert.equal((await supervisor.rpc("test_forget", requestId)).ok, true);
+    await assert.rejects(() => gate.history(requestId, "issue", x.scope), /witness_binding_missing/u); assert.equal(gate.state().latched, true);
+    assert.equal((await supervisor.rpc("test_force_binding", requestId, binding)).ok, true);
+    assert.deepEqual(await queryWitnessedFixtureRequest(x.fixture, anchor, requestId, "issue", x.scope), issued);
+    await assert.rejects(() => gate.history(requestId, "issue", x.scope), /retention_gate_latched/u);
+  } finally { await supervisor.stop(); x.dispose(); }
+});
+
+test("pending transition blocks and latches the test retention gate", async () => {
+  const x = setup(); const supervisor = await boot(x); const gate = createFixtureRetentionGate(x.fixture, directAnchor(supervisor)); const requestId = randomUUID();
+  const worker = makeWorker(x, supervisor, "before_commit", x.envelope, "witness_issue", x.scope, requestId);
+  try {
+    await worker.ready; worker.child.send({ kind: "go" }); await waitCheckpoint(worker, "before_commit"); worker.child.kill("SIGKILL"); await worker.closed;
+    await assert.rejects(() => gate.history(requestId, "issue", x.scope), /retention_state_unavailable/u); assert.equal(gate.state().latched, true);
+    await assert.rejects(() => gate.issue(randomUUID(), x.scope), /retention_gate_latched/u); assert.equal(requestCount(x), 0);
+  } finally { if (worker.child.exitCode === null && worker.child.signalCode === null) { worker.child.kill("SIGKILL"); await worker.closed; } await supervisor.stop(); x.dispose(); }
+});
+
+test("anchor changes after capacity observation latch the gate before history is returned", async () => {
+  const x = setup(); const supervisor = await boot(x); const original = directAnchor(supervisor); const requestId = randomUUID();
+  try {
+    await executeWitnessedFixtureRequest(x.fixture, original, requestId, "issue", x.scope); const before = challengeLedgerDigest(x.fixture.db);
+    const raced = { ...original, capacity: async (digest) => { const result = await original.capacity(digest); await supervisor.rpc("test_rebase", "f".repeat(64)); return result; } };
+    const gate = createFixtureRetentionGate(x.fixture, raced);
+    await assert.rejects(() => gate.history(requestId, "issue", x.scope), /anchor_state_unavailable_or_mismatch/u);
+    assert.equal(gate.state().latched, true); assert.equal(challengeLedgerDigest(x.fixture.db), before);
+    await assert.rejects(() => gate.history(requestId, "issue", x.scope), /retention_gate_latched/u);
+  } finally { await supervisor.stop(); x.dispose(); }
+});
+
+test("rollback plus unsafe rebase and gate recreation defeats volatile latch", async () => {
+  const x = setup(); const supervisor = await boot(x); const anchor = directAnchor(supervisor); const requestId = randomUUID(); const snapshot = path.join(x.root, "retention-old.sqlite");
+  try {
+    x.fixture.close(); copyFileSync(path.join(x.root, "challenge.sqlite"), snapshot); x.fixture = reopenLocalChallengeFixture(x.root, x.capability, x.signer.publicKey);
+    const first = await executeWitnessedFixtureRequest(x.fixture, anchor, requestId, "issue", x.scope);
+    assert.equal((await supervisor.rpc("test_forget", requestId)).ok, true);
+    x.fixture.close(); copyFileSync(snapshot, path.join(x.root, "challenge.sqlite")); x.fixture = reopenLocalChallengeFixture(x.root, x.capability, x.signer.publicKey);
+    const staleGate = createFixtureRetentionGate(x.fixture, anchor);
+    await assert.rejects(() => staleGate.history(requestId, "issue", x.scope), /retention_state_unavailable/u);
+    assert.equal(staleGate.state().latched, true); assert.equal((await supervisor.rpc("test_rebase", challengeLedgerDigest(x.fixture.db))).ok, true);
+    await assert.rejects(() => staleGate.issue(requestId, x.scope), /retention_gate_latched/u);
+    const recreated = createFixtureRetentionGate(x.fixture, anchor);
+    assert.deepEqual(await recreated.history(requestId, "issue", x.scope), { status: "indeterminate", outcome: "review_required", remoteExecutionAvailable: false });
+    await assert.rejects(() => recreated.issue(requestId, x.scope), /retention_new_request_unproven/u);
+    const repeated = await executeWitnessedFixtureRequest(x.fixture, anchor, requestId, "issue", x.scope); // Explicit legacy-path bypass counterexample.
+    assert.notEqual(repeated.challenge, first.challenge);
+    assert.equal(repeated.outcome, "review_required");
+  } finally { await supervisor.stop(); x.dispose(); }
 });
 
 for (const phase of ["before_commit", "after_commit"]) {

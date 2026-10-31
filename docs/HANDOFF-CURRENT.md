@@ -190,3 +190,7 @@ mock 编排已在导出前后分别校验模拟冻结/活动写入/待上传状�
 2026-10-31 本地挑战受控签发与 pending 观察：`npm run test:local-orphan-anchor` 新增受控签发、签发/消费竞争及签发提交前后强杀；pending 对账只返回 matches_before、matches_after 或 mismatch，始终 blocked、不会解除 pending。已测试提交后回退旧库仍可呈现 matches_before；旧 issue/consume、直接 SQL 和 bootstrap 依然可绕过实验守护。详见 `P0-6-LOCAL-ORPHAN-CONTROLLED-OPERATIONS.md`，无真实审批或远程执行。
 
 下一阶段 P0-6：本地挑战账本测试边界与可观测恢复策略。目标是评估旧入口与直接数据库访问的隔离方案，以及 pending 丢失确认后的只读证据，不宣称建立真实信任根。优先设计独占测试包装或独立进程封装、覆盖旧入口误用和 supervisor 响应丢失；前置为私有临时目录、可控监督器和无远程连接。验收包括试验调用路径可追踪、未知与模糊状态持续阻塞、不盲目 bootstrap、明确数据库所有者/监督器失陷仍可绕过，远程执行禁用。可直接交给 Codex：`继续 P0-6：评审 local-only 挑战账本旧入口隔离与 pending 响应丢失，增加进程故障和只读证据测试；不接入人工审批，保持远程执行禁用。`
+
+2026-10-31 本地账本门面及响应丢失增量：测试工作进程通过仅暴露 issue/consume/inspect/observe 的冻结门面调用受控函数；旧接口和直接 SQLite 仍可被同用户绕过。`npm run test:local-orphan-anchor` 增加 prepare/finalize 已处理后回复丢失、工作进程被杀与重复只读观察：prepare 丢失保持 pending；finalize 丢失可能 ready/匹配但调用方结果未知，签发重试可以再创建挑战。无持久请求 ID 或真正隔离，远程执行禁用。详见 `P0-6-LOCAL-ORPHAN-FACADE-RESPONSE-LOSS.md`。
+
+下一阶段 P0-6：本地挑战操作的幂等请求与结果未知模型。目标是在隔离夹具中评估签发/消费结果丢失后的请求身份绑定和重复查询，同时保持 pending 与不可信回滚时保守阻塞。优先设计请求 ID 与操作摘要绑定、持久结果查询、跨进程竞争和提交/确认响应丢失测试；前置为本机私有 SQLite、测试密钥和监督器，不能使用远程资源。验收要求同请求不产生重复挑战、不同内容复用 ID 被拒绝、未知结果不会被误认为授权，并明确整库回滚及监督器失陷仍不可防止，远程执行禁用。可直接交给 Codex：`继续 P0-6：设计并测试 local-only 挑战操作的幂等请求与结果丢失恢复，覆盖并发、冲突和回滚反例；不接入人工审批，保持远程执行禁用。`

@@ -178,3 +178,7 @@
 ## 2026-10-31：本地挑战受控签发与 pending 观察
 
 本地锚点夹具新增受控签发，与受控消费共用 SQLite 锁、监督器准备及提交后推进；受控签发/消费竞争和签发审计失败均有独立进程测试。pending 观察只比较当前摘要与 before/after，返回 blocked，不能解锁。测试展示提交后恢复旧库也能表现为 matches_before；旧 issue/consume、直接 SQL 和 bootstrap 仍可绕过或破坏实验边界，没有真实审批、可信锚点或远程执行。详见 `P0-6-LOCAL-ORPHAN-CONTROLLED-OPERATIONS.md`。
+
+## 2026-10-31：本地账本门面与响应丢失
+
+新增测试调用门面，仅暴露受控签发、消费和只读观察；没有 OS 权限隔离，旧代码及数据库访问仍可绕过。受控进程测试覆盖监督器处理 prepare/finalize 后回复丢失或工作进程被杀：prepare 丢失使 pending 阻塞，finalize 丢失可呈现 ready/匹配但调用方结果未知，签发重试仍可产生新挑战。只读证据不改变账本或解除 pending；未实现持久幂等查询、可信锚点、审批或远程执行。详见 `P0-6-LOCAL-ORPHAN-FACADE-RESPONSE-LOSS.md`。

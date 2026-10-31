@@ -12,6 +12,11 @@ process.on("message", ({ id, kind, before, after }) => {
     const comparison = pending === null ? "unavailable" : before === pending.before ? "matches_before" : before === pending.after ? "matches_after" : "mismatch";
     process.send({ id, comparison }); return;
   }
+  else if (kind === "observe") {
+    const state = current === null ? "uninitialized" : pending ? "pending" : "ready";
+    const comparison = state === "uninitialized" ? "unavailable" : state === "pending" ? before === pending.before ? "matches_before" : before === pending.after ? "matches_after" : "mismatch" : before === current ? "matches_current" : "mismatch";
+    process.send({ id, state, comparison }); return;
+  }
   else if (kind === "status") { process.send({ id, state: current === null ? "uninitialized" : pending ? "pending" : "ready" }); return; }
   process.send({ id, ok });
 });

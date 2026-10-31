@@ -30,3 +30,5 @@
 测试覆盖受控签发与消费的提交前后 SIGKILL、完整提交后回退、pending 时未知直接写入、重复对账及无锚点拒绝；测试还保留无锚点消费和重新 bootstrap 造成重放的反例。监督器内存丢失、监督器/IPC 被伪造、数据库和锚点一起回滚、数据库所有者恶意写入、最终系统调用竞态均无法由本夹具解决。审计触发器及本地摘要不构成真实信任根；未测试掉电或 SQLite COMMIT 指令内部崩溃。
 
 `npm run test:local-orphan-anchor` 执行本轮实验；challenge、signature、recovery 和 mock 备份回归仍应运行。
+
+后续测试门面及 prepare/finalize 回复丢失实验见 `P0-6-LOCAL-ORPHAN-FACADE-RESPONSE-LOSS.md`。门面不是权限隔离，finalize 回复丢失后 ready 匹配也不证明调用方已经得到结果。

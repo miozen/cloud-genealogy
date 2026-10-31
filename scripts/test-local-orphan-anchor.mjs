@@ -43,7 +43,12 @@ function makeWorker(x, supervisor, phase = "", envelope = x.envelope, operation 
   child.on("exit", () => readyResolve());
   child.on("message", async (message) => {
     if (message.kind === "ready") readyResolve();
-    if (message.kind === "rpc") { const result = await supervisor.rpc(message.method, message.before, message.after); if (child.connected) child.send({ kind: "reply", id: message.id, ok: result.ok === true, comparison: result.comparison }, () => {}); }
+    if (message.kind === "rpc") {
+      const result = await supervisor.rpc(message.method, message.before, message.after);
+      if (phase === `drop_${message.method}`) return;
+      if (phase === `kill_${message.method}`) { child.kill("SIGKILL"); return; }
+      if (child.connected) child.send({ kind: "reply", id: message.id, ok: result.ok === true, comparison: result.comparison, state: result.state }, () => {});
+    }
   });
   child.send({ kind: "init", root: x.root, capability: x.capability, publicKey: x.signer.publicKey.export({ format: "pem", type: "spki" }), envelope, phase, operation, scope });
   return { child, ready, closed, get stdout() { return stdout; }, get stderr() { return stderr; } };
@@ -60,6 +65,75 @@ async function waitCheckpoint(worker, phase) {
 }
 async function boot(x) { const anchor = makeSupervisor(); await anchor.ready; assert.equal((await anchor.rpc("bootstrap", challengeLedgerDigest(x.fixture.db))).ok, true); return anchor; }
 function consumed(x) { return x.fixture.db.prepare("SELECT consumed FROM fixture_challenge WHERE challenge=?").get(x.challenge).consumed; }
+const evidence = (supervisorState, ledgerComparison) => ({ version: 1, fixtureOnly: true, supervisorState, ledgerComparison, outcome: "review_required", remoteExecutionAvailable: false });
+
+test("test worker exposes only the guarded facade, rejects legacy operations and hides raw db", async () => {
+  const x = setup(); const anchor = await boot(x);
+  try {
+    assert.deepEqual(await runWorker(x, anchor, "surface"), { keys: ["consume", "inspect", "issue", "observe"], hasDb: false, frozen: true, nullPrototype: true });
+    assert.deepEqual(await runWorker(x, anchor, "legacy_issue"), { error: "operation_unknown" });
+    assert.deepEqual(await runWorker(x, anchor, "db"), { error: "operation_unknown" });
+    assert.equal(consumed(x), 0);
+  } finally { await anchor.stop(); x.dispose(); }
+});
+
+test("read-only state evidence is repeatable and never changes ledger or supervisor state", async () => {
+  const x = setup(); const anchor = await boot(x);
+  try {
+    const digest = challengeLedgerDigest(x.fixture.db);
+    assert.deepEqual(await runWorker(x, anchor, "observe"), { evidence: evidence("ready", "matches_current") });
+    assert.deepEqual(await runWorker(x, anchor, "observe"), { evidence: evidence("ready", "matches_current") });
+    assert.equal(challengeLedgerDigest(x.fixture.db), digest); assert.equal((await anchor.rpc("status")).state, "ready");
+    x.fixture.issue(x.scope);
+    assert.deepEqual(await runWorker(x, anchor, "observe"), { evidence: evidence("ready", "mismatch") });
+    assert.deepEqual(await runWorker(x, anchor), { error: "anchor_state_unavailable_or_mismatch" });
+  } finally { await anchor.stop(); x.dispose(); }
+});
+
+test("missing supervisor state is visible but a lost connection cannot produce evidence", async () => {
+  const x = setup(); const anchor = makeSupervisor(); await anchor.ready;
+  try {
+    assert.deepEqual(await runWorker(x, anchor, "observe"), { evidence: evidence("uninitialized", "unavailable") });
+    anchor.child.kill("SIGKILL"); await anchor.closed;
+    assert.deepEqual(await runWorker(x, anchor, "observe"), { error: "anchor_observation_unavailable" });
+    assert.equal(consumed(x), 0);
+  } finally { x.dispose(); }
+});
+
+for (const operation of ["consume", "issue"]) {
+  for (const stage of ["prepare", "finalize"]) {
+    test(`${operation} loses ${stage} acknowledgement: outcome remains unproven and evidence is read-only`, async () => {
+      const x = setup(); const anchor = await boot(x); const worker = makeWorker(x, anchor, `drop_${stage}`, x.envelope, operation);
+      try {
+        await worker.ready; worker.child.send({ kind: "go" }); const result = await worker.closed;
+        assert.equal(result.code, 0, result.stderr); assert.deepEqual(JSON.parse(result.stdout), { error: `anchor_${stage}_refused` });
+        const expectedState = stage === "prepare" ? evidence("pending", "matches_before") : evidence("ready", "matches_current");
+        const digest = challengeLedgerDigest(x.fixture.db);
+        assert.deepEqual(await runWorker(x, anchor, "observe"), { evidence: expectedState });
+        assert.deepEqual(await runWorker(x, anchor, "observe"), { evidence: expectedState });
+        assert.equal(challengeLedgerDigest(x.fixture.db), digest);
+        assert.equal(consumed(x), operation === "consume" && stage === "finalize" ? 1 : 0);
+        assert.equal(x.fixture.db.prepare("SELECT COUNT(*) n FROM fixture_challenge").get().n, operation === "issue" && stage === "finalize" ? 2 : 1);
+        if (stage === "prepare") assert.deepEqual(await runWorker(x, anchor), { error: "anchor_state_unavailable_or_mismatch" });
+        else if (operation === "consume") assert.deepEqual(await runWorker(x, anchor), { accepted: false });
+        else assert.match((await runWorker(x, anchor, "issue")).challenge, /^[0-9a-f]{64}$/u); // Unknown result does not block a new issue.
+      } finally { if (worker.child.exitCode === null && worker.child.signalCode === null) { worker.child.kill("SIGKILL"); await worker.closed; } await anchor.stop(); x.dispose(); }
+    });
+  }
+}
+
+for (const stage of ["prepare", "finalize"]) {
+  test(`worker killed after supervisor ${stage} but before reply leaves conservative evidence`, async () => {
+    const x = setup(); const anchor = await boot(x); const worker = makeWorker(x, anchor, `kill_${stage}`);
+    try {
+      await worker.ready; worker.child.send({ kind: "go" }); assert.equal((await worker.closed).signal, "SIGKILL");
+      const expectedState = stage === "prepare" ? evidence("pending", "matches_before") : evidence("ready", "matches_current");
+      assert.deepEqual(await runWorker(x, anchor, "observe"), { evidence: expectedState });
+      assert.equal(consumed(x), stage === "prepare" ? 0 : 1);
+      assert.deepEqual(await runWorker(x, anchor), stage === "prepare" ? { error: "anchor_state_unavailable_or_mismatch" } : { accepted: false });
+    } finally { if (worker.child.exitCode === null && worker.child.signalCode === null) { worker.child.kill("SIGKILL"); await worker.closed; } await anchor.stop(); x.dispose(); }
+  });
+}
 
 test("supervisor survives worker restart and accepts the signed challenge at most once", async () => {
   const x = setup(); const anchor = await boot(x);

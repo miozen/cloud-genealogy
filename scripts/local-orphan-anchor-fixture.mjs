@@ -66,3 +66,14 @@ export async function inspectFixturePending(fixture, anchor) {
     return { comparison, disposition: "blocked", remoteExecutionAvailable: false };
   } finally { fixture.db.exec("ROLLBACK"); }
 }
+
+// Observation only. It does not establish operation outcome or clear pending.
+export async function observeFixtureState(fixture, anchor) {
+  fixture.db.exec("BEGIN IMMEDIATE");
+  try {
+    const answer = await anchor.observe(challengeLedgerDigest(fixture.db));
+    const valid = answer && ((answer.state === "ready" && ["matches_current", "mismatch"].includes(answer.comparison)) || (answer.state === "pending" && ["matches_before", "matches_after", "mismatch"].includes(answer.comparison)) || (answer.state === "uninitialized" && answer.comparison === "unavailable"));
+    if (!valid) throw new Error("anchor_observation_unavailable");
+    return { version: 1, fixtureOnly: true, supervisorState: answer.state, ledgerComparison: answer.comparison, outcome: "review_required", remoteExecutionAvailable: false };
+  } finally { fixture.db.exec("ROLLBACK"); }
+}

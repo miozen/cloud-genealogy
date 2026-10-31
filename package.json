@@ -22,6 +22,7 @@
     "test:local-orphan-recovery": "node scripts/test-local-orphan-recovery.mjs",
     "test:local-orphan-signature": "node scripts/test-local-orphan-signature.mjs",
     "test:local-orphan-challenge": "node scripts/test-local-orphan-challenge.mjs",
+    "test:local-orphan-anchor": "node scripts/test-local-orphan-anchor.mjs",
     "test:local-core-model": "bash scripts/test-local-core-model.sh",
     "test:local-chart-scale": "bash scripts/test-local-chart-scale.sh",
     "test:local-backup-recovery": "bash scripts/test-local-backup-recovery.sh",

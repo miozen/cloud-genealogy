@@ -21,3 +21,5 @@
 ## 测试
 
 `npm run test:local-orphan-challenge` 验证真实本地审阅报告签名、失败不消费、capability/公钥/路径拒绝、审计失败回滚、两个独立进程竞争、无效签名与有效签名竞争、提交前后强杀、重开以及旧快照重放反例。夹具审计仅供测试，不进入应用 readiness。
+
+后续独立监督器摘要实验见 `P0-6-LOCAL-ORPHAN-ANCHOR-FIXTURE.md`；实验路径不会自动守护本夹具的原有 `issue` / `consume`，也不是可信防回滚机制。
